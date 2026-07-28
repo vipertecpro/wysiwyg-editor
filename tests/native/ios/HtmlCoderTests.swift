@@ -287,6 +287,33 @@ do {
     }
 }
 
+print("Validation — checked natively before a save is allowed")
+do {
+    let doc = HtmlCoder.parse("<p>one two three</p>")
+    let checks: [(String, [String: Any], Bool)] = [
+        ("no rules always passes", [:], true),
+        ("minWords blocks a short document", ["minWords": 10], false),
+        ("minWords passes when met", ["minWords": 3], true),
+        ("maxWords blocks a long document", ["maxWords": 2], false),
+        ("requiredBlocks blocks a missing type", ["requiredBlocks": ["image"]], false),
+    ]
+    for (label, rules, shouldPass) in checks {
+        let problem = validateDocument(doc, rules)
+        if (problem == nil) == shouldPass { print("  ✓ \(label)") }
+        else { failures += 1; print("  ✗ \(label) -> \(problem ?? "nil")") }
+    }
+
+    var image = WysiwygBlock(type: "image", runs: [])
+    image.attrs["src"] = "a.jpg"
+    if validateDocument(doc + [image], ["requiredBlocks": ["image"]]) == nil,
+       validateDocument(doc + [image, image], ["maxImages": 1]) != nil {
+        print("  ✓ image rules count image blocks")
+    } else {
+        failures += 1
+        print("  ✗ image rules count image blocks")
+    }
+}
+
 print("")
 if failures == 0 {
     print("All HtmlCoder tests passed.")

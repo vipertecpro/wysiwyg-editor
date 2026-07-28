@@ -103,7 +103,7 @@ auth, endpoints and error handling.
 When the user picks media, the editor:
 
 1. inserts the block immediately with a local `src` and a fresh `uploadId`,
-2. emits `MediaAttached { uploadId, localPath, mime, blockId }`,
+2. emits `MediaRequested { kind }`, and the host calls `insertMedia()`,
 3. renders that block in a pending state until told otherwise.
 
 The host uploads however it likes, then calls back:
@@ -119,7 +119,7 @@ implementation living inside an editor.
 
 ## Auto-theming
 
-The editor derives its palette and typography from the host's theme tokens
+The editor derives its palette from the host's theme tokens
 (`Nativephp\NativeUi\Theme::all()`) and re-derives them on `AppearanceChanged`,
 instead of requiring the four explicit hex values v1 asked for.
 
@@ -142,6 +142,9 @@ without a round-trip to PHP:
 ```
 
 Save is blocked while a rule fails, with the failing rule shown in the editor.
+Rules are evaluated NATIVELY, so a failing document never makes the round-trip
+to PHP just to be rejected. The messages are currently English-only — see the
+localization note in the README.
 
 ## Counts
 
@@ -153,6 +156,7 @@ a bulleted list does not inflate the count with bullets.
 
 Drafts, scheduled publishing, auto-save persistence and background upload
 queues are **host application concerns**, not editor features. The editor
-gives you the seams — an `onChange` event to debounce into auto-save, and the
-upload contract above — and stays out of your database and your scheduler.
+gives you the seams — the upload contract above, and (NOT YET BUILT) an
+`onChange` event to debounce into auto-save — and stays out of your database
+and your scheduler.
 Owning those would turn a modular editor into a CMS.

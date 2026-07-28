@@ -340,6 +340,37 @@ fun main() {
         else { failures++; println("  ✗ an empty document still offers somewhere to type") }
     }
 
+    println("Validation — checked natively before a save is allowed")
+    run {
+        val doc = HtmlCoder.parse("<p>one two three</p>")
+        val checks = listOf(
+            Triple("no rules always passes", emptyMap<String, Any>(), true),
+            Triple("minWords blocks a short document", mapOf<String, Any>("minWords" to 10), false),
+            Triple("minWords passes when met", mapOf<String, Any>("minWords" to 3), true),
+            Triple("maxWords blocks a long document", mapOf<String, Any>("maxWords" to 2), false),
+            Triple(
+                "requiredBlocks blocks a missing type",
+                mapOf<String, Any>("requiredBlocks" to listOf("image")), false,
+            ),
+        )
+        for ((label, rules, shouldPass) in checks) {
+            val problem = validateDocument(doc, rules)
+            if ((problem == null) == shouldPass) println("  ✓ $label")
+            else { failures++; println("  ✗ $label -> $problem") }
+        }
+
+        val image = WysiwygBlock("image").apply { attrs["src"] = "a.jpg" }
+        val withImage = doc + image
+        if (validateDocument(withImage, mapOf("requiredBlocks" to listOf("image"))) == null &&
+            validateDocument(withImage + image, mapOf("maxImages" to 1)) != null
+        ) {
+            println("  ✓ image rules count image blocks")
+        } else {
+            failures++
+            println("  ✗ image rules count image blocks")
+        }
+    }
+
     println("")
     if (failures == 0) {
         println("All HtmlCoder tests passed.")

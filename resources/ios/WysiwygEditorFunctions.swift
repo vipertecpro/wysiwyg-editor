@@ -187,6 +187,7 @@ struct WysiwygConfig {
     let placeholder: String
     let maxLength: Int
     let counts: [String]
+    let validation: [String: Any]
     let theme: WysiwygTheme
     let id: String?
 
@@ -198,6 +199,7 @@ struct WysiwygConfig {
         placeholder = p["placeholder"] as? String ?? ""
         maxLength = max(0, (p["maxLength"] as? NSNumber)?.intValue ?? 0)
         counts = p["counts"] as? [String] ?? []
+        validation = p["validation"] as? [String: Any] ?? [:]
         theme = WysiwygTheme(p["theme"] as? [String: Any],
                              light: p["themeLight"] as? [String: Any],
                              dark: p["themeDark"] as? [String: Any])
@@ -899,6 +901,35 @@ func countWords(_ blocks: [WysiwygBlock]) -> Int {
             .split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" || $0 == "\u{00A0}" })
             .count
     }
+}
+
+/// Declarative save-time rules. Evaluated natively so a failing document never
+/// makes the round-trip to PHP just to be rejected.
+///
+/// Returns the first violation as a human-readable message, or nil when the
+/// document may be saved.
+func validateDocument(_ blocks: [WysiwygBlock], _ rules: [String: Any]) -> String? {
+    if rules.isEmpty { return nil }
+
+    let words = countWords(blocks)
+
+    if let min = (rules["minWords"] as? NSNumber)?.intValue, min > 0, words < min {
+        return "At least \(min) words needed — you have \(words)."
+    }
+    if let max = (rules["maxWords"] as? NSNumber)?.intValue, max > 0, words > max {
+        return "At most \(max) words allowed — you have \(words)."
+    }
+    if let max = (rules["maxImages"] as? NSNumber)?.intValue {
+        let images = blocks.filter { $0.type == "image" }.count
+        if images > max { return "At most \(max) image(s) allowed — you have \(images)." }
+    }
+    if let required = rules["requiredBlocks"] as? [String] {
+        for type in required where !blocks.contains(where: { $0.type == type }) {
+            return "This needs at least one \(type)."
+        }
+    }
+
+    return nil
 }
 
 // MARK: - Segments
@@ -2273,10 +2304,11 @@ private enum PaletteKind { case text, highlight }
 private struct EditorScreen: View {
     @ObservedObject var document: WysiwygDocumentModel
     let onCancel: () -> Void
-    let onSave: (String, String) -> Void
+    let onSave: (String, String, String) -> Void
 
     @StateObject private var keyboard = KeyboardWatcher()
     @State private var showDiscard = false
+    @State private var validationMessage: String?
     @State private var palette: PaletteKind?
     /// Measured height per TEXT segment — each editor grows to fit.
     @State private var heights: [Int: CGFloat] = [:]
@@ -2324,6 +2356,14 @@ private struct EditorScreen: View {
         } message: {
             Text("Your edits will be lost.")
         }
+        .alert("Cannot save yet", isPresented: Binding(
+            get: { validationMessage != nil },
+            set: { if !$0 { validationMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { validationMessage = nil }
+        } message: {
+            Text(validationMessage ?? "")
+        }
     }
 
     @ViewBuilder
@@ -2357,8 +2397,15 @@ private struct EditorScreen: View {
                     .foregroundColor(theme.textColor)
                 Spacer()
                 Button("Save") {
-                    let out = document.serialize()
-                    onSave(out.html, out.text)
+                    let blocks = document.blocks()
+                    if let problem = validateDocument(blocks, document.config.validation) {
+                        // Blocked natively — a failing document never makes the
+                        // round-trip to PHP just to be rejected.
+                        validationMessage = problem
+                        return
+                    }
+                    let out = HtmlCoder.emit(blocks)
+                    onSave(out.html, out.text, JsonCoder.encode(blocks))
                 }
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(theme.accentColor)
@@ -2793,8 +2840,11 @@ final class WysiwygEditorPresenter {
             onCancel: { [weak self] in
                 self?.finish(WysiwygEvents.cancelled, ["id": config.id])
             },
-            onSave: { [weak self] html, text in
-                self?.finish(WysiwygEvents.saved, ["html": html, "text": text, "id": config.id])
+            onSave: { [weak self] html, text, json in
+                self?.finish(
+                    WysiwygEvents.saved,
+                    ["html": html, "text": text, "json": json, "id": config.id]
+                )
             }
         ))
         hosting = host

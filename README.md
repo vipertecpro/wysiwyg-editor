@@ -103,6 +103,7 @@ All options are optional:
 | `placeholder` | string | `''` | Shown while the editor is empty |
 | `maxLength` | int | `0` | Max **plain-text** length; `0` = unlimited. Shows a live counter |
 | `counts` | list | `[]` | Live readouts: `characters`, `words`, `readingTime` (200 wpm, min 1) |
+| `validation` | array | `[]` | Save-time rules: `minWords`, `maxWords`, `requiredBlocks`, `maxImages` |
 | `theme` | array | `[]` | Hex colors: `background`, `text`, `accent` (Save button), `highlight` (active states). Omitted keys fall back to the host app's theme, then to system-adaptive defaults |
 | `id` | string | `null` | Echoed back on the result event, to correlate concurrent editors |
 
@@ -157,12 +158,34 @@ WysiwygEditor::open($html, [
 
 | Event | Payload | When |
 | --- | --- | --- |
-| `Vipertecpro\WysiwygEditor\Events\ContentSaved` | `string $html`, `string $text`, `?string $id` | User taps **Save** |
+| `Vipertecpro\WysiwygEditor\Events\ContentSaved` | `string $html`, `string $text`, `string $json`, `?string $id` | User taps **Save** |
 | `Vipertecpro\WysiwygEditor\Events\EditCancelled` | `?string $id` | User cancels / backs out (a discard confirm guards unsaved changes) |
 
 `$html` is the document in the normalised form below; `$text` is the same
 content as plain text — marks stripped, one line per block — handy for
 excerpts, search indexing and length checks.
+
+`$json` is the **fidelity format**: the block document with block ids, poll
+options and upload state, none of which HTML can represent. Store `$json` when
+you need loss-free round-trips (media, polls, embeds); store `$html` to render.
+For a text-only document the two carry the same information.
+
+### Validation
+
+```php
+WysiwygEditor::open($html, [
+    'validation' => [
+        'minWords' => 50,
+        'maxWords' => 2000,
+        'requiredBlocks' => ['image'],   // must contain at least one image
+        'maxImages' => 10,
+    ],
+]);
+```
+
+Checked natively when the user taps Save — a failing document never makes the
+round-trip to PHP just to be rejected. **The messages are English-only today;
+the editor is not yet localized.**
 
 ## HTML contract
 

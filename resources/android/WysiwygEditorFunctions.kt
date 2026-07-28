@@ -140,6 +140,7 @@ object WysiwygEditorFunctions {
         val placeholder: String,
         val maxLength: Int,
         val counts: List<String>,
+        val validation: Map<String, Any>,
         val theme: EditorTheme,
         val id: String?,
     )
@@ -205,6 +206,7 @@ object WysiwygEditorFunctions {
                 placeholder = parameters["placeholder"] as? String ?: "",
                 maxLength = ((parameters["maxLength"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
                 counts = parseStringList(parameters["counts"]),
+                validation = parseValidation(parameters["validation"]),
                 theme = parseTheme(parameters["theme"]).copy(
                     light = parseThemeMap(parameters["themeLight"]),
                     dark = parseThemeMap(parameters["themeDark"]),
@@ -278,10 +280,10 @@ object WysiwygEditorFunctions {
                 }
             }
 
-            fun finishSaved(html: String, text: String) {
+            fun finishSaved(html: String, text: String, json: String) {
                 if (finished.compareAndSet(false, true)) {
                     cleanup()
-                    dispatch(EVENT_SAVED, config.id, html, text)
+                    dispatch(EVENT_SAVED, config.id, html, text, json)
                 }
             }
 
@@ -319,8 +321,20 @@ object WysiwygEditorFunctions {
                     onDocumentChanged = { documentRef.value = it },
                     onCancel = { attemptCancel() },
                     onSave = {
-                        val (html, text) = HtmlCoder.serialize(documentRef.value)
-                        finishSaved(html, text)
+                        val document = documentRef.value
+                        val problem = validateDocument(document, config.validation)
+                        if (problem != null) {
+                            // Blocked natively — a failing document never makes
+                            // the round-trip to PHP just to be rejected.
+                            AlertDialog.Builder(activity)
+                                .setTitle("Cannot save yet")
+                                .setMessage(problem)
+                                .setPositiveButton("OK", null)
+                                .show()
+                        } else {
+                            val (html, text) = HtmlCoder.serialize(document)
+                            finishSaved(html, text, JsonCoder.encode(document))
+                        }
                     },
                     onRequestMedia = { kind -> requestMedia(kind, config.id) },
                 )
@@ -329,10 +343,17 @@ object WysiwygEditorFunctions {
             root.addView(view)
         }
 
-        private fun dispatch(event: String, id: String?, html: String? = null, text: String? = null) {
+        private fun dispatch(
+            event: String,
+            id: String?,
+            html: String? = null,
+            text: String? = null,
+            json: String? = null,
+        ) {
             val payload = JSONObject().apply {
                 html?.let { put("html", it) }
                 text?.let { put("text", it) }
+                json?.let { put("json", it) }
                 id?.let { put("id", it) }
             }
             NativeActionCoordinator.dispatchEvent(activity, event, payload.toString())
@@ -355,6 +376,20 @@ private fun parseStringList(any: Any?): List<String> = when (any) {
     is List<*> -> any.mapNotNull { it as? String }
     is JSONArray -> (0 until any.length()).mapNotNull { i -> any.optString(i).takeIf { it.isNotEmpty() } }
     else -> emptyList()
+}
+
+private fun parseValidation(any: Any?): Map<String, Any> = when (any) {
+    is Map<*, *> -> any.entries.mapNotNull { (k, v) ->
+        if (k is String && v != null) k to v else null
+    }.toMap()
+    is JSONObject -> any.keys().asSequence().mapNotNull { key ->
+        when (val value = any.opt(key)) {
+            is JSONArray -> key to (0 until value.length()).mapNotNull { value.optString(it).takeIf(String::isNotEmpty) }
+            null -> null
+            else -> key to value
+        }
+    }.toMap()
+    else -> emptyMap()
 }
 
 private fun parseTheme(any: Any?): WysiwygEditorFunctions.EditorTheme = when (any) {
@@ -1377,6 +1412,44 @@ internal class JsonScanner(private val src: String) {
         while (i < src.length && (src[i].isDigit() || src[i] in "-+.eE")) i++
         return src.substring(start, i).toDoubleOrNull() ?: 0.0
     }
+}
+
+/** Whitespace-delimited words across the whole document. */
+internal fun countWords(blocks: List<WysiwygBlock>): Int =
+    blocks.sumOf { block ->
+        block.plainText.split(' ', '\n', '\t', '\u00A0')
+            .count { it.isNotBlank() }
+    }
+
+
+/**
+ * Declarative save-time rules. Evaluated natively so a failing document never
+ * makes the round-trip to PHP just to be rejected.
+ *
+ * Returns the first violation as a human-readable message, or null when the
+ * document may be saved.
+ */
+internal fun validateDocument(blocks: List<WysiwygBlock>, rules: Map<String, Any>): String? {
+    if (rules.isEmpty()) return null
+
+    val words = countWords(blocks)
+
+    (rules["minWords"] as? Number)?.toInt()?.let { min ->
+        if (min > 0 && words < min) return "At least $min words needed — you have $words."
+    }
+    (rules["maxWords"] as? Number)?.toInt()?.let { max ->
+        if (max > 0 && words > max) return "At most $max words allowed — you have $words."
+    }
+    (rules["maxImages"] as? Number)?.toInt()?.let { max ->
+        val images = blocks.count { it.type == "image" }
+        if (images > max) return "At most $max image(s) allowed — you have $images."
+    }
+    @Suppress("UNCHECKED_CAST")
+    (rules["requiredBlocks"] as? List<String>)?.forEach { type ->
+        if (blocks.none { it.type == type }) return "This needs at least one $type."
+    }
+
+    return null
 }
 
 // ── Segments ────────────────────────────────────────────────────────────────
@@ -2845,13 +2918,6 @@ internal fun EditorScreen(
         )
     }
 }
-
-/** Whitespace-delimited words across the whole document. */
-internal fun countWords(blocks: List<WysiwygBlock>): Int =
-    blocks.sumOf { block ->
-        block.plainText.split(' ', '\n', '\t', '\u00A0')
-            .count { it.isNotBlank() }
-    }
 
 /**
  * The readout beneath the content. `maxLength` always shows as "n/max" (it is

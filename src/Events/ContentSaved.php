@@ -15,6 +15,10 @@ use Illuminate\Queue\SerializesModels;
  *
  * @property string $html The edited content as clean, normalised HTML.
  * @property string $text The same content as plain text (marks stripped, one line per block).
+ * @property string $json The FIDELITY format — the block document including
+ *                        block ids, poll options and upload state, none of
+ *                        which HTML can carry. Store this when you need
+ *                        loss-free round-trips; store `$html` to render.
  * @property ?string $id The correlation id passed to WysiwygEditor::open(), if any.
  */
 class ContentSaved
@@ -24,6 +28,7 @@ class ContentSaved
     public function __construct(
         public string $html,
         public string $text = '',
+        public string $json = '',
         public ?string $id = null,
     ) {}
 }

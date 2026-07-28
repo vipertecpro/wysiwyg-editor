@@ -89,6 +89,15 @@ class WysiwygEditor
     public const AVAILABLE_COUNTS = ['characters', 'words', 'readingTime'];
 
     /**
+     * Declarative rules checked natively before a save is allowed.
+     *
+     *  - minWords / maxWords: on the plain-text rendition
+     *  - requiredBlocks:      block types the document must contain, e.g. ['image']
+     *  - maxImages:           cap on image blocks
+     */
+    public const VALIDATION_RULES = ['minWords', 'maxWords', 'requiredBlocks', 'maxImages'];
+
+    /**
      * How the host application's NativeUI theme tokens map onto the editor's
      * four surfaces. Consulted per colour scheme so the editor follows the app
      * into dark mode without the developer configuring anything.
@@ -116,6 +125,7 @@ class WysiwygEditor
      *     placeholder?: string,
      *     maxLength?: int,
      *     counts?: list<string>,
+     *     validation?: array<string, mixed>,
      *     theme?: array<string, string>,
      *     id?: string|null
      * }  $options  Editor configuration. `preset` picks a built-in toolbar
@@ -236,6 +246,7 @@ class WysiwygEditor
             'placeholder' => (string) ($options['placeholder'] ?? ''),
             'maxLength' => max(0, (int) ($options['maxLength'] ?? 0)),
             'counts' => $this->resolveCounts($options['counts'] ?? []),
+            'validation' => $this->resolveValidation($options['validation'] ?? []),
             // Explicit overrides win; the two scheme maps below are the host
             // app's own theme, so an unconfigured editor still looks native.
             'theme' => $this->resolveTheme($options['theme'] ?? []),
@@ -254,6 +265,38 @@ class WysiwygEditor
     protected function resolveCounts(array $counts): array
     {
         return array_values(array_intersect(self::AVAILABLE_COUNTS, $counts));
+    }
+
+    /**
+     * Keep only known validation rules, coerced to the shapes the native side
+     * expects. Unknown rules are dropped rather than silently ignored later.
+     *
+     * @param  array<string, mixed>  $rules
+     * @return array<string, mixed>
+     */
+    protected function resolveValidation(array $rules): array
+    {
+        $clean = [];
+
+        foreach (self::VALIDATION_RULES as $rule) {
+            if (! array_key_exists($rule, $rules)) {
+                continue;
+            }
+
+            if ($rule === 'requiredBlocks') {
+                $types = array_values(array_filter((array) $rules[$rule], 'is_string'));
+
+                if ($types !== []) {
+                    $clean[$rule] = $types;
+                }
+
+                continue;
+            }
+
+            $clean[$rule] = max(0, (int) $rules[$rule]);
+        }
+
+        return $clean;
     }
 
     /**
