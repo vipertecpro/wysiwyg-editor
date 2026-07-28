@@ -1,0 +1,48 @@
+{
+    "name": "vipertecpro/wysiwyg-editor",
+    "description": "A fully native, hand-written WYSIWYG rich text editor for NativePHP Mobile — write with a real native toolbar, get clean HTML back.",
+    "type": "nativephp-plugin",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "vipertecpro",
+            "email": "vipertecpro@gmail.com"
+        }
+    ],
+    "homepage": "https://github.com/vipertecpro/wysiwyg-editor",
+    "keywords": ["nativephp", "mobile", "wysiwyg", "editor", "rich-text", "html", "text"],
+    "require": {
+        "php": "^8.4",
+        "nativephp/mobile": "^3.0|^4.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Vipertecpro\\WysiwygEditor\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Vipertecpro\\WysiwygEditor\\WysiwygEditorServiceProvider"
+            ]
+        },
+        "nativephp": {
+            "manifest": "nativephp.json"
+        }
+    },
+    "require-dev": {
+        "pestphp/pest": "^3.0"
+    },
+    "scripts": {
+        "test": "pest",
+        "test:ios": [
+            "tests/native/ios/typecheck.sh",
+            "tests/native/ios/run.sh"
+        ]
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    }
+}

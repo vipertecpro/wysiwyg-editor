@@ -1,0 +1,1796 @@
+import Foundation
+import UIKit
+import SwiftUI
+
+// =============================================================================
+// WysiwygEditor — iOS native WYSIWYG rich text editor
+// =============================================================================
+//
+// A fully-native rich text editor (SwiftUI + UITextView/TextKit 1):
+//   • Inline marks — bold, italic, underline, strikethrough, inline code,
+//     links, text color, highlight.
+//   • Blocks — paragraph, H1–H3, bullet / ordered lists, blockquote.
+//   • Configurable toolbar (ordered subset), undo/redo, placeholder,
+//     live character counter with maxLength, host-app theme overrides.
+//
+// Layout (top → bottom): [Cancel | title | Save] · editable content area ·
+// optional counter · (color palette row) · horizontally scrolling formatting
+// toolbar pinned above the keyboard. On "Save" the document is serialized to
+// the normalised HTML contract shared with the Android implementation and
+// returned via the `ContentSaved` event; cancelling (with a discard confirm
+// when edited) fires `EditCancelled`. Exactly one terminal event per session.
+//
+// The HTML parser/serializer is hand-written (no NSAttributedString(html:))
+// so both platforms emit byte-identical HTML for the same document.
+// =============================================================================
+
+// MARK: - Bridge function
+
+enum WysiwygEditorFunctions {
+    class Open: BridgeFunction {
+        func execute(parameters: [String: Any]) throws -> [String: Any] {
+            let config = WysiwygConfig(parameters)
+            DispatchQueue.main.async { WysiwygEditorPresenter.shared.present(config: config) }
+            return [:]
+        }
+    }
+}
+
+// MARK: - Events
+
+private enum WysiwygEvents {
+    static let saved = "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved"
+    static let cancelled = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
+}
+
+// MARK: - Theme
+
+/// Host-app theme overrides. Every color is optional: `nil` falls back to the
+/// editor's built-in system-adaptive default, so the editor blends into ANY
+/// app — the host decides, not the plugin.
+struct WysiwygTheme {
+    let background: UIColor?   // editor screen background
+    let text: UIColor?         // content text, titles, inactive icons
+    let accent: UIColor?       // the Save button / caret / link display
+    let highlight: UIColor?    // active toolbar buttons
+
+    init(_ p: [String: Any]?) {
+        background = UIColor(wysiwygHex: p?["background"] as? String)
+        text = UIColor(wysiwygHex: p?["text"] as? String)
+        accent = UIColor(wysiwygHex: p?["accent"] as? String)
+        highlight = UIColor(wysiwygHex: p?["highlight"] as? String)
+    }
+
+    // Resolved SwiftUI colors with the classic defaults.
+    var backgroundColor: Color { background.map(Color.init) ?? Color(.systemBackground) }
+    var textColor: Color { text.map(Color.init) ?? .primary }
+    var accentColor: Color { accent.map(Color.init) ?? Color(red: 0.92, green: 0.47, blue: 0.18) }
+    var highlightColor: Color { highlight.map(Color.init) ?? .green }
+
+    // Resolved UIKit colors for the text engine.
+    var backgroundUIColor: UIColor { background ?? .systemBackground }
+    var textUIColor: UIColor { text ?? .label }
+    var secondaryTextUIColor: UIColor { text?.withAlphaComponent(0.6) ?? .secondaryLabel }
+    var accentUIColor: UIColor { accent ?? UIColor(red: 0.92, green: 0.47, blue: 0.18, alpha: 1) }
+}
+
+extension UIColor {
+    /// #RGB / #RRGGBB / #RRGGBBAA (leading '#' optional). Returns nil on junk.
+    /// (Named `wysiwygHex` — not plain `hex` — so this file can coexist with
+    /// sibling plugins that ship their own UIColor hex initializer.)
+    convenience init?(wysiwygHex: String?) {
+        guard var s = wysiwygHex?.trimmingCharacters(in: .whitespaces), !s.isEmpty else { return nil }
+        if s.hasPrefix("#") { s.removeFirst() }
+        if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
+        guard s.count == 6 || s.count == 8, let v = UInt64(s, radix: 16) else { return nil }
+        let hasAlpha = s.count == 8
+        let divisor: CGFloat = 255
+        let r = CGFloat((v >> (hasAlpha ? 24 : 16)) & 0xFF) / divisor
+        let g = CGFloat((v >> (hasAlpha ? 16 : 8)) & 0xFF) / divisor
+        let b = CGFloat((v >> (hasAlpha ? 8 : 0)) & 0xFF) / divisor
+        let a = hasAlpha ? CGFloat(v & 0xFF) / divisor : 1
+        self.init(red: r, green: g, blue: b, alpha: a)
+    }
+}
+
+// MARK: - Config
+
+struct WysiwygConfig {
+    /// The `full` preset order — also the whitelist for the toolbar option.
+    static let allTools = [
+        "bold", "italic", "underline", "strikethrough", "h1", "h2", "h3",
+        "bulletList", "orderedList", "blockquote", "link", "code",
+        "textColor", "highlight", "clearFormat",
+    ]
+
+    let content: String
+    let toolbar: [String]
+    let title: String
+    let placeholder: String
+    let maxLength: Int
+    let theme: WysiwygTheme
+    let id: String?
+
+    init(_ p: [String: Any]) {
+        content = p["content"] as? String ?? ""
+        let requested = (p["toolbar"] as? [String])?.filter { Self.allTools.contains($0) } ?? Self.allTools
+        toolbar = requested.isEmpty ? Self.allTools : requested
+        title = p["title"] as? String ?? ""
+        placeholder = p["placeholder"] as? String ?? ""
+        maxLength = max(0, (p["maxLength"] as? NSNumber)?.intValue ?? 0)
+        theme = WysiwygTheme(p["theme"] as? [String: Any])
+        id = p["id"] as? String
+    }
+}
+
+// MARK: - Custom attribute keys
+
+/// Custom attributes are the single source of truth for serialization — fonts
+/// and colors are derived DISPLAY, never parsed back (so an h1's intrinsic
+/// bold is never confused with a <strong> mark, and URL round-trips are exact).
+extension NSAttributedString.Key {
+    /// Paragraph block type on EVERY character of the paragraph (incl. its
+    /// trailing newline): "p" | "h1" | "h2" | "h3" | "ul" | "ol" | "blockquote".
+    static let wysiwygBlock = NSAttributedString.Key("wysiwygBlock")
+    /// Marks the non-content list-marker prefix ("•\u{00A0}" / "1.\u{00A0}").
+    static let wysiwygMarker = NSAttributedString.Key("wysiwygMarker")
+    static let wysiwygBold = NSAttributedString.Key("wysiwygBold")
+    static let wysiwygItalic = NSAttributedString.Key("wysiwygItalic")
+    static let wysiwygCode = NSAttributedString.Key("wysiwygCode")
+    /// The href string, verbatim (a URL object would re-encode it).
+    static let wysiwygLink = NSAttributedString.Key("wysiwygLink")
+    /// "#RRGGBB" uppercase — explicit text color (only when user-chosen).
+    static let wysiwygTextColor = NSAttributedString.Key("wysiwygTextColor")
+    /// "#RRGGBB" uppercase — highlight background color.
+    static let wysiwygHighlight = NSAttributedString.Key("wysiwygHighlight")
+}
+
+// MARK: - Document model
+
+/// The inline marks of one run of text, in a serialization-friendly form.
+/// Nesting order (outermost → innermost) is fixed by the HTML contract:
+/// link → color → highlight → strong → em → u → s → code.
+struct MarkSet: Equatable {
+    var link: String?
+    var color: String?      // "#RRGGBB"
+    var highlight: String?  // "#RRGGBB"
+    var bold = false
+    var italic = false
+    var underline = false
+    var strike = false
+    var code = false
+
+    var isPlain: Bool { self == MarkSet() }
+}
+
+struct WysiwygRun: Equatable {
+    var text: String
+    var marks: MarkSet
+}
+
+/// One block (paragraph / heading / list item / blockquote) of the document.
+struct WysiwygBlock {
+    var type: String        // p | h1 | h2 | h3 | ul | ol | blockquote
+    var runs: [WysiwygRun]
+
+    var isEmpty: Bool { runs.allSatisfy { $0.text.isEmpty } }
+    var plainText: String { runs.map(\.text).joined() }
+
+    static let knownTypes: Set<String> = ["p", "h1", "h2", "h3", "ul", "ol", "blockquote"]
+}
+
+// MARK: - HTML coder
+
+/// Hand-written HTML parser + serializer implementing the plugin's normative
+/// HTML contract (see README). Both directions are pure functions over
+/// `[WysiwygBlock]` so the round-trip is deterministic and identical to the
+/// Android implementation. NSAttributedString(html:) is deliberately NOT used.
+enum HtmlCoder {
+
+    // MARK: parse
+
+    /// Tolerant scanner: aliases normalised (b→strong, i→em, del/strike→s,
+    /// div→p, h4-h6→h3), <br> splits blocks, unknown tags ignored (text kept),
+    /// <script>/<style> skipped entirely, inter-block whitespace ignored,
+    /// entities decoded, unsafe link schemes dropped (text kept).
+    static func parse(_ html: String) -> [WysiwygBlock] {
+        var blocks: [WysiwygBlock] = []
+        var current: WysiwygBlock?
+        var openedByBr = false
+        var listStack: [String] = []
+        var markStack: [(tag: String, apply: (inout MarkSet) -> Void)] = []
+        let chars = Array(html)
+        let n = chars.count
+        var i = 0
+
+        func marksNow() -> MarkSet {
+            var m = MarkSet()
+            for entry in markStack { entry.apply(&m) }
+            return m
+        }
+        // Unconditionally append the open block (used by <br>, which WANTS
+        // intentional empty blocks committed).
+        func commit() {
+            if let block = current { blocks.append(block) }
+            current = nil
+            openedByBr = false
+        }
+        // Close the open block, dropping a still-empty block that only exists
+        // because a <br> split opened it (so `<p>x<br></p>` is one block, not two).
+        func closeBlock() {
+            if openedByBr, current?.isEmpty ?? true { current = nil; openedByBr = false }
+            else { commit() }
+        }
+        func open(_ type: String, byBr: Bool = false) {
+            closeBlock()
+            current = WysiwygBlock(type: type, runs: [])
+            openedByBr = byBr
+        }
+        func appendText(_ decoded: String) {
+            let text = collapseWhitespace(decoded)
+            if current == nil {
+                // No open block: whitespace between blocks is ignored; real
+                // text opens an implicit paragraph (tolerance).
+                if text.allSatisfy({ $0 == " " || $0.isWhitespace }) { return }
+                open("p")
+            }
+            guard !text.isEmpty else { return }
+            let marks = marksNow()
+            if var last = current!.runs.last, last.marks == marks {
+                last.text += text
+                current!.runs[current!.runs.count - 1] = last
+            } else {
+                current!.runs.append(WysiwygRun(text: text, marks: marks))
+            }
+        }
+        /// Skip everything up to (and including) `</tag ...>` — for script/style.
+        func skipRawContent(_ tag: String) {
+            let closing = Array("</" + tag)
+            while i < n {
+                if chars[i] == "<" {
+                    var match = true
+                    for (k, c) in closing.enumerated() {
+                        let idx = i + k
+                        if idx >= n || String(chars[idx]).lowercased() != String(c) { match = false; break }
+                    }
+                    if match {
+                        var j = i
+                        while j < n, chars[j] != ">" { j += 1 }
+                        i = min(j + 1, n)
+                        return
+                    }
+                }
+                i += 1
+            }
+        }
+        func canonicalInline(_ name: String) -> String {
+            switch name {
+            case "b": return "strong"
+            case "i": return "em"
+            case "del", "strike": return "s"
+            default: return name
+            }
+        }
+        func handleOpen(_ name: String, _ attrText: String) {
+            switch name {
+            case "script", "style":
+                skipRawContent(name)
+            case "br":
+                let type = current?.type ?? "p"
+                commit()
+                open(type, byBr: true)
+            case "p", "div":
+                open("p")
+            case "h1":
+                open("h1")
+            case "h2":
+                open("h2")
+            case "h3", "h4", "h5", "h6":
+                open("h3")
+            case "blockquote":
+                open("blockquote")
+            case "ul":
+                closeBlock()
+                listStack.append("ul")
+            case "ol":
+                closeBlock()
+                listStack.append("ol")
+            case "li":
+                open(listStack.last ?? "p")
+            case "a":
+                let href = allowedHref(attributes(from: attrText)["href"])
+                markStack.append((tag: "a", apply: { if let href { $0.link = href } }))
+            case "span":
+                let color = cssColor("color", in: attributes(from: attrText)["style"])
+                markStack.append((tag: "span", apply: { if let color { $0.color = color } }))
+            case "mark":
+                let bg = cssColor("background-color", in: attributes(from: attrText)["style"]) ?? "#FDE68A"
+                markStack.append((tag: "mark", apply: { $0.highlight = bg }))
+            case "strong", "b":
+                markStack.append((tag: "strong", apply: { $0.bold = true }))
+            case "em", "i":
+                markStack.append((tag: "em", apply: { $0.italic = true }))
+            case "u":
+                markStack.append((tag: "u", apply: { $0.underline = true }))
+            case "s", "del", "strike":
+                markStack.append((tag: "s", apply: { $0.strike = true }))
+            case "code":
+                markStack.append((tag: "code", apply: { $0.code = true }))
+            default:
+                break // unknown tag: ignored, its text content still flows through
+            }
+        }
+        func handleClose(_ name: String) {
+            switch name {
+            case "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li":
+                closeBlock()
+            case "ul", "ol":
+                closeBlock()
+                if !listStack.isEmpty { listStack.removeLast() }
+            case "a", "span", "mark", "strong", "b", "em", "i", "u", "s", "del", "strike", "code":
+                let canonical = canonicalInline(name)
+                if let idx = markStack.lastIndex(where: { $0.tag == canonical }) {
+                    markStack.remove(at: idx)
+                }
+            default:
+                break
+            }
+        }
+        func handleTag(_ raw: String) {
+            var body = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty else { return }
+            let isClose = body.hasPrefix("/")
+            if isClose { body.removeFirst() }
+            if body.hasSuffix("/") { body.removeLast() }
+            let bodyChars = Array(body)
+            var k = 0
+            while k < bodyChars.count, bodyChars[k].isLetter || bodyChars[k].isNumber { k += 1 }
+            guard k > 0 else { return }
+            let name = String(bodyChars[0..<k]).lowercased()
+            let attrText = String(bodyChars[k...])
+            if isClose { handleClose(name) } else { handleOpen(name, attrText) }
+        }
+
+        while i < n {
+            if chars[i] == "<" {
+                if i + 3 < n, chars[i + 1] == "!", chars[i + 2] == "-", chars[i + 3] == "-" {
+                    // <!-- comment -->
+                    var j = i + 4
+                    while j + 2 < n, !(chars[j] == "-" && chars[j + 1] == "-" && chars[j + 2] == ">") { j += 1 }
+                    i = j + 2 < n ? j + 3 : n
+                    continue
+                }
+                if i + 1 < n, chars[i + 1] == "!" {
+                    // <!doctype …>
+                    var j = i
+                    while j < n, chars[j] != ">" { j += 1 }
+                    i = min(j + 1, n)
+                    continue
+                }
+                // find the tag-closing '>' (quote-aware for attribute values)
+                var j = i + 1
+                var quote: Character?
+                while j < n {
+                    let c = chars[j]
+                    if let q = quote { if c == q { quote = nil } }
+                    else if c == "\"" || c == "'" { quote = c }
+                    else if c == ">" { break }
+                    j += 1
+                }
+                guard j < n else {
+                    appendText(decodeEntities(String(chars[i...])))
+                    break
+                }
+                let inner = String(chars[(i + 1)..<j])
+                i = j + 1
+                handleTag(inner)
+            } else {
+                var j = i
+                while j < n, chars[j] != "<" { j += 1 }
+                appendText(decodeEntities(String(chars[i..<j])))
+                i = j
+            }
+        }
+        closeBlock()
+        return blocks
+    }
+
+    // MARK: serialize
+
+    /// Emit the normalised HTML + the plain-text rendition. `<p><br></p>` for
+    /// empty paragraphs, consecutive list items grouped into ONE <ul>/<ol>,
+    /// no whitespace between blocks — and a document that is nothing but a
+    /// single empty paragraph IS the empty document ("", "").
+    static func emit(_ blocks: [WysiwygBlock]) -> (html: String, text: String) {
+        if blocks.isEmpty { return ("", "") }
+        if blocks.count == 1, blocks[0].type == "p", blocks[0].isEmpty { return ("", "") }
+
+        var html = ""
+        var lines: [String] = []
+        var i = 0
+        while i < blocks.count {
+            let block = blocks[i]
+            switch block.type {
+            case "ul", "ol":
+                let type = block.type
+                html += "<\(type)>"
+                var itemNumber = 0
+                var j = i
+                while j < blocks.count, blocks[j].type == type {
+                    itemNumber += 1
+                    html += "<li>" + inlineHtml(blocks[j].runs) + "</li>"
+                    lines.append((type == "ul" ? "- " : "\(itemNumber). ") + blocks[j].plainText)
+                    j += 1
+                }
+                html += "</\(type)>"
+                i = j
+            default:
+                let tag = WysiwygBlock.knownTypes.contains(block.type) ? block.type : "p"
+                if tag == "p", block.isEmpty {
+                    html += "<p><br></p>"
+                } else {
+                    html += "<\(tag)>" + inlineHtml(block.runs) + "</\(tag)>"
+                }
+                lines.append(block.plainText)
+                i += 1
+            }
+        }
+        return (html, lines.joined(separator: "\n"))
+    }
+
+    /// Merge adjacent identical runs, then wrap them in the fixed nesting
+    /// order (link → color → highlight → strong → em → u → s → code) by
+    /// recursively grouping consecutive runs that share the mark at each level.
+    static func inlineHtml(_ runs: [WysiwygRun]) -> String {
+        var merged: [WysiwygRun] = []
+        for run in runs where !run.text.isEmpty {
+            if var last = merged.last, last.marks == run.marks {
+                last.text += run.text
+                merged[merged.count - 1] = last
+            } else {
+                merged.append(run)
+            }
+        }
+        return emitLevel(merged[...], level: 0)
+    }
+
+    /// The mark examined at each nesting level; nil means "not marked".
+    private static func markValue(_ m: MarkSet, level: Int) -> String? {
+        switch level {
+        case 0: return m.link
+        case 1: return m.color
+        case 2: return m.highlight
+        case 3: return m.bold ? "1" : nil
+        case 4: return m.italic ? "1" : nil
+        case 5: return m.underline ? "1" : nil
+        case 6: return m.strike ? "1" : nil
+        default: return m.code ? "1" : nil
+        }
+    }
+
+    private static func emitLevel(_ runs: ArraySlice<WysiwygRun>, level: Int) -> String {
+        if level >= 8 {
+            return runs.map { escapeText($0.text) }.joined()
+        }
+        var out = ""
+        var i = runs.startIndex
+        while i < runs.endIndex {
+            let value = markValue(runs[i].marks, level: level)
+            var j = i + 1
+            while j < runs.endIndex, markValue(runs[j].marks, level: level) == value { j += 1 }
+            let inner = emitLevel(runs[i..<j], level: level + 1)
+            if let value {
+                switch level {
+                case 0: out += "<a href=\"\(escapeAttr(value))\">\(inner)</a>"
+                case 1: out += "<span style=\"color:\(value)\">\(inner)</span>"
+                case 2: out += "<mark style=\"background-color:\(value)\">\(inner)</mark>"
+                case 3: out += "<strong>\(inner)</strong>"
+                case 4: out += "<em>\(inner)</em>"
+                case 5: out += "<u>\(inner)</u>"
+                case 6: out += "<s>\(inner)</s>"
+                default: out += "<code>\(inner)</code>"
+                }
+            } else {
+                out += inner
+            }
+            i = j
+        }
+        return out
+    }
+
+    // MARK: text helpers
+
+    static func escapeText(_ s: String) -> String {
+        var out = ""
+        for c in s {
+            switch c {
+            case "&": out += "&amp;"
+            case "<": out += "&lt;"
+            case ">": out += "&gt;"
+            default: out.append(c)
+            }
+        }
+        return out
+    }
+
+    static func escapeAttr(_ s: String) -> String {
+        var out = ""
+        for c in s {
+            switch c {
+            case "&": out += "&amp;"
+            case "<": out += "&lt;"
+            case ">": out += "&gt;"
+            case "\"": out += "&quot;"
+            default: out.append(c)
+            }
+        }
+        return out
+    }
+
+    static func decodeEntities(_ s: String) -> String {
+        guard s.contains("&") else { return s }
+        let chars = Array(s)
+        var out = ""
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "&" {
+                // entities are short — look ahead a bounded distance for ';'
+                var semi = -1
+                var j = i + 1
+                while j < chars.count, j - i <= 10 {
+                    if chars[j] == ";" { semi = j; break }
+                    j += 1
+                }
+                if semi > i + 1, let decoded = decodeEntity(String(chars[(i + 1)..<semi])) {
+                    out += decoded
+                    i = semi + 1
+                    continue
+                }
+            }
+            out.append(chars[i])
+            i += 1
+        }
+        return out
+    }
+
+    private static func decodeEntity(_ name: String) -> String? {
+        switch name.lowercased() {
+        case "amp": return "&"
+        case "lt": return "<"
+        case "gt": return ">"
+        case "quot": return "\""
+        case "apos": return "'"
+        case "nbsp": return "\u{00A0}"
+        default: break
+        }
+        if name.hasPrefix("#") {
+            let digits = String(name.dropFirst())
+            let value: UInt32?
+            if digits.lowercased().hasPrefix("x") { value = UInt32(digits.dropFirst(), radix: 16) }
+            else { value = UInt32(digits) }
+            if let value, let scalar = Unicode.Scalar(value) { return String(Character(scalar)) }
+        }
+        return nil
+    }
+
+    /// Runs of whitespace that contain a line break / tab (i.e. source-code
+    /// formatting) collapse to one space; runs of plain spaces are preserved
+    /// so user-typed content round-trips verbatim.
+    static func collapseWhitespace(_ s: String) -> String {
+        guard s.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\t" }) else { return s }
+        var out = ""
+        var run = ""
+        var runHasBreak = false
+        for c in s {
+            if c == " " || c == "\n" || c == "\r" || c == "\t" {
+                run.append(c)
+                if c != " " { runHasBreak = true }
+            } else {
+                if !run.isEmpty { out += runHasBreak ? " " : run; run = ""; runHasBreak = false }
+                out.append(c)
+            }
+        }
+        if !run.isEmpty { out += runHasBreak ? " " : run }
+        return out
+    }
+
+    /// Very small attribute scanner: name[=value] pairs, quoted or bare.
+    static func attributes(from s: String) -> [String: String] {
+        var result: [String: String] = [:]
+        let chars = Array(s)
+        let n = chars.count
+        var i = 0
+        while i < n {
+            while i < n, chars[i].isWhitespace { i += 1 }
+            var name = ""
+            while i < n, !chars[i].isWhitespace, chars[i] != "=" { name.append(chars[i]); i += 1 }
+            while i < n, chars[i].isWhitespace { i += 1 }
+            var value = ""
+            if i < n, chars[i] == "=" {
+                i += 1
+                while i < n, chars[i].isWhitespace { i += 1 }
+                if i < n, chars[i] == "\"" || chars[i] == "'" {
+                    let q = chars[i]
+                    i += 1
+                    while i < n, chars[i] != q { value.append(chars[i]); i += 1 }
+                    if i < n { i += 1 }
+                } else {
+                    while i < n, !chars[i].isWhitespace { value.append(chars[i]); i += 1 }
+                }
+            }
+            if !name.isEmpty { result[name.lowercased()] = decodeEntities(value) }
+        }
+        return result
+    }
+
+    /// Extract `property: #hex` from an inline style, canonicalised to
+    /// uppercase 6-digit "#RRGGBB" (3-digit shorthand expanded). Nil otherwise.
+    static func cssColor(_ property: String, in style: String?) -> String? {
+        guard let style else { return nil }
+        for declaration in style.split(separator: ";") {
+            let parts = declaration.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
+            guard key == property else { continue }
+            return normalizeHex(parts[1].trimmingCharacters(in: .whitespaces))
+        }
+        return nil
+    }
+
+    /// "#abc" / "#AABBCC" → "#AABBCC". Nil for anything else.
+    static func normalizeHex(_ raw: String) -> String? {
+        var s = raw.trimmingCharacters(in: .whitespaces)
+        guard s.hasPrefix("#") else { return nil }
+        s.removeFirst()
+        if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
+        guard s.count == 6, s.allSatisfy({ $0.isHexDigit }) else { return nil }
+        return "#" + s.uppercased()
+    }
+
+    /// Keep only http(s)/mailto/tel hrefs (input tolerance — no auto-fixing).
+    static func allowedHref(_ href: String?) -> String? {
+        guard let href = href?.trimmingCharacters(in: .whitespacesAndNewlines), !href.isEmpty else { return nil }
+        let lower = href.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://")
+            || lower.hasPrefix("mailto:") || lower.hasPrefix("tel:") {
+            return href
+        }
+        return nil
+    }
+}
+
+// MARK: - Styler
+
+/// Maps the abstract document model to themed NSAttributedString display
+/// attributes and back. Display (fonts, colors) is always DERIVED from the
+/// custom keys — never the reverse — so serialization is exact.
+struct WysiwygStyler {
+    let theme: WysiwygTheme
+
+    static let ulMarker = "\u{2022}\u{00A0}"                       // "•<nbsp>"
+    static func olMarker(_ n: Int) -> String { "\(n).\u{00A0}" }   // "1.<nbsp>"
+
+    // MARK: fonts & paragraph styles
+
+    /// Typography: body 16 · h1 28 bold · h2 22 bold · h3 18 semibold.
+    func fontSize(for block: String) -> CGFloat {
+        switch block {
+        case "h1": return 28
+        case "h2": return 22
+        case "h3": return 18
+        default: return 16
+        }
+    }
+
+    func font(block: String, marks: MarkSet) -> UIFont {
+        let size = fontSize(for: block)
+        if marks.code {
+            return UIFont.monospacedSystemFont(ofSize: size - 1, weight: .regular)
+        }
+        let weight: UIFont.Weight
+        switch block {
+        case "h1", "h2": weight = .bold
+        case "h3": weight = marks.bold ? .bold : .semibold
+        default: weight = marks.bold ? .bold : .regular
+        }
+        var font = UIFont.systemFont(ofSize: size, weight: weight)
+        if marks.italic || block == "blockquote" {
+            let traits = font.fontDescriptor.symbolicTraits.union(.traitItalic)
+            if let descriptor = font.fontDescriptor.withSymbolicTraits(traits) {
+                font = UIFont(descriptor: descriptor, size: size)
+            }
+        }
+        return font
+    }
+
+    func paragraphStyle(for block: String) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = 6
+        switch block {
+        case "ul", "ol":
+            style.headIndent = 22 // wrapped lines align past the marker
+        case "blockquote":
+            style.firstLineHeadIndent = 16
+            style.headIndent = 16
+        case "h1", "h2", "h3":
+            style.paragraphSpacingBefore = 4
+        default:
+            break
+        }
+        return style
+    }
+
+    // MARK: model → attributes
+
+    func attributes(block: String, marks: MarkSet) -> [NSAttributedString.Key: Any] {
+        var a: [NSAttributedString.Key: Any] = [:]
+        a[.wysiwygBlock] = block
+        a[.font] = font(block: block, marks: marks)
+        a[.paragraphStyle] = paragraphStyle(for: block)
+        if let hex = marks.color, let color = UIColor(wysiwygHex: hex) {
+            a[.wysiwygTextColor] = hex
+            a[.foregroundColor] = color
+        } else if block == "blockquote" {
+            a[.foregroundColor] = theme.secondaryTextUIColor
+        } else {
+            a[.foregroundColor] = theme.textUIColor
+        }
+        if marks.bold { a[.wysiwygBold] = true }
+        if marks.italic { a[.wysiwygItalic] = true }
+        if marks.underline { a[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+        if marks.strike { a[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
+        if marks.code {
+            a[.wysiwygCode] = true
+            a[.backgroundColor] = theme.textUIColor.withAlphaComponent(0.08)
+        }
+        if let hex = marks.highlight {
+            a[.wysiwygHighlight] = hex
+            if let color = UIColor(wysiwygHex: hex) {
+                a[.backgroundColor] = color.withAlphaComponent(0.55) // keeps text legible on dark themes
+            }
+        }
+        if let link = marks.link {
+            a[.wysiwygLink] = link
+            if let url = URL(string: link) { a[.link] = url } // display only (tinted via linkTextAttributes)
+        }
+        return a
+    }
+
+    func markerAttributes(block: String) -> [NSAttributedString.Key: Any] {
+        [
+            .wysiwygBlock: block,
+            .wysiwygMarker: true,
+            .font: UIFont.monospacedDigitSystemFont(ofSize: 16, weight: .regular),
+            .paragraphStyle: paragraphStyle(for: block),
+            .foregroundColor: theme.secondaryTextUIColor,
+        ]
+    }
+
+    // MARK: attributes → model
+
+    func marks(from attrs: [NSAttributedString.Key: Any]) -> MarkSet {
+        var m = MarkSet()
+        m.link = attrs[.wysiwygLink] as? String
+        m.color = attrs[.wysiwygTextColor] as? String
+        m.highlight = attrs[.wysiwygHighlight] as? String
+        m.bold = attrs[.wysiwygBold] as? Bool ?? false
+        m.italic = attrs[.wysiwygItalic] as? Bool ?? false
+        m.underline = ((attrs[.underlineStyle] as? Int) ?? 0) != 0
+        m.strike = ((attrs[.strikethroughStyle] as? Int) ?? 0) != 0
+        m.code = attrs[.wysiwygCode] as? Bool ?? false
+        return m
+    }
+
+    // MARK: blocks → attributed string
+
+    func attributed(_ blocks: [WysiwygBlock]) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        var olCount = 0
+        var prevType = ""
+        for (idx, block) in blocks.enumerated() {
+            if block.type == "ol" { olCount = prevType == "ol" ? olCount + 1 : 1 }
+            if block.type == "ul" {
+                out.append(NSAttributedString(string: Self.ulMarker, attributes: markerAttributes(block: "ul")))
+            } else if block.type == "ol" {
+                out.append(NSAttributedString(string: Self.olMarker(olCount), attributes: markerAttributes(block: "ol")))
+            }
+            for run in block.runs where !run.text.isEmpty {
+                out.append(NSAttributedString(string: run.text,
+                                              attributes: attributes(block: block.type, marks: run.marks)))
+            }
+            if idx < blocks.count - 1 {
+                out.append(NSAttributedString(string: "\n",
+                                              attributes: attributes(block: block.type, marks: MarkSet())))
+            }
+            prevType = block.type
+        }
+        return out
+    }
+
+    // MARK: attributed string → blocks
+
+    func blocks(from attributed: NSAttributedString) -> [WysiwygBlock] {
+        let s = attributed.string as NSString
+        guard s.length > 0 else { return [] }
+        var result: [WysiwygBlock] = []
+        var index = 0
+        while index < s.length {
+            let pr = s.paragraphRange(for: NSRange(location: index, length: 0))
+            var content = pr
+            if content.length > 0, s.character(at: NSMaxRange(content) - 1) == 0x0A {
+                content.length -= 1
+            }
+            var type = "p"
+            if pr.length > 0 {
+                type = attributed.attribute(.wysiwygBlock, at: pr.location, effectiveRange: nil) as? String ?? "p"
+            }
+            if !WysiwygBlock.knownTypes.contains(type) { type = "p" }
+            var runs: [WysiwygRun] = []
+            if content.length > 0 {
+                attributed.enumerateAttributes(in: content, options: []) { attrs, range, _ in
+                    if attrs[.wysiwygMarker] != nil { return } // list markers are chrome, not content
+                    let text = s.substring(with: range).replacingOccurrences(of: "\n", with: "")
+                    guard !text.isEmpty else { return }
+                    let m = marks(from: attrs)
+                    if var last = runs.last, last.marks == m {
+                        last.text += text
+                        runs[runs.count - 1] = last
+                    } else {
+                        runs.append(WysiwygRun(text: text, marks: m))
+                    }
+                }
+            }
+            result.append(WysiwygBlock(type: type, runs: runs))
+            index = NSMaxRange(pr)
+        }
+        // A trailing "\n" means the caret sits on one more (empty) paragraph.
+        if s.hasSuffix("\n") { result.append(WysiwygBlock(type: "p", runs: [])) }
+        return result
+    }
+}
+
+// MARK: - Editor model
+
+/// Owns the UITextView document: toolbar actions, typing/selection rules,
+/// list-marker management and serialization. Published state drives SwiftUI.
+final class WysiwygEditorModel: NSObject, ObservableObject {
+    let config: WysiwygConfig
+    let styler: WysiwygStyler
+    let initialAttributed: NSAttributedString
+    /// The initial content re-serialized through the normaliser — the baseline
+    /// the discard-confirm compares against.
+    let initialNormalizedHtml: String
+
+    weak var textView: UITextView?
+    weak var placeholderLabel: UILabel?
+
+    @Published var activeMarks = MarkSet()
+    @Published var activeBlock = "p"
+    @Published var canUndo = false
+    @Published var canRedo = false
+    @Published var charCount = 0
+
+    /// Re-entrancy guards: delegate callbacks fired by our own programmatic
+    /// edits must not re-trigger the pipeline.
+    private var isMutating = false
+    private var isNormalizing = false
+    /// Set when Enter is pressed at the END of a heading/blockquote — the next
+    /// paragraph starts as plain body text.
+    private var makeNextParagraphPlain = false
+
+    init(config: WysiwygConfig) {
+        self.config = config
+        self.styler = WysiwygStyler(theme: config.theme)
+        let parsed = HtmlCoder.parse(config.content)
+        self.initialAttributed = styler.attributed(parsed)
+        self.initialNormalizedHtml = HtmlCoder.emit(parsed).html
+        super.init()
+    }
+
+    // MARK: serialization
+
+    func serialize() -> (html: String, text: String) {
+        guard let tv = textView else { return (initialNormalizedHtml, "") }
+        return HtmlCoder.emit(styler.blocks(from: tv.attributedText))
+    }
+
+    var hasChanges: Bool { serialize().html != initialNormalizedHtml }
+
+    // MARK: storage helpers
+
+    private var storage: NSTextStorage? { textView?.textStorage }
+    private var nsText: NSString? { textView.map { $0.textStorage.string as NSString } }
+
+    private func paragraphRange(at location: Int) -> NSRange {
+        guard let s = nsText else { return NSRange(location: 0, length: 0) }
+        let loc = min(max(0, location), s.length)
+        return s.paragraphRange(for: NSRange(location: loc, length: 0))
+    }
+
+    private func blockType(of pr: NSRange) -> String {
+        guard let st = storage, pr.length > 0, pr.location < st.length else { return "p" }
+        let type = st.attribute(.wysiwygBlock, at: pr.location, effectiveRange: nil) as? String ?? "p"
+        return WysiwygBlock.knownTypes.contains(type) ? type : "p"
+    }
+
+    /// Length of the leading list-marker prefix of the paragraph (0 if none).
+    private func markerLength(of pr: NSRange) -> Int {
+        guard let st = storage else { return 0 }
+        var len = 0
+        while pr.location + len < NSMaxRange(pr),
+              st.attribute(.wysiwygMarker, at: pr.location + len, effectiveRange: nil) != nil {
+            len += 1
+        }
+        return len
+    }
+
+    /// The user-content part of a paragraph: marker and trailing newline excluded.
+    private func contentRange(of pr: NSRange) -> NSRange {
+        guard let s = nsText else { return pr }
+        var r = pr
+        if r.length > 0, s.character(at: NSMaxRange(r) - 1) == 0x0A { r.length -= 1 }
+        let m = markerLength(of: pr)
+        r.location += m
+        r.length = max(0, r.length - m)
+        return r
+    }
+
+    /// Plain characters (markers and newlines excluded) in `range`.
+    private func plainCount(in range: NSRange) -> Int {
+        guard let st = storage, range.length > 0 else { return 0 }
+        var count = 0
+        st.enumerateAttribute(.wysiwygMarker, in: range, options: []) { value, r, _ in
+            if value != nil { return }
+            let sub = (st.string as NSString).substring(with: r)
+            count += sub.reduce(0) { $0 + ($1 == "\n" ? 0 : 1) }
+        }
+        return count
+    }
+
+    private func totalPlainCount() -> Int {
+        guard let st = storage else { return 0 }
+        return plainCount(in: NSRange(location: 0, length: st.length))
+    }
+
+    // MARK: published-state refresh
+
+    func refreshState() {
+        guard let tv = textView, let st = storage else { return }
+        let sel = tv.selectedRange
+        let pr = paragraphRange(at: sel.location)
+        if pr.length > 0 {
+            activeBlock = blockType(of: pr)
+        } else {
+            // Empty trailing paragraph: trust the pending typing attributes.
+            activeBlock = (tv.typingAttributes[.wysiwygBlock] as? String) ?? "p"
+        }
+        let contentStart = pr.location + markerLength(of: pr)
+        var m = MarkSet()
+        var refIndex: Int?
+        if sel.length > 0 {
+            refIndex = sel.location < st.length ? sel.location : nil
+        } else if sel.location > contentStart {
+            refIndex = sel.location - 1
+        }
+        if let idx = refIndex, idx < st.length {
+            let attrs = st.attributes(at: idx, effectiveRange: nil)
+            if attrs[.wysiwygMarker] == nil { m = styler.marks(from: attrs) }
+        }
+        // Don't drag a link along when typing right after its last character.
+        if sel.length == 0, m.link != nil {
+            if sel.location >= st.length {
+                m.link = nil
+            } else if (st.attribute(.wysiwygLink, at: sel.location, effectiveRange: nil) as? String) != m.link {
+                m.link = nil
+            }
+        }
+        activeMarks = m
+        tv.typingAttributes = styler.attributes(block: activeBlock, marks: m)
+        charCount = totalPlainCount()
+        canUndo = tv.undoManager?.canUndo ?? false
+        canRedo = tv.undoManager?.canRedo ?? false
+        placeholderLabel?.isHidden = st.length > 0
+    }
+
+    // MARK: delegate entry points
+
+    func selectionChanged() {
+        guard !isMutating, let tv = textView else { return }
+        var sel = tv.selectedRange
+        let pr = paragraphRange(at: sel.location)
+        let markerEnd = pr.location + markerLength(of: pr)
+        // Keep the caret out of the list-marker prefix.
+        if sel.length == 0, sel.location < markerEnd, markerEnd <= (nsText?.length ?? 0) {
+            sel.location = markerEnd
+            tv.selectedRange = sel // re-fires the delegate; state refreshes then
+            return
+        }
+        refreshState()
+    }
+
+    func shouldChange(_ range: NSRange, _ text: String) -> Bool {
+        guard textView != nil else { return true }
+
+        // maxLength — counts PLAIN characters (markers & newlines excluded).
+        if config.maxLength > 0, !text.isEmpty {
+            let inserted = text.reduce(0) { $0 + ($1 == "\n" ? 0 : 1) }
+            if inserted > 0 {
+                let deleted = plainCount(in: range)
+                if charCount - deleted + inserted > config.maxLength { return false }
+            }
+        }
+
+        if text == "\n" { return handleNewline(range) }
+
+        // Backspacing into a list marker un-lists the item instead of eating
+        // the marker character by character.
+        if text.isEmpty, range.length == 1, let st = storage, range.location < st.length,
+           st.attribute(.wysiwygMarker, at: range.location, effectiveRange: nil) != nil {
+            convertParagraphs(in: NSRange(location: range.location, length: 0), to: "p")
+            return false
+        }
+        return true
+    }
+
+    func didChange() {
+        guard !isMutating else { return }
+        if makeNextParagraphPlain {
+            makeNextParagraphPlain = false
+            if let tv = textView {
+                let pr = paragraphRange(at: tv.selectedRange.location)
+                if pr.length > 0 { setBlockAttributes(pr, to: "p") }
+                tv.typingAttributes = styler.attributes(block: "p", marks: MarkSet())
+            }
+        }
+        normalizeLists()
+        refreshState()
+    }
+
+    private func didChangeExternally() {
+        normalizeLists()
+        refreshState()
+    }
+
+    // MARK: Enter key
+
+    private func handleNewline(_ range: NSRange) -> Bool {
+        guard let tv = textView else { return true }
+        let pr = paragraphRange(at: range.location)
+        let block = blockType(of: pr)
+        switch block {
+        case "ul", "ol":
+            if contentRange(of: pr).length == 0 {
+                // Enter on an EMPTY list item leaves the list (standard behavior).
+                convertParagraphs(in: NSRange(location: range.location, length: 0), to: "p")
+                return false
+            }
+            // Continue the list: newline + fresh marker inserted through the
+            // input system (stays undoable); the number is fixed by renumbering.
+            let marker = block == "ul" ? WysiwygStyler.ulMarker : WysiwygStyler.olMarker(1)
+            isMutating = true
+            tv.selectedRange = range
+            tv.typingAttributes = styler.attributes(block: block, marks: MarkSet())
+            tv.insertText("\n" + marker)
+            let cursor = tv.selectedRange.location
+            let markerLen = (marker as NSString).length
+            if cursor >= markerLen {
+                storage?.setAttributes(styler.markerAttributes(block: block),
+                                       range: NSRange(location: cursor - markerLen, length: markerLen))
+            }
+            isMutating = false
+            normalizeLists()
+            refreshState()
+            placeholderLabel?.isHidden = true
+            return false
+        case "h1", "h2", "h3", "blockquote":
+            // Enter at the END of the block: the next paragraph is body text.
+            // Mid-block Enter splits into two blocks of the same type.
+            let content = contentRange(of: pr)
+            if range.location >= NSMaxRange(content) { makeNextParagraphPlain = true }
+            return true
+        default:
+            return true
+        }
+    }
+
+    // MARK: inline marks
+
+    private func applyMarks(in range: NSRange, _ transform: (inout MarkSet) -> Void) {
+        guard let tv = textView, let st = storage else { return }
+        if range.length == 0 {
+            var m = activeMarks
+            transform(&m)
+            activeMarks = m
+            tv.typingAttributes = styler.attributes(block: activeBlock, marks: m)
+            return
+        }
+        st.beginEditing()
+        st.enumerateAttributes(in: range, options: []) { attrs, r, _ in
+            if attrs[.wysiwygMarker] != nil { return }
+            var m = styler.marks(from: attrs)
+            transform(&m)
+            let block = attrs[.wysiwygBlock] as? String ?? "p"
+            st.setAttributes(styler.attributes(block: block, marks: m), range: r)
+        }
+        st.endEditing()
+        refreshState()
+    }
+
+    private func applyToSelection(_ transform: (inout MarkSet) -> Void) {
+        guard let tv = textView else { return }
+        applyMarks(in: tv.selectedRange, transform)
+    }
+
+    func toggleInline(_ tool: String) {
+        let target: Bool
+        switch tool {
+        case "bold": target = !activeMarks.bold
+        case "italic": target = !activeMarks.italic
+        case "underline": target = !activeMarks.underline
+        case "strikethrough": target = !activeMarks.strike
+        case "code": target = !activeMarks.code
+        default: return
+        }
+        applyToSelection { m in
+            switch tool {
+            case "bold": m.bold = target
+            case "italic": m.italic = target
+            case "underline": m.underline = target
+            case "strikethrough": m.strike = target
+            case "code": m.code = target
+            default: break
+            }
+        }
+    }
+
+    func applyTextColor(_ hex: String?) {
+        applyToSelection { $0.color = hex }
+    }
+
+    func applyHighlight(_ hex: String?) {
+        applyToSelection { $0.highlight = hex }
+    }
+
+    func clearFormat() {
+        applyToSelection { $0 = MarkSet() }
+    }
+
+    // MARK: blocks
+
+    func applyBlock(_ tool: String) {
+        let target: String
+        switch tool {
+        case "bulletList": target = "ul"
+        case "orderedList": target = "ol"
+        default: target = tool // h1 / h2 / h3 / blockquote
+        }
+        guard WysiwygBlock.knownTypes.contains(target), let tv = textView else { return }
+        let newBlock = activeBlock == target ? "p" : target
+        convertParagraphs(in: tv.selectedRange, to: newBlock)
+    }
+
+    /// Re-style content characters of `range` for `block`, preserving marks.
+    private func setBlockAttributes(_ range: NSRange, to block: String) {
+        guard let st = storage, range.length > 0 else { return }
+        st.beginEditing()
+        st.enumerateAttributes(in: range, options: []) { attrs, r, _ in
+            if attrs[.wysiwygMarker] != nil {
+                st.addAttribute(.wysiwygBlock, value: block, range: r)
+                return
+            }
+            st.setAttributes(styler.attributes(block: block, marks: styler.marks(from: attrs)), range: r)
+        }
+        st.endEditing()
+    }
+
+    /// Convert every paragraph touched by `selection` to `newBlock`. Marker
+    /// insertion/removal is delegated to the renumbering pass.
+    private func convertParagraphs(in selection: NSRange, to newBlock: String) {
+        guard let tv = textView, let st = storage else { return }
+        isMutating = true
+        defer {
+            isMutating = false
+            normalizeLists()
+            refreshState()
+        }
+
+        // Empty document: block lives only in the typing attributes; a list
+        // gets its marker materialised immediately so the item is visible.
+        if st.length == 0 {
+            tv.typingAttributes = styler.attributes(block: newBlock, marks: activeMarks)
+            activeBlock = newBlock
+            if newBlock == "ul" || newBlock == "ol" {
+                let marker = newBlock == "ul" ? WysiwygStyler.ulMarker : WysiwygStyler.olMarker(1)
+                st.append(NSAttributedString(string: marker, attributes: styler.markerAttributes(block: newBlock)))
+                tv.selectedRange = NSRange(location: st.length, length: 0)
+                tv.undoManager?.removeAllActions()
+            }
+            return
+        }
+
+        let s = st.string as NSString
+        let loc = min(selection.location, s.length)
+        let len = min(selection.length, s.length - loc)
+        let span = s.paragraphRange(for: NSRange(location: loc, length: len))
+
+        if span.length == 0 {
+            // Caret on the empty trailing paragraph.
+            tv.typingAttributes = styler.attributes(block: newBlock, marks: activeMarks)
+            activeBlock = newBlock
+            if newBlock == "ul" || newBlock == "ol" {
+                let marker = newBlock == "ul" ? WysiwygStyler.ulMarker : WysiwygStyler.olMarker(1)
+                st.insert(NSAttributedString(string: marker, attributes: styler.markerAttributes(block: newBlock)),
+                          at: span.location)
+                tv.selectedRange = NSRange(location: span.location + (marker as NSString).length, length: 0)
+                tv.undoManager?.removeAllActions()
+            }
+            return
+        }
+
+        var idx = span.location
+        while idx < NSMaxRange(span) {
+            let pr = s.paragraphRange(for: NSRange(location: idx, length: 0))
+            setBlockAttributes(pr, to: newBlock) // attribute-only: lengths stable
+            idx = NSMaxRange(pr)
+            if pr.length == 0 { break }
+        }
+    }
+
+    // MARK: list normalization
+
+    /// One robust pass that makes the visible document consistent again after
+    /// ANY edit: inserts missing list markers, removes markers on non-list
+    /// paragraphs, renumbers ordered lists, deletes stray marker fragments
+    /// left by multi-paragraph deletions, and re-unifies the block attribute
+    /// of merged paragraphs. Text mutations here reset the undo stack (the
+    /// undo manager cannot replay around them safely).
+    private func normalizeLists() {
+        guard let tv = textView, let st = storage, !isNormalizing else { return }
+        isNormalizing = true
+        defer { isNormalizing = false }
+
+        var mutated = false
+        var sel = tv.selectedRange
+        var idx = 0
+        var olCount = 0
+        var prevType = ""
+
+        func shiftSelection(edited: NSRange, delta: Int) {
+            if sel.location >= NSMaxRange(edited) {
+                sel.location += delta
+            } else if sel.location > edited.location {
+                sel.location = edited.location + max(0, edited.length + delta)
+            }
+        }
+
+        while idx < st.length {
+            let s = st.string as NSString
+            let pr = s.paragraphRange(for: NSRange(location: idx, length: 0))
+            if pr.length == 0 { break }
+            let block = blockType(of: pr)
+
+            var contentEnd = NSMaxRange(pr)
+            if contentEnd > pr.location, s.character(at: contentEnd - 1) == 0x0A { contentEnd -= 1 }
+
+            // Leading marker prefix.
+            var lead = 0
+            while pr.location + lead < contentEnd,
+                  st.attribute(.wysiwygMarker, at: pr.location + lead, effectiveRange: nil) != nil {
+                lead += 1
+            }
+
+            // Stray marker fragments mid-paragraph (after merged deletes) → remove.
+            var scan = pr.location + lead
+            var stray: NSRange?
+            while scan < contentEnd {
+                var eff = NSRange(location: 0, length: 0)
+                let isMarker = st.attribute(.wysiwygMarker, at: scan, longestEffectiveRange: &eff,
+                                            in: NSRange(location: scan, length: contentEnd - scan)) != nil
+                if isMarker { stray = eff; break }
+                scan = NSMaxRange(eff)
+            }
+            if let stray {
+                st.deleteCharacters(in: stray)
+                mutated = true
+                shiftSelection(edited: stray, delta: -stray.length)
+                continue // re-process this paragraph from the same location
+            }
+
+            // Correct marker text for this block type (numbering consecutive <ol>s).
+            olCount = block == "ol" ? (prevType == "ol" ? olCount + 1 : 1) : 0
+            let desired: String
+            switch block {
+            case "ul": desired = WysiwygStyler.ulMarker
+            case "ol": desired = WysiwygStyler.olMarker(olCount)
+            default: desired = ""
+            }
+            let markerRange = NSRange(location: pr.location, length: lead)
+            if s.substring(with: markerRange) != desired {
+                st.replaceCharacters(in: markerRange,
+                                     with: NSAttributedString(string: desired,
+                                                              attributes: styler.markerAttributes(block: block)))
+                mutated = true
+                shiftSelection(edited: markerRange, delta: (desired as NSString).length - lead)
+            }
+
+            // Re-unify the block attribute if a merge mixed two paragraphs.
+            let s2 = st.string as NSString
+            let pr2 = s2.paragraphRange(for: NSRange(location: pr.location, length: 0))
+            if pr2.length > 0 {
+                var eff = NSRange(location: 0, length: 0)
+                _ = st.attribute(.wysiwygBlock, at: pr2.location, longestEffectiveRange: &eff, in: pr2)
+                if NSMaxRange(eff) < NSMaxRange(pr2) { setBlockAttributes(pr2, to: block) }
+            }
+            prevType = block
+            idx = NSMaxRange(pr2)
+            if pr2.length == 0 { break }
+        }
+
+        if mutated {
+            sel.location = max(0, min(sel.location, st.length))
+            sel.length = min(sel.length, st.length - sel.location)
+            tv.selectedRange = sel
+            tv.undoManager?.removeAllActions()
+        }
+    }
+
+    // MARK: links
+
+    func linkTapped() {
+        guard let tv = textView, let st = storage else { return }
+        var range = tv.selectedRange
+        var existing: String?
+        if range.length == 0 {
+            let probe = range.location > 0 ? range.location - 1 : range.location
+            if st.length > 0, probe < st.length,
+               let link = st.attribute(.wysiwygLink, at: probe, effectiveRange: nil) as? String {
+                var eff = NSRange(location: 0, length: 0)
+                _ = st.attribute(.wysiwygLink, at: probe, longestEffectiveRange: &eff,
+                                 in: NSRange(location: 0, length: st.length))
+                range = eff
+                existing = link
+            }
+        } else if range.location < st.length,
+                  let link = st.attribute(.wysiwygLink, at: range.location, effectiveRange: nil) as? String {
+            existing = link
+        }
+        presentLinkDialog(existing: existing, range: range)
+    }
+
+    private func presentLinkDialog(existing: String?, range: NSRange) {
+        let alert = UIAlertController(title: existing == nil ? "Add Link" : "Edit Link",
+                                      message: nil, preferredStyle: .alert)
+        alert.addTextField { tf in
+            tf.placeholder = "https://example.com"
+            tf.text = existing
+            tf.keyboardType = .URL
+            tf.autocapitalizationType = .none
+            tf.autocorrectionType = .no
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        if existing != nil {
+            alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+                self?.applyMarks(in: range) { $0.link = nil }
+            })
+        }
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self, weak alert] _ in
+            guard let self else { return }
+            guard let url = Self.sanitizeLink(alert?.textFields?.first?.text ?? "") else { return }
+            if range.length == 0 {
+                self.insertLinkedText(url, at: range.location)
+            } else {
+                self.applyMarks(in: range) { $0.link = url }
+            }
+        })
+        WysiwygEditorPresenter.topController()?.present(alert, animated: true)
+    }
+
+    /// http(s)/mailto/tel pass through; a bare host gets https:// prepended;
+    /// any other explicit scheme is rejected.
+    static func sanitizeLink(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        let lower = s.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://")
+            || lower.hasPrefix("mailto:") || lower.hasPrefix("tel:") {
+            return s
+        }
+        if s.contains("://") { return nil }
+        return "https://" + s
+    }
+
+    /// No selection and no existing link: insert the URL itself as link text.
+    private func insertLinkedText(_ url: String, at location: Int) {
+        guard let tv = textView, let st = storage else { return }
+        if config.maxLength > 0, charCount + url.count > config.maxLength { return }
+        var marks = activeMarks
+        marks.link = url
+        let loc = min(location, st.length)
+        st.insert(NSAttributedString(string: url, attributes: styler.attributes(block: activeBlock, marks: marks)),
+                  at: loc)
+        tv.selectedRange = NSRange(location: loc + (url as NSString).length, length: 0)
+        tv.undoManager?.removeAllActions()
+        didChangeExternally()
+    }
+
+    // MARK: undo / redo
+
+    func undo() {
+        textView?.undoManager?.undo()
+        didChangeExternally()
+    }
+
+    func redo() {
+        textView?.undoManager?.redo()
+        didChangeExternally()
+    }
+}
+
+// MARK: - UITextView wrapper
+
+private struct RichTextView: UIViewRepresentable {
+    let model: WysiwygEditorModel
+
+    func makeUIView(context: Context) -> UITextView {
+        let theme = model.config.theme
+        let tv = UITextView()
+        tv.backgroundColor = .clear
+        tv.allowsEditingTextAttributes = false
+        tv.delegate = context.coordinator
+        tv.font = UIFont.systemFont(ofSize: 16)
+        tv.textColor = theme.textUIColor
+        tv.tintColor = theme.accentUIColor
+        tv.textContainerInset = UIEdgeInsets(top: 14, left: 12, bottom: 14, right: 12)
+        tv.keyboardDismissMode = .interactive
+        tv.linkTextAttributes = [
+            .foregroundColor: theme.accentUIColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]
+        tv.attributedText = model.initialAttributed
+        tv.typingAttributes = model.styler.attributes(block: "p", marks: MarkSet())
+
+        // Placeholder — a plain overlaid label, hidden as soon as there is text.
+        let placeholder = UILabel()
+        placeholder.text = model.config.placeholder
+        placeholder.font = UIFont.systemFont(ofSize: 16)
+        placeholder.textColor = theme.textUIColor.withAlphaComponent(0.35)
+        placeholder.frame = CGRect(x: 17, y: 14, width: UIScreen.main.bounds.width - 60, height: 22)
+        placeholder.isHidden = !model.initialAttributed.string.isEmpty
+        tv.addSubview(placeholder)
+
+        model.textView = tv
+        model.placeholderLabel = placeholder
+        DispatchQueue.main.async {
+            model.refreshState()
+            tv.becomeFirstResponder()
+        }
+        return tv
+    }
+
+    func updateUIView(_ uiView: UITextView, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        let model: WysiwygEditorModel
+        init(model: WysiwygEditorModel) { self.model = model }
+
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
+                      replacementText text: String) -> Bool {
+            model.shouldChange(range, text)
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            model.didChange()
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            model.selectionChanged()
+        }
+
+        // Links are edited via the toolbar dialog, never opened from the editor.
+        func textView(_ textView: UITextView, shouldInteractWith URL: URL,
+                      in characterRange: NSRange, interaction: UITextItemInteraction) -> Bool {
+            false
+        }
+    }
+}
+
+// MARK: - Keyboard watcher
+
+/// Publishes the keyboard height so the toolbar can sit right above it
+/// (SwiftUI on iOS 15 has no built-in keyboardAdaptive modifier).
+private final class KeyboardWatcher: NSObject, ObservableObject {
+    @Published var height: CGFloat = 0
+
+    override init() {
+        super.init()
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(frameChanged(_:)),
+                           name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        center.addObserver(self, selector: #selector(willHide(_:)),
+                           name: UIResponder.keyboardWillHideNotification, object: nil)
+    }
+
+    @objc private func frameChanged(_ note: Notification) {
+        guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+        height = max(0, UIScreen.main.bounds.maxY - frame.origin.y)
+    }
+
+    @objc private func willHide(_ note: Notification) { height = 0 }
+}
+
+// MARK: - Editor screen
+
+private enum PaletteKind { case text, highlight }
+
+private struct EditorScreen: View {
+    @ObservedObject var model: WysiwygEditorModel
+    let onCancel: () -> Void
+    let onSave: (String, String) -> Void
+
+    @StateObject private var keyboard = KeyboardWatcher()
+    @State private var showDiscard = false
+    @State private var palette: PaletteKind?
+
+    private var theme: WysiwygTheme { model.config.theme }
+
+    var body: some View {
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                topBar
+                RichTextView(model: model)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if model.config.maxLength > 0 { counter }
+                if let kind = palette {
+                    PaletteRow(kind: kind, theme: theme) { hex in
+                        if kind == .text { model.applyTextColor(hex) } else { model.applyHighlight(hex) }
+                        palette = nil
+                    }
+                }
+                ToolbarRow(model: model, palette: $palette)
+            }
+            .padding(.bottom, max(0, keyboard.height - geo.safeAreaInsets.bottom))
+        }
+        .background(theme.backgroundColor.ignoresSafeArea())
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .alert("Discard changes?", isPresented: $showDiscard) {
+            Button("Keep Editing", role: .cancel) {}
+            Button("Discard", role: .destructive) { onCancel() }
+        } message: {
+            Text("Your edits will be lost.")
+        }
+    }
+
+    private var topBar: some View {
+        ZStack {
+            HStack {
+                Button("Cancel") { model.hasChanges ? (showDiscard = true) : onCancel() }
+                    .font(.system(size: 16))
+                    .foregroundColor(theme.textColor)
+                Spacer()
+                Button("Save") {
+                    let out = model.serialize()
+                    onSave(out.html, out.text)
+                }
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(theme.accentColor)
+            }
+            Text(model.config.title)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(theme.textColor)
+                .lineLimit(1)
+                .padding(.horizontal, 76)
+        }
+        .frame(height: 52)
+        .padding(.horizontal, 16)
+    }
+
+    private var counter: some View {
+        HStack {
+            Spacer()
+            Text("\(model.charCount)/\(model.config.maxLength)")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(model.charCount >= model.config.maxLength ? .red : theme.textColor.opacity(0.5))
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 4)
+    }
+}
+
+// MARK: - Formatting toolbar
+
+private struct ToolbarRow: View {
+    @ObservedObject var model: WysiwygEditorModel
+    @Binding var palette: PaletteKind?
+
+    private var theme: WysiwygTheme { model.config.theme }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                // Undo / redo are always present, ahead of the configured tools.
+                button(symbol: "arrow.uturn.backward", active: false, enabled: model.canUndo) { model.undo() }
+                button(symbol: "arrow.uturn.forward", active: false, enabled: model.canRedo) { model.redo() }
+                Rectangle()
+                    .fill(theme.textColor.opacity(0.15))
+                    .frame(width: 1, height: 22)
+                    .padding(.horizontal, 6)
+                ForEach(model.config.toolbar, id: \.self) { tool in
+                    toolButton(tool)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+        }
+        .background(theme.backgroundColor.overlay(theme.textColor.opacity(0.04)))
+        .overlay(Rectangle().fill(theme.textColor.opacity(0.12)).frame(height: 0.5), alignment: .top)
+    }
+
+    @ViewBuilder
+    private func toolButton(_ tool: String) -> some View {
+        switch tool {
+        case "bold":
+            button(symbol: "bold", active: model.activeMarks.bold) { model.toggleInline("bold") }
+        case "italic":
+            button(symbol: "italic", active: model.activeMarks.italic) { model.toggleInline("italic") }
+        case "underline":
+            button(symbol: "underline", active: model.activeMarks.underline) { model.toggleInline("underline") }
+        case "strikethrough":
+            button(symbol: "strikethrough", active: model.activeMarks.strike) { model.toggleInline("strikethrough") }
+        case "h1":
+            button(symbol: "1.square", active: model.activeBlock == "h1") { model.applyBlock("h1") }
+        case "h2":
+            button(symbol: "2.square", active: model.activeBlock == "h2") { model.applyBlock("h2") }
+        case "h3":
+            button(symbol: "3.square", active: model.activeBlock == "h3") { model.applyBlock("h3") }
+        case "bulletList":
+            button(symbol: "list.bullet", active: model.activeBlock == "ul") { model.applyBlock("bulletList") }
+        case "orderedList":
+            button(symbol: "list.number", active: model.activeBlock == "ol") { model.applyBlock("orderedList") }
+        case "blockquote":
+            button(symbol: "text.quote", active: model.activeBlock == "blockquote") { model.applyBlock("blockquote") }
+        case "link":
+            button(symbol: "link", active: model.activeMarks.link != nil) { model.linkTapped() }
+        case "code":
+            button(symbol: "chevron.left.forwardslash.chevron.right", active: model.activeMarks.code) {
+                model.toggleInline("code")
+            }
+        case "textColor":
+            button(symbol: "paintpalette", active: model.activeMarks.color != nil || palette == .text) {
+                palette = palette == .text ? nil : .text
+            }
+        case "highlight":
+            button(symbol: "highlighter", active: model.activeMarks.highlight != nil || palette == .highlight) {
+                palette = palette == .highlight ? nil : .highlight
+            }
+        case "clearFormat":
+            button(symbol: "xmark.circle", active: false) { model.clearFormat() }
+        default:
+            EmptyView()
+        }
+    }
+
+    private func button(symbol: String, active: Bool, enabled: Bool = true,
+                        action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(active ? theme.highlightColor : theme.textColor.opacity(enabled ? 0.75 : 0.28))
+                .frame(width: 36, height: 34)
+                .background(RoundedRectangle(cornerRadius: 7)
+                    .fill(active ? theme.highlightColor.opacity(0.16) : Color.clear))
+        }
+        .disabled(!enabled)
+    }
+}
+
+// MARK: - Color palette row
+
+private struct PaletteRow: View {
+    let kind: PaletteKind
+    let theme: WysiwygTheme
+    let onPick: (String?) -> Void
+
+    /// Fixed palettes — SAME values as the Android implementation (normative).
+    static let textColors = ["#EF4444", "#F97316", "#EAB308", "#22C55E", "#3B82F6", "#A855F7"]
+    static let highlights = ["#FDE68A", "#FED7AA", "#BBF7D0", "#BFDBFE", "#E9D5FF", "#FBCFE8"]
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Button { onPick(nil) } label: {
+                Image(systemName: "slash.circle")
+                    .font(.system(size: 22))
+                    .foregroundColor(theme.textColor.opacity(0.6))
+            }
+            ForEach(kind == .text ? Self.textColors : Self.highlights, id: \.self) { hex in
+                Button { onPick(hex) } label: {
+                    Circle()
+                        .fill(Color(UIColor(wysiwygHex: hex) ?? .gray))
+                        .frame(width: 26, height: 26)
+                        .overlay(Circle().stroke(theme.textColor.opacity(0.25), lineWidth: 1))
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(theme.backgroundColor.overlay(theme.textColor.opacity(0.06)))
+    }
+}
+
+// MARK: - Presenter
+
+final class WysiwygEditorPresenter {
+    static let shared = WysiwygEditorPresenter()
+    private var hosting: UIHostingController<AnyView>?
+    private var finished = false
+
+    func present(config: WysiwygConfig) {
+        // Re-entrancy guard: only one editor at a time. A second Open (e.g. a
+        // double-tap) is rejected with a cancel for its OWN id, so it can't
+        // orphan the live editor or lose an event.
+        guard hosting == nil else { send(WysiwygEvents.cancelled, ["id": config.id]); return }
+
+        finished = false
+        let model = WysiwygEditorModel(config: config)
+        let host = UIHostingController(rootView: AnyView(EmptyView()))
+        host.modalPresentationStyle = .fullScreen
+        host.view.backgroundColor = config.theme.backgroundUIColor
+        host.rootView = AnyView(EditorScreen(
+            model: model,
+            onCancel: { [weak self] in
+                self?.finish(WysiwygEvents.cancelled, ["id": config.id])
+            },
+            onSave: { [weak self] html, text in
+                self?.finish(WysiwygEvents.saved, ["html": html, "text": text, "id": config.id])
+            }
+        ))
+        hosting = host
+        // Present once the top view controller is idle. When Open is called
+        // right after another modal is dismissed, iOS SILENTLY refuses the
+        // presentation — so we retry until it's ready.
+        presentWhenReady(host, id: config.id, attempts: 0)
+    }
+
+    private func presentWhenReady(_ host: UIViewController, id: String?, attempts: Int) {
+        guard let top = Self.topController(), !top.isBeingDismissed, !top.isBeingPresented else {
+            guard attempts < 25 else { finish(WysiwygEvents.cancelled, ["id": id]); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                self?.presentWhenReady(host, id: id, attempts: attempts + 1)
+            }
+            return
+        }
+        top.present(host, animated: true)
+    }
+
+    private func dismiss() {
+        hosting?.dismiss(animated: true)
+        hosting = nil
+    }
+
+    /// Deliver EXACTLY ONE terminal event for the current editor, then tear it
+    /// down. Guards against Save racing Cancel firing two events per session.
+    private func finish(_ event: String, _ payload: [String: Any?]) {
+        guard !finished else { return }
+        finished = true
+        dismiss()
+        send(event, payload)
+    }
+
+    private func send(_ event: String, _ payload: [String: Any?]) {
+        var clean: [String: Any] = [:]
+        for (k, v) in payload {
+            if let v, !(v is NSNull) { clean[k] = v }
+        }
+        LaravelBridge.shared.send?(event, clean)
+    }
+
+    static func topController() -> UIViewController? {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        var top = scene?.windows.first { $0.isKeyWindow }?.rootViewController
+        while let p = top?.presentedViewController { top = p }
+        return top
+    }
+}
