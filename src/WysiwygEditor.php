@@ -95,7 +95,7 @@ class WysiwygEditor
         'background' => ['background', 'surface'],
         'text' => ['on-background', 'on-surface'],
         'accent' => ['primary', 'accent'],
-        'highlight' => ['accent', 'secondary', 'primary'],
+        'highlight' => ['primary', 'accent', 'secondary'],
     ];
 
     /**

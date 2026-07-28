@@ -63,6 +63,37 @@ save would be a serious bug.
 without upload state — a poll survives via its `data-poll` payload, an embed
 via `data-embed`.
 
+## Editing shell — segments, not one-view-per-block
+
+A Notion-style shell gives every block its own editable view. That makes the
+hardest problem in the whole project — caret behaviour ACROSS block boundaries
+— apply to every paragraph in the document: backspace at the start of block 7
+has to merge it into block 6, carrying formatting, on two platforms, matching
+each other exactly.
+
+We avoid almost all of that. The document is rendered as **segments**:
+
+```
+Document blocks:  [h1] [p] [ul] [ul] [image] [p] [divider] [p]
+Rendered as:      └──── one text editor ────┘  [card]  [ed]  [card] [ed]
+```
+
+- **Consecutive text blocks collapse into ONE text editor** — the v1 engine,
+  unchanged. Enter, backspace, list continuation, headings and marks inside a
+  run of paragraphs keep working exactly as they already do, because it is
+  literally the same buffer that is already tested and device-verified.
+- **Each media block is its own view**, interleaved between text editors.
+
+Caret transitions are therefore only needed at **text ↔ media** boundaries,
+which are rare and few, instead of at every paragraph break.
+
+The trade-off, stated honestly: you can drag-reorder segments, not individual
+paragraphs. Reordering a single paragraph inside a run means editing text, the
+way Apple Notes and Bear work — not dragging a handle, the way Notion works.
+Given media, polls and embeds were the requirement and paragraph-handle
+dragging was not, that is the right trade. It also keeps every behaviour we
+have already verified rather than reimplementing it under a new focus model.
+
 ## Upload contract
 
 The editor does **not** upload anything. It has no network layer, no queue and

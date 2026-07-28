@@ -195,11 +195,10 @@ describe('Host theme adoption', function () {
             'background' => '#FFFFFF',
             'text' => '#111111',
             'accent' => '#0000FF',
-            'highlight' => '#FF00FF',
+            'highlight' => '#0000FF',
         ]);
 
-        // Dark has no `background`/`on-background`; the fallbacks are used,
-        // and `highlight` falls all the way back to `primary`.
+        // Dark has no `background`/`on-background`; the fallbacks are used.
         expect($config['themeDark'])->toBe([
             'background' => '#000000',
             'text' => '#EEEEEE',

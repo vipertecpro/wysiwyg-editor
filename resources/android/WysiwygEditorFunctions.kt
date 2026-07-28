@@ -44,6 +44,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
@@ -1637,7 +1638,8 @@ internal object Styler {
             // line can also return the previous line's span — keep only a span
             // that actually starts at or before this line.
             val type = text.getSpans(lineStart, maxOf(lineStart, lineEnd), BlockSpan::class.java)
-                .firstOrNull { text.getSpanStart(it) <= lineStart }?.type ?: "p"
+                .filter { text.getSpanStart(it) <= lineStart }
+                .maxByOrNull { text.getSpanStart(it) }?.type ?: "p"
             val block = WysiwygBlock(if (WysiwygBlock.KNOWN_TYPES.contains(type)) type else "p")
 
             // Skip the marker prefix — it is chrome, never content.
@@ -1863,7 +1865,8 @@ internal class EditorController(
         while (lineStart <= whole.length) {
             val end = lineEnd(s, lineStart)
             val type = s.getSpans(lineStart, maxOf(lineStart, end), BlockSpan::class.java)
-                .firstOrNull { s.getSpanStart(it) <= lineStart }?.type
+                .filter { s.getSpanStart(it) <= lineStart }
+                .maxByOrNull { s.getSpanStart(it) }?.type
 
             if (type != null && end > lineStart) {
                 stripDisplaySpans(s, lineStart, end)
@@ -1931,7 +1934,8 @@ internal class EditorController(
     private fun continueBlockAfterNewline(s: android.text.Editable, newlineAt: Int) {
         val previousStart = s.toString().lastIndexOf('\n', newlineAt - 1) + 1
         val previousType = s.getSpans(previousStart, newlineAt, BlockSpan::class.java)
-            .firstOrNull { s.getSpanStart(it) <= previousStart }?.type ?: "p"
+            .filter { s.getSpanStart(it) <= previousStart }
+            .maxByOrNull { s.getSpanStart(it) }?.type ?: "p"
 
         val previousContent = contentStart(s, previousStart, newlineAt)
         val previousIsEmptyItem = (previousType == "ul" || previousType == "ol") &&
@@ -2080,7 +2084,8 @@ internal class EditorController(
             .let { if (it < 0) 0 else it + 1 }
         val end = lineEnd(text, start)
         return text.getSpans(start, maxOf(start, end), BlockSpan::class.java)
-            .firstOrNull { text.getSpanStart(it) <= start }?.type ?: "p"
+            .filter { text.getSpanStart(it) <= start }
+            .maxByOrNull { text.getSpanStart(it) }?.type ?: "p"
     }
 
     fun toggleInline(tool: String) {
@@ -2370,7 +2375,8 @@ internal class EditorController(
         while (lineStart <= whole.length) {
             val end = lineEnd(text, lineStart)
             val type = text.getSpans(lineStart, maxOf(lineStart, end), BlockSpan::class.java)
-                .firstOrNull { text.getSpanStart(it) <= lineStart }?.type ?: "p"
+                .filter { text.getSpanStart(it) <= lineStart }
+                .maxByOrNull { text.getSpanStart(it) }?.type ?: "p"
 
             if (type == "ol") {
                 if (!previousWasOrdered) ordinal = 1
@@ -2404,6 +2410,54 @@ internal class EditorController(
         }
     }
 }
+
+// ── Segments ────────────────────────────────────────────────────────────────
+
+/**
+ * How a document is laid out for editing. Consecutive TEXT blocks collapse
+ * into one editor (the v1 engine, unchanged); each media block gets its own
+ * view. See docs/DOCUMENT-MODEL.md — this is what keeps caret handling to the
+ * rare text↔media boundary instead of every paragraph break.
+ */
+internal sealed class Segment {
+    /** A run of text blocks sharing one editor. */
+    class Text(val blocks: MutableList<WysiwygBlock>) : Segment()
+
+    /** A single media block rendered as its own card. */
+    class Media(val block: WysiwygBlock) : Segment()
+}
+
+/** Group a block list into segments, preserving document order. */
+internal fun segmentsOf(blocks: List<WysiwygBlock>): List<Segment> {
+    val segments = mutableListOf<Segment>()
+
+    for (block in blocks) {
+        if (block.isText) {
+            val last = segments.lastOrNull()
+            if (last is Segment.Text) {
+                last.blocks.add(block)
+            } else {
+                segments.add(Segment.Text(mutableListOf(block)))
+            }
+        } else {
+            segments.add(Segment.Media(block))
+        }
+    }
+
+    // An empty document still needs somewhere to type.
+    if (segments.isEmpty()) segments.add(Segment.Text(mutableListOf(WysiwygBlock("p"))))
+
+    return segments
+}
+
+/** Flatten segments back into a block list for serialization. */
+internal fun blocksOf(segments: List<Segment>): List<WysiwygBlock> =
+    segments.flatMap { segment ->
+        when (segment) {
+            is Segment.Text -> segment.blocks
+            is Segment.Media -> listOf(segment.block)
+        }
+    }
 
 // ── Palettes (normative — identical on iOS) ─────────────────────────────────
 
@@ -2485,12 +2539,14 @@ internal fun EditorScreen(
     val foreground = theme.textColor(night)
     val accent = theme.accentColor(night)
 
-    val controllerState = remember { mutableStateOf<EditorController?>(null) }
+    // One controller per TEXT segment; the toolbar drives the focused one.
+    val controllers = remember { mutableMapOf<Int, EditorController>() }
+    val focused = remember { mutableStateOf<EditorController?>(null) }
     // Bumped on every edit / caret move so the toolbar re-reads active state.
     val revision = remember { mutableStateOf(0) }
     val palette = remember { mutableStateOf<String?>(null) }
-    val length = remember { mutableStateOf(0) }
-    val words = remember { mutableStateOf(0) }
+    val length = remember { mutableStateOf(initialBlocks.sumOf { it.plainText.length }) }
+    val words = remember { mutableStateOf(countWords(initialBlocks)) }
 
     Column(
         modifier = Modifier
@@ -2518,63 +2574,97 @@ internal fun EditorScreen(
             BarButton("Save", accent, FontWeight.SemiBold, onSave)
         }
 
-        // ── Editor ──────────────────────────────────────────────────────────
+        // ── Editor: one view per segment ─────────────────────────────────────
+        val segments = remember { segmentsOf(initialBlocks) }
+
+        /** Reassemble the whole document from every segment's live state. */
+        fun rebuildDocument() {
+            val out = mutableListOf<WysiwygBlock>()
+            segments.forEachIndexed { index, segment ->
+                when (segment) {
+                    is Segment.Text -> out.addAll(controllers[index]?.document() ?: segment.blocks)
+                    is Segment.Media -> out.add(segment.block)
+                }
+            }
+            onDocumentChanged(out)
+            length.value = out.sumOf { it.plainText.length }
+            words.value = countWords(out)
+        }
+
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    WysiwygEditText(context).apply {
-                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        gravity = Gravity.TOP or Gravity.START
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                        setTextColor(foreground.toArgb())
-                        setHintTextColor(foreground.copy(alpha = 0.38f).toArgb())
-                        setLineSpacing(0f, 1.15f)
-                        hint = config.placeholder
-                        setPadding(56, 24, 56, 24)
-                        // Multi-line editor: no "done" action collapsing it.
-                        inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                            android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                            android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-                        setText(Styler.toSpannable(initialBlocks, theme, night))
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                segments.forEachIndexed { index, segment ->
+                    when (segment) {
+                        is Segment.Media -> MediaCard(segment.block, foreground, accent)
+                        is Segment.Text -> AndroidView(
+                            modifier = Modifier.fillMaxWidth(),
+                            factory = { context ->
+                                WysiwygEditText(context).apply {
+                                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                    gravity = Gravity.TOP or Gravity.START
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                                    setTextColor(foreground.toArgb())
+                                    setHintTextColor(foreground.copy(alpha = 0.38f).toArgb())
+                                    setLineSpacing(0f, 1.15f)
+                                    // Only the first segment shows the placeholder.
+                                    if (index == 0) hint = config.placeholder
+                                    setPadding(56, 24, 56, 24)
+                                    inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                                        android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                                        android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                                    setText(Styler.toSpannable(segment.blocks, theme, night))
 
-                        val controller = EditorController(
-                            editText = this,
-                            config = config,
-                            night = night,
-                            onDocumentChanged = { document ->
-                                onDocumentChanged(document)
-                                length.value = document.sumOf { it.plainText.length }
-                                words.value = countWords(document)
+                                    val controller = EditorController(
+                                        editText = this,
+                                        config = config,
+                                        night = night,
+                                        onDocumentChanged = { rebuildDocument() },
+                                        onStateChanged = { revision.value++ },
+                                    )
+                                    controller.attachWatcher()
+                                    controllers[index] = controller
+                                    if (focused.value == null) focused.value = controller
+
+                                    onSelectionMoved = { controller.onCaretMoved(); revision.value++ }
+                                    onBackspace = { controller.handleBackspace() }
+                                    // The toolbar acts on whichever segment has
+                                    // the caret.
+                                    setOnFocusChangeListener { _, hasFocus ->
+                                        if (hasFocus) {
+                                            focused.value = controller
+                                            revision.value++
+                                        }
+                                    }
+
+                                    isFocusable = true
+                                    isFocusableInTouchMode = true
+
+                                    if (index == 0) {
+                                        requestFocus()
+                                        // Deferred: at factory time the view is
+                                        // not attached yet, so requestFocus
+                                        // alone does not raise the IME.
+                                        postDelayed({
+                                            requestFocus()
+                                            val imm = context.getSystemService(
+                                                android.content.Context.INPUT_METHOD_SERVICE,
+                                            ) as? android.view.inputmethod.InputMethodManager
+                                            imm?.showSoftInput(
+                                                this,
+                                                android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT,
+                                            )
+                                        }, 250)
+                                    }
+                                }
                             },
-                            onStateChanged = { revision.value++ },
                         )
-                        controller.attachWatcher()
-                        controllerState.value = controller
-                        onSelectionMoved = { controller.onCaretMoved(); revision.value++ }
-                        onBackspace = { controller.handleBackspace() }
-
-                        length.value = initialBlocks.sumOf { it.plainText.length }
-                        words.value = countWords(initialBlocks)
-
-                        // Open with the caret in the document and the keyboard
-                        // up, matching iOS — otherwise the user has to tap once
-                        // before they can type a single character.
-                        isFocusable = true
-                        isFocusableInTouchMode = true
-                        requestFocus()
-                        // Deferred: at factory time the view is not attached to
-                        // a window yet, so requestFocus alone does not raise the
-                        // IME. Retry once the overlay is actually on screen.
-                        postDelayed({
-                            requestFocus()
-                            val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
-                                as? android.view.inputmethod.InputMethodManager
-                            imm?.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
-                        }, 250)
                     }
-                },
-            )
+                }
+            }
         }
 
         // ── Counts readout ──────────────────────────────────────────────────
@@ -2601,8 +2691,7 @@ internal fun EditorScreen(
                 colors = if (kind == "textColor") TEXT_COLORS else HIGHLIGHT_COLORS,
                 foreground = foreground,
                 onPick = { hex ->
-                    val controller = controllerState.value
-                    val c = controllerState.value
+                    val c = focused.value
                     if (kind == "textColor") c?.setColor(hex) else c?.setHighlight(hex)
                     palette.value = null
                     c?.refocus()
@@ -2614,7 +2703,7 @@ internal fun EditorScreen(
         ToolbarRow(
             activity = activity,
             config = config,
-            controllerState = controllerState,
+            controllerState = focused,
             revision = revision.value,
             palette = palette,
             foreground = foreground,
@@ -2653,6 +2742,94 @@ internal fun countsReadout(
     }
 
     return parts.joinToString("  ·  ")
+}
+
+/**
+ * A media block inside the document.
+ *
+ * Deliberately NOT editable text: it renders the block and its pending upload
+ * state. Decoding actual image bytes is the next step; today it shows what the
+ * block is, its caption, and whether it is still uploading — which is what the
+ * shell needs to prove.
+ */
+@Composable
+private fun MediaCard(block: WysiwygBlock, foreground: Color, accent: Color) {
+    if (block.type == "divider") {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+                .height(1.dp)
+                .background(foreground.copy(alpha = 0.25f)),
+        )
+        return
+    }
+
+    val pending = (block.attrs["src"].orEmpty().isEmpty() &&
+        block.attrs["uploadId"].orEmpty().isNotEmpty())
+
+    val label = when (block.type) {
+        "image" -> block.attrs["alt"]?.takeIf { it.isNotEmpty() } ?: "Image"
+        "video" -> "Video"
+        "file" -> block.attrs["name"]?.takeIf { it.isNotEmpty() } ?: "File"
+        "embed" -> block.attrs["url"].orEmpty()
+        "poll" -> block.attrs["question"]?.takeIf { it.isNotEmpty() } ?: "Poll"
+        else -> block.type
+    }
+    val caption = block.attrs["caption"].orEmpty()
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(foreground.copy(alpha = 0.06f))
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Canvas(modifier = Modifier.size(20.dp)) {
+                val icon = TOOL_ICONS[if (block.type == "poll") "orderedList" else "bulletList"]
+                if (icon != null) {
+                    drawPath(
+                        path = buildIconPath(icon.path, size.width),
+                        color = accent,
+                        style = Stroke(width = 2f * size.width / 24f, cap = StrokeCap.Round, join = StrokeJoin.Round),
+                    )
+                }
+            }
+            Box(modifier = Modifier.width(10.dp))
+            BasicText(
+                text = label,
+                style = TextStyle(color = foreground, fontSize = 15.sp, fontWeight = FontWeight.Medium),
+            )
+        }
+
+        if (block.type == "poll" && block.options.isNotEmpty()) {
+            for (option in block.options) {
+                Box(modifier = Modifier.height(6.dp))
+                BasicText(
+                    text = "•  ${option.label}",
+                    style = TextStyle(color = foreground.copy(alpha = 0.75f), fontSize = 14.sp),
+                )
+            }
+        }
+
+        if (caption.isNotEmpty()) {
+            Box(modifier = Modifier.height(6.dp))
+            BasicText(
+                text = caption,
+                style = TextStyle(color = foreground.copy(alpha = 0.6f), fontSize = 13.sp),
+            )
+        }
+
+        if (pending) {
+            Box(modifier = Modifier.height(6.dp))
+            BasicText(
+                text = "Uploading…",
+                style = TextStyle(color = accent, fontSize = 12.sp, fontWeight = FontWeight.Medium),
+            )
+        }
+    }
 }
 
 @Composable

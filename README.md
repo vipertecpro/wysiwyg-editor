@@ -134,7 +134,7 @@ editor follows your app into dark mode with no configuration:
 | `background` | `background`, `surface` |
 | `text` | `on-background`, `on-surface` |
 | `accent` (Save) | `primary`, `accent` |
-| `highlight` (active tools) | `accent`, `secondary`, `primary` |
+| `highlight` (active tools) | `primary`, `accent`, `secondary` |
 
 Precedence is **explicit `theme` option → host tokens → the plugin's
 system-adaptive defaults**, so passing colours still overrides everything and
