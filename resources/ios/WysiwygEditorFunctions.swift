@@ -1598,6 +1598,116 @@ private struct EditorScreen: View {
     }
 }
 
+// MARK: - Toolbar icons
+
+/// One toolbar glyph: outline path data in a 24×24 box, plus its stroke weight.
+///
+/// The path strings below are the SINGLE SOURCE OF TRUTH for the toolbar's
+/// appearance and are duplicated VERBATIM in the Android file — that is
+/// deliberate. Platform icon sets (SF Symbols / Material) have no common
+/// subset, so drawing the same vectors on both sides is the only way the two
+/// toolbars can actually match. Keep the two copies in sync when editing.
+private struct ToolIcon {
+    let path: String
+    var stroke: CGFloat = 2
+}
+
+private let toolIcons: [String: ToolIcon] = [
+    "undo": ToolIcon(path: "M9 7L4 12L9 17M4 12L14 12C17.3 12 20 14.7 20 18"),
+    "redo": ToolIcon(path: "M15 7L20 12L15 17M20 12L10 12C6.7 12 4 14.7 4 18"),
+    "bold": ToolIcon(path: "M8 5L8 19M8 5L13 5C15.2 5 17 6.8 17 9C17 11.2 15.2 12 13 12L8 12"
+        + "M8 12L14 12C16.2 12 18 13.8 18 16C18 18.2 16.2 19 14 19L8 19"),
+    "italic": ToolIcon(path: "M10 5L18 5M6 19L14 19M14.5 5L9.5 19"),
+    "underline": ToolIcon(path: "M6 4L6 11C6 14.3 8.7 17 12 17C15.3 17 18 14.3 18 11L18 4M5 20L19 20"),
+    "strikethrough": ToolIcon(path: "M16 7C16 5.3 14.2 4 12 4C9.8 4 8 5.3 8 7C8 8.7 9.8 10 12 10"
+        + "M12 14C14.2 14 16 15.3 16 17C16 18.7 14.2 20 12 20C9.8 20 8 18.7 8 17M4 12L20 12"),
+    "h1": ToolIcon(path: "M4 6L4 18M4 12L11 12M11 6L11 18M15 9.5L17.5 8L17.5 18"),
+    "h2": ToolIcon(path: "M4 6L4 18M4 12L11 12M11 6L11 18"
+        + "M15 9.5C15 8.4 16 7.5 17.2 7.5C18.7 7.5 19.7 8.6 19.7 10C19.7 12.5 15 14.5 15 18L19.7 18"),
+    "h3": ToolIcon(path: "M4 6L4 18M4 12L11 12M11 6L11 18"
+        + "M15 8L19.5 8L16.8 11.5C18.6 11.5 19.9 12.7 19.9 14.5C19.9 16.5 18.5 18 16.7 18C15.8 18 15.2 17.7 14.8 17.2"),
+    "bulletList": ToolIcon(path: "M4 7L4.01 7M9 7L20 7M4 12L4.01 12M9 12L20 12M4 17L4.01 17M9 17L20 17"),
+    "orderedList": ToolIcon(path: "M3.6 5.2L4.7 4.6L4.7 8.4"
+        + "M3.2 11.1C3.2 10.4 3.8 9.9 4.5 9.9C5.3 9.9 5.8 10.5 5.8 11.2C5.8 12.4 3.2 13.2 3.2 14.5L5.9 14.5"
+        + "M3.3 15.9L5.9 15.9L4.5 17.7C5.3 17.7 6 18.3 6 19.1C6 19.9 5.4 20.5 4.6 20.5C4 20.5 3.6 20.3 3.3 20"
+        + "M9 6.5L20 6.5M9 12.2L20 12.2M9 18L20 18", stroke: 1.5),
+    "blockquote": ToolIcon(path: "M4 5L4 19M9 8L20 8M9 12L20 12M9 16L17 16"),
+    "link": ToolIcon(path: "M9.5 12L14.5 12"
+        + "M10 8L7.5 8C5.3 8 3.5 9.8 3.5 12C3.5 14.2 5.3 16 7.5 16L10 16"
+        + "M14 8L16.5 8C18.7 8 20.5 9.8 20.5 12C20.5 14.2 18.7 16 16.5 16L14 16"),
+    "code": ToolIcon(path: "M9 8L4.5 12L9 16M15 8L19.5 12L15 16"),
+    "textColor": ToolIcon(path: "M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 19.5L20 19.5"),
+    "highlight": ToolIcon(path: "M15 4L20 9L10 19L5 19L5 14L15 4M13 6L18 11"),
+    "clearFormat": ToolIcon(path: "M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 4L20 20"),
+]
+
+/**
+ Parse the mini path language into a SwiftUI Path, scaled from the 24×24
+ design box. Supported commands (a deliberately tiny SVG subset, so the
+ renderer on each platform stays short): M x y · L x y · C x1 y1 x2 y2 x y · Z.
+ A near-zero-length line with a round cap renders as a dot (used by the lists).
+ Unknown commands are ignored rather than trapping — a malformed glyph should
+ never crash the editor.
+ */
+private struct IconShape: Shape {
+    let data: String
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let k = min(rect.width, rect.height) / 24
+        var args: [CGFloat] = []
+        var command: Character = " "
+        let chars = Array(data)
+        var i = 0
+
+        func expected(_ c: Character) -> Int {
+            switch c {
+            case "M", "L": return 2
+            case "C": return 6
+            default: return 0
+            }
+        }
+
+        func emit() {
+            switch command {
+            case "M":
+                if args.count >= 2 { path.move(to: CGPoint(x: args[0] * k, y: args[1] * k)) }
+            case "L":
+                if args.count >= 2 { path.addLine(to: CGPoint(x: args[0] * k, y: args[1] * k)) }
+            case "C":
+                if args.count >= 6 {
+                    path.addCurve(to: CGPoint(x: args[4] * k, y: args[5] * k),
+                                  control1: CGPoint(x: args[0] * k, y: args[1] * k),
+                                  control2: CGPoint(x: args[2] * k, y: args[3] * k))
+                }
+            default:
+                break
+            }
+            args.removeAll()
+        }
+
+        while i < chars.count {
+            let c = chars[i]
+            if c.isLetter {
+                args.removeAll()
+                command = Character(c.uppercased())
+                if command == "Z" { path.closeSubpath() }
+                i += 1
+            } else if c == " " || c == "," {
+                i += 1
+            } else {
+                let start = i
+                if chars[i] == "-" { i += 1 }
+                while i < chars.count, chars[i].isNumber || chars[i] == "." { i += 1 }
+                args.append(CGFloat(Double(String(chars[start..<i])) ?? 0))
+                if args.count == expected(command) { emit() }
+            }
+        }
+
+        return path
+    }
+}
+
 // MARK: - Formatting toolbar
 
 private struct ToolbarRow: View {
@@ -1610,8 +1720,8 @@ private struct ToolbarRow: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
                 // Undo / redo are always present, ahead of the configured tools.
-                button(symbol: "arrow.uturn.backward", active: false, enabled: model.canUndo) { model.undo() }
-                button(symbol: "arrow.uturn.forward", active: false, enabled: model.canRedo) { model.redo() }
+                button("undo", active: false, enabled: model.canUndo) { model.undo() }
+                button("redo", active: false, enabled: model.canRedo) { model.redo() }
                 Rectangle()
                     .fill(theme.textColor.opacity(0.15))
                     .frame(width: 1, height: 22)
@@ -1631,54 +1741,62 @@ private struct ToolbarRow: View {
     private func toolButton(_ tool: String) -> some View {
         switch tool {
         case "bold":
-            button(symbol: "bold", active: model.activeMarks.bold) { model.toggleInline("bold") }
+            button("bold", active: model.activeMarks.bold) { model.toggleInline("bold") }
         case "italic":
-            button(symbol: "italic", active: model.activeMarks.italic) { model.toggleInline("italic") }
+            button("italic", active: model.activeMarks.italic) { model.toggleInline("italic") }
         case "underline":
-            button(symbol: "underline", active: model.activeMarks.underline) { model.toggleInline("underline") }
+            button("underline", active: model.activeMarks.underline) { model.toggleInline("underline") }
         case "strikethrough":
-            button(symbol: "strikethrough", active: model.activeMarks.strike) { model.toggleInline("strikethrough") }
+            button("strikethrough", active: model.activeMarks.strike) { model.toggleInline("strikethrough") }
         case "h1":
-            button(symbol: "1.square", active: model.activeBlock == "h1") { model.applyBlock("h1") }
+            button("h1", active: model.activeBlock == "h1") { model.applyBlock("h1") }
         case "h2":
-            button(symbol: "2.square", active: model.activeBlock == "h2") { model.applyBlock("h2") }
+            button("h2", active: model.activeBlock == "h2") { model.applyBlock("h2") }
         case "h3":
-            button(symbol: "3.square", active: model.activeBlock == "h3") { model.applyBlock("h3") }
+            button("h3", active: model.activeBlock == "h3") { model.applyBlock("h3") }
         case "bulletList":
-            button(symbol: "list.bullet", active: model.activeBlock == "ul") { model.applyBlock("bulletList") }
+            button("bulletList", active: model.activeBlock == "ul") { model.applyBlock("bulletList") }
         case "orderedList":
-            button(symbol: "list.number", active: model.activeBlock == "ol") { model.applyBlock("orderedList") }
+            button("orderedList", active: model.activeBlock == "ol") { model.applyBlock("orderedList") }
         case "blockquote":
-            button(symbol: "text.quote", active: model.activeBlock == "blockquote") { model.applyBlock("blockquote") }
+            button("blockquote", active: model.activeBlock == "blockquote") { model.applyBlock("blockquote") }
         case "link":
-            button(symbol: "link", active: model.activeMarks.link != nil) { model.linkTapped() }
+            button("link", active: model.activeMarks.link != nil) { model.linkTapped() }
         case "code":
-            button(symbol: "chevron.left.forwardslash.chevron.right", active: model.activeMarks.code) {
+            button("code", active: model.activeMarks.code) {
                 model.toggleInline("code")
             }
         case "textColor":
-            button(symbol: "paintpalette", active: model.activeMarks.color != nil || palette == .text) {
+            button("textColor", active: model.activeMarks.color != nil || palette == .text) {
                 palette = palette == .text ? nil : .text
             }
         case "highlight":
-            button(symbol: "highlighter", active: model.activeMarks.highlight != nil || palette == .highlight) {
+            button("highlight", active: model.activeMarks.highlight != nil || palette == .highlight) {
                 palette = palette == .highlight ? nil : .highlight
             }
         case "clearFormat":
-            button(symbol: "xmark.circle", active: false) { model.clearFormat() }
+            button("clearFormat", active: false) { model.clearFormat() }
         default:
             EmptyView()
         }
     }
 
-    private func button(symbol: String, active: Bool, enabled: Bool = true,
+    /// Draws the SHARED vector glyph for `tool` — deliberately not an SF
+    /// Symbol, so the toolbar is identical to Android's (see ToolIcon).
+    private func button(_ tool: String, active: Bool, enabled: Bool = true,
                         action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(active ? theme.highlightColor : theme.textColor.opacity(enabled ? 0.75 : 0.28))
-                .frame(width: 36, height: 34)
-                .background(RoundedRectangle(cornerRadius: 7)
+        let icon = toolIcons[tool] ?? ToolIcon(path: "")
+        let glyph: CGFloat = 21
+
+        return Button(action: action) {
+            IconShape(data: icon.path)
+                .stroke(style: StrokeStyle(lineWidth: icon.stroke * glyph / 24,
+                                           lineCap: .round, lineJoin: .round))
+                .foregroundColor(active ? theme.highlightColor
+                                        : theme.textColor.opacity(enabled ? 0.78 : 0.28))
+                .frame(width: glyph, height: glyph)
+                .frame(width: 38, height: 34)
+                .background(RoundedRectangle(cornerRadius: 8)
                     .fill(active ? theme.highlightColor.opacity(0.16) : Color.clear))
         }
         .disabled(!enabled)

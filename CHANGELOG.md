@@ -23,3 +23,30 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   documents round-trip identically on both platforms.
 - iOS implementation (SwiftUI + UITextView) with undo/redo, link and color
   dialogs, live character counter and a discard-changes confirm.
+- Android implementation (Compose + EditText/Spannable) mirroring iOS feature
+  for feature: the same marks and blocks, list markers with live renumbering,
+  Enter continuing or exiting a list, undo/redo, link and color dialogs, live
+  character counter and a discard-changes confirm.
+- A shared toolbar icon set — hand-drawn 24×24 vector paths defined once and
+  drawn with each platform's vector API, so the two toolbars are identical
+  rather than "SF Symbols on one side, Material on the other".
+- Cross-platform parity harnesses (`tests/native/ios`, `tests/native/android`)
+  that run the SAME case list through each platform's real coder and assert
+  byte-identical HTML, plain text and idempotence.
+
+### Fixed
+
+Found by running the editor on a real simulator and emulator:
+
+- Android: the editor did not take focus when it opened, so the keyboard stayed
+  down and the first keystrokes were dropped. It now focuses and raises the IME
+  once the overlay is attached, matching iOS.
+- Android: a block applied to an EMPTY paragraph left the text you typed
+  afterwards rendering at body size while still serializing as a heading. Block
+  presentation is now rebuilt after every change, so what you see matches what
+  you get.
+- Android: every block except the last lost its type on save — a document typed
+  as heading + list came back as `<p>` + `<p>` + `<ul>`. Creating a paragraph
+  stripped the preceding paragraph's block span, because block spans extend
+  over their terminating newline and the strip ran at that exact offset. Span
+  ownership is now checked before removal.

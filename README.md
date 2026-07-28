@@ -190,6 +190,35 @@ re-encoded — runs of ordinary whitespace collapse to a single space, U+00A0
 does not. Text between blocks that is pure whitespace is dropped; any other
 loose text opens an implicit `<p>`.
 
+### Verified examples
+
+These round-trip identically on both platforms (input → `$html`, `$text`), and
+are checked by the parity harnesses in [tests/native/ios](tests/native/ios) and
+[tests/native/android](tests/native/android):
+
+| Input | `$html` | `$text` |
+| --- | --- | --- |
+| `<p>Hello <strong>wor</strong>ld</p>` | unchanged | `Hello world` |
+| `<div>a<br>b</div>` | `<p>a</p><p>b</p>` | `a\nb` |
+| `<b>x</b>` | `<p><strong>x</strong></p>` | `x` |
+| `<h4>deep</h4>` | `<h3>deep</h3>` | `deep` |
+| `<p><a href="javascript:alert(1)">x</a></p>` | `<p>x</p>` | `x` |
+| `<p><span style="color:#f00">r</span></p>` | `<p><span style="color:#FF0000">r</span></p>` | `r` |
+| `<p><mark>h</mark></p>` | `<p><mark style="background-color:#FDE68A">h</mark></p>` | `h` |
+| `<p><br></p>` | `` (empty) | `` |
+| `<ol><li>x</li><li>y</li></ol>` | unchanged | `1. x\n2. y` |
+
+Marks that share a level nest into ONE tag rather than repeating it —
+`<strong>a<em>b</em></strong>`, never `<strong>a</strong><strong><em>b</em></strong>`.
+
+### Toolbar icons
+
+The toolbar glyphs are **hand-drawn vector paths defined once** (a 24×24
+viewBox, a tiny `M`/`L`/`C`/`Z` subset) and duplicated verbatim in the Swift
+and Kotlin files, then stroked with each platform's vector API. SF Symbols and
+Material icons share no common subset, so drawing the same vectors is the only
+way the two toolbars can genuinely match. Edit both copies together.
+
 ### Plain-text rendition (`$text`)
 
 One line per block, `\n`-joined. List items are prefixed `- ` (bullet) or

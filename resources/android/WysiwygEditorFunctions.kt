@@ -1,0 +1,2186 @@
+package com.vipertecpro.plugins.wysiwyg_editor
+
+// =============================================================================
+// WysiwygEditor — Android native rich text editor
+// =============================================================================
+//
+// A configurable, fully-native WYSIWYG editor. NOT a webview: the document is
+// an Android `Editable` with spans, edited in a real EditText, wrapped in a
+// Compose screen that supplies the chrome.
+//
+// Layout (top → bottom): [Cancel | title | Save] · editor · counter ·
+// formatting toolbar pinned above the keyboard (undo/redo, then the tools the
+// host configured, in order).
+//
+// On "Save" the document is serialized to the plugin's normalised HTML (plus a
+// plain-text rendition) and returned via the `ContentSaved` event. Mirrors the
+// iOS implementation exactly — the HTML contract in the README is normative for
+// both, and the toolbar icons are the SAME hand-drawn vector paths, so the two
+// platforms render an identical toolbar.
+// =============================================================================
+
+import android.app.AlertDialog
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.fragment.app.FragmentActivity
+import com.nativephp.mobile.bridge.BridgeFunction
+import com.nativephp.mobile.utils.NativeActionCoordinator
+import org.json.JSONArray
+import org.json.JSONObject
+
+object WysiwygEditorFunctions {
+
+    private const val TAG = "WysiwygEditor"
+    private const val EVENT_SAVED = "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved"
+    private const val EVENT_CANCELLED = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
+
+    /** Every tool the toolbar can show, in the order the `full` preset uses. */
+    val AVAILABLE_TOOLS = listOf(
+        "bold", "italic", "underline", "strikethrough",
+        "h1", "h2", "h3",
+        "bulletList", "orderedList", "blockquote",
+        "link", "code", "textColor", "highlight",
+        "clearFormat",
+    )
+
+    /**
+     * Host-app theme overrides. Every color is optional: null falls back to the
+     * editor's built-in system-adaptive default, so the editor blends into ANY
+     * app — the host decides, not the plugin. Mirrors the iOS WysiwygTheme.
+     */
+    data class EditorTheme(
+        val background: Color? = null,  // editor screen background
+        val text: Color? = null,        // body text, titles, inactive icons
+        val accent: Color? = null,      // the Save button
+        val highlight: Color? = null,   // active states (toggled tools, selection)
+    ) {
+        fun backgroundColor(night: Boolean): Color =
+            background ?: if (night) Color(0xFF0B0B0C) else Color(0xFFFFFFFF)
+
+        fun textColor(night: Boolean): Color =
+            text ?: if (night) Color(0xFFF5F5F7) else Color(0xFF111113)
+
+        fun accentColor(): Color = accent ?: Color(0.92f, 0.47f, 0.18f)
+
+        fun highlightColor(): Color = highlight ?: Color(0xFF22C55E)
+    }
+
+    data class EditorConfig(
+        val content: String,
+        val toolbar: List<String>,
+        val title: String,
+        val placeholder: String,
+        val maxLength: Int,
+        val theme: EditorTheme,
+        val id: String?,
+    )
+
+    class Open(private val activity: FragmentActivity) : BridgeFunction {
+        override fun execute(parameters: Map<String, Any>): Map<String, Any> {
+            val requested = parseStringList(parameters["toolbar"]).filter { AVAILABLE_TOOLS.contains(it) }
+
+            val config = EditorConfig(
+                content = parameters["content"] as? String ?: "",
+                // An empty/unknown toolbar would ship a bar with no buttons —
+                // fall back to everything rather than render a dead strip.
+                toolbar = requested.distinct().ifEmpty { AVAILABLE_TOOLS },
+                title = parameters["title"] as? String ?: "",
+                placeholder = parameters["placeholder"] as? String ?: "",
+                maxLength = ((parameters["maxLength"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
+                theme = parseTheme(parameters["theme"]),
+                id = parameters["id"] as? String,
+            )
+
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    present(config)
+                } catch (e: Exception) {
+                    Log.e(TAG, "open failed: ${e.message}", e)
+                    dispatch(EVENT_CANCELLED, config.id)
+                }
+            }
+
+            return emptyMap()
+        }
+
+        private fun present(config: EditorConfig) {
+            val root = activity.findViewById<ViewGroup>(android.R.id.content)
+            val overlayTag = "wysiwyg_editor_overlay"
+
+            // Re-entrancy guard: never stack two editors (e.g. a double tap).
+            if (root.findViewWithTag<android.view.View>(overlayTag) != null) {
+                dispatch(EVENT_CANCELLED, config.id)
+                return
+            }
+
+            val night = (activity.resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+
+            // The document is parsed ONCE here; the same block list seeds the
+            // editor and is the baseline the discard check compares against.
+            val initialBlocks = HtmlCoder.parse(config.content)
+            val initialHtml = HtmlCoder.serialize(initialBlocks).first
+
+            val view = ComposeView(activity).apply {
+                tag = overlayTag
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
+                // Opaque overlay — otherwise the screen underneath shows through.
+                setBackgroundColor(config.theme.backgroundColor(night).toArgb())
+                isClickable = true // swallow touches meant for the editor
+            }
+
+            // Lock orientation while the editor is up. A config-change would
+            // destroy this programmatically-added overlay and its Compose
+            // state, leaving the PHP side waiting for an event that never comes.
+            val prevOrientation = activity.requestedOrientation
+            activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
+
+            // Deliver EXACTLY ONE terminal event: Save racing Cancel, a double
+            // tap, or a Back press can otherwise fire two events — or none.
+            val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+            lateinit var backCallback: androidx.activity.OnBackPressedCallback
+
+            fun cleanup() {
+                (view.parent as? ViewGroup)?.removeView(view)
+                activity.requestedOrientation = prevOrientation
+                backCallback.remove()
+            }
+
+            fun finishCancelled() {
+                if (finished.compareAndSet(false, true)) {
+                    cleanup()
+                    dispatch(EVENT_CANCELLED, config.id)
+                }
+            }
+
+            fun finishSaved(html: String, text: String) {
+                if (finished.compareAndSet(false, true)) {
+                    cleanup()
+                    dispatch(EVENT_SAVED, config.id, html, text)
+                }
+            }
+
+            // Holds the live document so Cancel/Save can read it without the
+            // Compose tree having to hoist it back up on every keystroke.
+            val documentRef = mutableStateOf<List<WysiwygBlock>>(initialBlocks)
+
+            /** Cancel path — confirm first when the document actually changed. */
+            fun attemptCancel() {
+                val current = HtmlCoder.serialize(documentRef.value).first
+                if (current == initialHtml) {
+                    finishCancelled()
+                    return
+                }
+                AlertDialog.Builder(activity)
+                    .setTitle("Discard changes?")
+                    .setMessage("Your edits will be lost.")
+                    .setPositiveButton("Discard") { _, _ -> finishCancelled() }
+                    .setNegativeButton("Keep editing", null)
+                    .setCancelable(true)
+                    .show()
+            }
+
+            // System BACK → same as Cancel, so it can never orphan the overlay.
+            backCallback = object : androidx.activity.OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() = attemptCancel()
+            }
+            activity.onBackPressedDispatcher.addCallback(backCallback)
+
+            view.setContent {
+                EditorScreen(
+                    activity = activity,
+                    config = config,
+                    initialBlocks = initialBlocks,
+                    onDocumentChanged = { documentRef.value = it },
+                    onCancel = { attemptCancel() },
+                    onSave = {
+                        val (html, text) = HtmlCoder.serialize(documentRef.value)
+                        finishSaved(html, text)
+                    },
+                )
+            }
+
+            root.addView(view)
+        }
+
+        private fun dispatch(event: String, id: String?, html: String? = null, text: String? = null) {
+            val payload = JSONObject().apply {
+                html?.let { put("html", it) }
+                text?.let { put("text", it) }
+                id?.let { put("id", it) }
+            }
+            NativeActionCoordinator.dispatchEvent(activity, event, payload.toString())
+        }
+    }
+}
+
+// ── Config parsing ──────────────────────────────────────────────────────────
+
+private fun parseStringList(any: Any?): List<String> = when (any) {
+    is List<*> -> any.mapNotNull { it as? String }
+    is JSONArray -> (0 until any.length()).mapNotNull { i -> any.optString(i).takeIf { it.isNotEmpty() } }
+    else -> emptyList()
+}
+
+private fun parseTheme(any: Any?): WysiwygEditorFunctions.EditorTheme = when (any) {
+    is Map<*, *> -> WysiwygEditorFunctions.EditorTheme(
+        background = parseHexColor(any["background"]),
+        text = parseHexColor(any["text"]),
+        accent = parseHexColor(any["accent"]),
+        highlight = parseHexColor(any["highlight"]),
+    )
+    is JSONObject -> WysiwygEditorFunctions.EditorTheme(
+        background = parseHexColor(any.optString("background").takeIf { it.isNotEmpty() }),
+        text = parseHexColor(any.optString("text").takeIf { it.isNotEmpty() }),
+        accent = parseHexColor(any.optString("accent").takeIf { it.isNotEmpty() }),
+        highlight = parseHexColor(any.optString("highlight").takeIf { it.isNotEmpty() }),
+    )
+    else -> WysiwygEditorFunctions.EditorTheme()
+}
+
+/** #RGB / #RRGGBB / #RRGGBBAA (leading '#' optional) → Compose Color, or null. */
+private fun parseHexColor(value: Any?): Color? {
+    var s = (value as? String)?.trim()?.removePrefix("#") ?: return null
+    if (s.length == 3) s = s.map { "$it$it" }.joinToString("")
+    if (s.length != 6 && s.length != 8) return null
+    val v = s.toLongOrNull(16) ?: return null
+    return if (s.length == 6) {
+        Color(((0xFF000000L or v).toInt()))
+    } else {
+        // #RRGGBBAA on the wire → 0xAARRGGBB for Compose.
+        val rgb = (v ushr 8) and 0xFFFFFF
+        val a = v and 0xFF
+        Color((((a shl 24) or rgb).toInt()))
+    }
+}
+
+// ── Document model ──────────────────────────────────────────────────────────
+
+/**
+ * The inline marks of one run of text, in a serialization-friendly form.
+ * Nesting order (outermost → innermost) is fixed by the HTML contract:
+ * link → color → highlight → strong → em → u → s → code.
+ */
+internal data class MarkSet(
+    val link: String? = null,
+    val color: String? = null,      // "#RRGGBB"
+    val highlight: String? = null,  // "#RRGGBB"
+    val bold: Boolean = false,
+    val italic: Boolean = false,
+    val underline: Boolean = false,
+    val strike: Boolean = false,
+    val code: Boolean = false,
+) {
+    val isPlain: Boolean get() = this == MarkSet()
+}
+
+/** Mutable accumulator used while parsing (marks nest, so they stack up). */
+internal class MarkBuilder {
+    var link: String? = null
+    var color: String? = null
+    var highlight: String? = null
+    var bold = false
+    var italic = false
+    var underline = false
+    var strike = false
+    var code = false
+
+    fun build() = MarkSet(link, color, highlight, bold, italic, underline, strike, code)
+}
+
+internal data class WysiwygRun(val text: String, val marks: MarkSet)
+
+/** One block (paragraph / heading / list item / blockquote) of the document. */
+internal class WysiwygBlock(var type: String, val runs: MutableList<WysiwygRun> = mutableListOf()) {
+    val isEmpty: Boolean get() = runs.all { it.text.isEmpty() }
+    val plainText: String get() = runs.joinToString("") { it.text }
+
+    companion object {
+        val KNOWN_TYPES = setOf("p", "h1", "h2", "h3", "ul", "ol", "blockquote")
+    }
+}
+
+// ── HTML coder ──────────────────────────────────────────────────────────────
+
+/**
+ * Hand-written HTML parser + serializer implementing the plugin's normative
+ * HTML contract (see README). Both directions are pure functions over
+ * `List<WysiwygBlock>` so the round-trip is deterministic and identical to the
+ * iOS implementation. `Html.fromHtml` is deliberately NOT used — it is lossy
+ * and would not agree with iOS.
+ */
+internal object HtmlCoder {
+
+    // ── parse ───────────────────────────────────────────────────────────────
+
+    /**
+     * Tolerant scanner: aliases normalised (b→strong, i→em, del/strike→s,
+     * div→p, h4-h6→h3), <br> splits blocks, unknown tags ignored (text kept),
+     * <script>/<style> skipped entirely, inter-block whitespace ignored,
+     * entities decoded, unsafe link schemes dropped (text kept).
+     */
+    fun parse(html: String): MutableList<WysiwygBlock> {
+        val blocks = mutableListOf<WysiwygBlock>()
+        var current: WysiwygBlock? = null
+        var openedByBr = false
+        val listStack = mutableListOf<String>()
+        val markStack = mutableListOf<Pair<String, (MarkBuilder) -> Unit>>()
+        val n = html.length
+        var i = 0
+
+        fun marksNow(): MarkSet {
+            val builder = MarkBuilder()
+            markStack.forEach { it.second(builder) }
+            return builder.build()
+        }
+
+        // Unconditionally append the open block (used by <br>, which WANTS
+        // intentional empty blocks committed).
+        fun commit() {
+            current?.let { blocks.add(it) }
+            current = null
+            openedByBr = false
+        }
+
+        // Close the open block, dropping a still-empty block that only exists
+        // because a <br> split opened it (so `<p>x<br></p>` is one block).
+        fun closeBlock() {
+            if (openedByBr && (current?.isEmpty != false)) {
+                current = null
+                openedByBr = false
+            } else {
+                commit()
+            }
+        }
+
+        fun open(type: String, byBr: Boolean = false) {
+            closeBlock()
+            current = WysiwygBlock(type)
+            openedByBr = byBr
+        }
+
+        fun appendText(decoded: String) {
+            val text = collapseWhitespace(decoded)
+            if (current == null) {
+                // No open block: whitespace between blocks is ignored; real
+                // text opens an implicit paragraph (tolerance).
+                if (text.isBlank()) return
+                open("p")
+            }
+            if (text.isEmpty()) return
+            val marks = marksNow()
+            val block = current ?: return
+            val last = block.runs.lastOrNull()
+            if (last != null && last.marks == marks) {
+                block.runs[block.runs.size - 1] = WysiwygRun(last.text + text, marks)
+            } else {
+                block.runs.add(WysiwygRun(text, marks))
+            }
+        }
+
+        /** Skip everything up to (and including) `</tag …>` — script/style. */
+        fun skipRawContent(tag: String) {
+            val closing = "</$tag"
+            val at = html.indexOf(closing, startIndex = i, ignoreCase = true)
+            if (at < 0) {
+                i = n
+                return
+            }
+            var j = at
+            while (j < n && html[j] != '>') j++
+            i = minOf(j + 1, n)
+        }
+
+        fun canonicalInline(name: String): String = when (name) {
+            "b" -> "strong"
+            "i" -> "em"
+            "del", "strike" -> "s"
+            else -> name
+        }
+
+        fun handleOpen(name: String, attrText: String) {
+            when (name) {
+                "script", "style" -> skipRawContent(name)
+                "br" -> {
+                    val type = current?.type ?: "p"
+                    commit()
+                    open(type, byBr = true)
+                }
+                "p", "div" -> open("p")
+                "h1" -> open("h1")
+                "h2" -> open("h2")
+                "h3", "h4", "h5", "h6" -> open("h3")
+                "blockquote" -> open("blockquote")
+                "ul" -> { closeBlock(); listStack.add("ul") }
+                "ol" -> { closeBlock(); listStack.add("ol") }
+                "li" -> open(listStack.lastOrNull() ?: "p")
+                "a" -> {
+                    val href = allowedHref(attributes(attrText)["href"])
+                    markStack.add("a" to { b -> if (href != null) b.link = href })
+                }
+                "span" -> {
+                    val color = cssColor("color", attributes(attrText)["style"])
+                    markStack.add("span" to { b -> if (color != null) b.color = color })
+                }
+                "mark" -> {
+                    val bg = cssColor("background-color", attributes(attrText)["style"]) ?: "#FDE68A"
+                    markStack.add("mark" to { b -> b.highlight = bg })
+                }
+                "strong", "b" -> markStack.add("strong" to { b -> b.bold = true })
+                "em", "i" -> markStack.add("em" to { b -> b.italic = true })
+                "u" -> markStack.add("u" to { b -> b.underline = true })
+                "s", "del", "strike" -> markStack.add("s" to { b -> b.strike = true })
+                "code" -> markStack.add("code" to { b -> b.code = true })
+                else -> Unit // unknown tag: ignored, its text still flows through
+            }
+        }
+
+        fun handleClose(name: String) {
+            when (name) {
+                "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li" -> closeBlock()
+                "ul", "ol" -> {
+                    closeBlock()
+                    if (listStack.isNotEmpty()) listStack.removeAt(listStack.size - 1)
+                }
+                "a", "span", "mark", "strong", "b", "em", "i", "u", "s", "del", "strike", "code" -> {
+                    val canonical = canonicalInline(name)
+                    val idx = markStack.indexOfLast { it.first == canonical }
+                    if (idx >= 0) markStack.removeAt(idx)
+                }
+                else -> Unit
+            }
+        }
+
+        fun handleTag(raw: String) {
+            var body = raw.trim()
+            if (body.isEmpty()) return
+            val isClose = body.startsWith("/")
+            if (isClose) body = body.substring(1)
+            if (body.endsWith("/")) body = body.dropLast(1)
+            var k = 0
+            while (k < body.length && body[k].isLetterOrDigit()) k++
+            if (k == 0) return
+            val name = body.substring(0, k).lowercase()
+            val attrText = body.substring(k)
+            if (isClose) handleClose(name) else handleOpen(name, attrText)
+        }
+
+        while (i < n) {
+            if (html[i] == '<') {
+                if (i + 3 < n && html[i + 1] == '!' && html[i + 2] == '-' && html[i + 3] == '-') {
+                    val end = html.indexOf("-->", startIndex = i + 4)
+                    i = if (end < 0) n else end + 3
+                    continue
+                }
+                if (i + 1 < n && html[i + 1] == '!') { // <!doctype …>
+                    var j = i
+                    while (j < n && html[j] != '>') j++
+                    i = minOf(j + 1, n)
+                    continue
+                }
+                // Find the tag-closing '>' (quote-aware for attribute values).
+                var j = i + 1
+                var quote: Char? = null
+                while (j < n) {
+                    val c = html[j]
+                    if (quote != null) {
+                        if (c == quote) quote = null
+                    } else if (c == '"' || c == '\'') {
+                        quote = c
+                    } else if (c == '>') {
+                        break
+                    }
+                    j++
+                }
+                if (j >= n) { // unterminated tag — treat the rest as text
+                    appendText(decodeEntities(html.substring(i)))
+                    break
+                }
+                val inner = html.substring(i + 1, j)
+                i = j + 1
+                handleTag(inner)
+            } else {
+                var j = i
+                while (j < n && html[j] != '<') j++
+                appendText(decodeEntities(html.substring(i, j)))
+                i = j
+            }
+        }
+
+        closeBlock()
+        return blocks
+    }
+
+    // ── serialize ───────────────────────────────────────────────────────────
+
+    /**
+     * Emit the normalised HTML + the plain-text rendition. `<p><br></p>` for an
+     * intentional blank line; consecutive list items grouped into one list; no
+     * whitespace between blocks. An empty document — or a document that is just
+     * one empty paragraph — serializes to the EMPTY STRING, not `<p><br></p>`.
+     */
+    fun serialize(blocks: List<WysiwygBlock>): Pair<String, String> {
+        if (blocks.isEmpty()) return "" to ""
+        if (blocks.size == 1 && blocks[0].type == "p" && blocks[0].isEmpty) return "" to ""
+
+        val html = StringBuilder()
+        val lines = mutableListOf<String>()
+        var i = 0
+
+        while (i < blocks.size) {
+            val type = blocks[i].type
+
+            if (type == "ul" || type == "ol") {
+                html.append('<').append(type).append('>')
+                var ordinal = 1
+                while (i < blocks.size && blocks[i].type == type) {
+                    html.append("<li>").append(inlineHtml(blocks[i].runs)).append("</li>")
+                    val text = blocks[i].plainText
+                    lines.add(if (type == "ul") "- $text" else "$ordinal. $text")
+                    ordinal++
+                    i++
+                }
+                html.append("</").append(type).append('>')
+                continue
+            }
+
+            val tag = if (WysiwygBlock.KNOWN_TYPES.contains(type)) type else "p"
+            if (tag == "p" && blocks[i].isEmpty) {
+                html.append("<p><br></p>")
+            } else {
+                html.append('<').append(tag).append('>')
+                    .append(inlineHtml(blocks[i].runs))
+                    .append("</").append(tag).append('>')
+            }
+            lines.add(blocks[i].plainText)
+            i++
+        }
+
+        return html.toString() to lines.joinToString("\n")
+    }
+
+    /**
+     * Merge adjacent identical runs, then wrap them in the fixed nesting order
+     * (link → color → highlight → strong → em → u → s → code) by recursively
+     * grouping consecutive runs that share the mark at each level — so
+     * "bold, then bold+italic" emits `<strong>a<em>b</em></strong>`, one tag,
+     * not two adjacent `<strong>`s. Mirrors the iOS emitLevel exactly.
+     */
+    private fun inlineHtml(runs: List<WysiwygRun>): String {
+        val merged = mutableListOf<WysiwygRun>()
+        for (run in runs) {
+            if (run.text.isEmpty()) continue
+            val last = merged.lastOrNull()
+            if (last != null && last.marks == run.marks) {
+                merged[merged.size - 1] = WysiwygRun(last.text + run.text, run.marks)
+            } else {
+                merged.add(run)
+            }
+        }
+        return emitLevel(merged, 0, merged.size, 0)
+    }
+
+    /** The mark examined at each nesting level; null means "not marked". */
+    private fun markValue(m: MarkSet, level: Int): String? = when (level) {
+        0 -> m.link
+        1 -> m.color
+        2 -> m.highlight
+        3 -> if (m.bold) "1" else null
+        4 -> if (m.italic) "1" else null
+        5 -> if (m.underline) "1" else null
+        6 -> if (m.strike) "1" else null
+        else -> if (m.code) "1" else null
+    }
+
+    private fun emitLevel(runs: List<WysiwygRun>, from: Int, to: Int, level: Int): String {
+        if (level >= 8) {
+            val plain = StringBuilder()
+            for (i in from until to) plain.append(escapeText(runs[i].text))
+            return plain.toString()
+        }
+
+        val out = StringBuilder()
+        var i = from
+        while (i < to) {
+            val value = markValue(runs[i].marks, level)
+            var j = i + 1
+            while (j < to && markValue(runs[j].marks, level) == value) j++
+            val inner = emitLevel(runs, i, j, level + 1)
+
+            if (value != null) {
+                when (level) {
+                    0 -> out.append("<a href=\"").append(escapeAttribute(value)).append("\">")
+                        .append(inner).append("</a>")
+                    1 -> out.append("<span style=\"color:").append(value).append("\">")
+                        .append(inner).append("</span>")
+                    2 -> out.append("<mark style=\"background-color:").append(value).append("\">")
+                        .append(inner).append("</mark>")
+                    3 -> out.append("<strong>").append(inner).append("</strong>")
+                    4 -> out.append("<em>").append(inner).append("</em>")
+                    5 -> out.append("<u>").append(inner).append("</u>")
+                    6 -> out.append("<s>").append(inner).append("</s>")
+                    else -> out.append("<code>").append(inner).append("</code>")
+                }
+            } else {
+                out.append(inner)
+            }
+            i = j
+        }
+        return out.toString()
+    }
+
+    // ── helpers (shared semantics with iOS) ─────────────────────────────────
+
+    fun escapeText(s: String): String {
+        val out = StringBuilder(s.length)
+        for (c in s) {
+            when (c) {
+                '&' -> out.append("&amp;")
+                '<' -> out.append("&lt;")
+                '>' -> out.append("&gt;")
+                else -> out.append(c)
+            }
+        }
+        return out.toString()
+    }
+
+    fun escapeAttribute(s: String): String = escapeText(s).replace("\"", "&quot;")
+
+    fun decodeEntities(s: String): String {
+        if (!s.contains('&')) return s
+        val out = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            if (s[i] == '&') {
+                // Entities are short — look ahead a bounded distance for ';'.
+                var semi = -1
+                var j = i + 1
+                while (j < s.length && j - i <= 10) {
+                    if (s[j] == ';') { semi = j; break }
+                    j++
+                }
+                if (semi > i + 1) {
+                    val decoded = decodeEntity(s.substring(i + 1, semi))
+                    if (decoded != null) {
+                        out.append(decoded)
+                        i = semi + 1
+                        continue
+                    }
+                }
+            }
+            out.append(s[i])
+            i++
+        }
+        return out.toString()
+    }
+
+    private fun decodeEntity(name: String): String? {
+        when (name.lowercase()) {
+            "amp" -> return "&"
+            "lt" -> return "<"
+            "gt" -> return ">"
+            "quot" -> return "\""
+            "apos" -> return "'"
+            "nbsp" -> return "\u00A0"
+        }
+        if (name.startsWith("#")) {
+            val digits = name.substring(1)
+            val value = if (digits.startsWith("x", ignoreCase = true)) {
+                digits.substring(1).toIntOrNull(16)
+            } else {
+                digits.toIntOrNull()
+            }
+            if (value != null && value in 1..0x10FFFF) {
+                return String(Character.toChars(value))
+            }
+        }
+        return null
+    }
+
+    /**
+     * Runs of whitespace that contain a line break / tab (i.e. source-code
+     * formatting) collapse to one space; runs of plain spaces are preserved so
+     * user-typed content round-trips verbatim.
+     */
+    fun collapseWhitespace(s: String): String {
+        if (!s.any { it == '\n' || it == '\r' || it == '\t' }) return s
+        val out = StringBuilder(s.length)
+        val run = StringBuilder()
+        var runHasBreak = false
+        for (c in s) {
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t') {
+                run.append(c)
+                if (c != ' ') runHasBreak = true
+            } else {
+                if (run.isNotEmpty()) {
+                    out.append(if (runHasBreak) " " else run.toString())
+                    run.setLength(0)
+                    runHasBreak = false
+                }
+                out.append(c)
+            }
+        }
+        if (run.isNotEmpty()) out.append(if (runHasBreak) " " else run.toString())
+        return out.toString()
+    }
+
+    /** Very small attribute scanner: name[=value] pairs, quoted or bare. */
+    fun attributes(s: String): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        val n = s.length
+        var i = 0
+        while (i < n) {
+            while (i < n && s[i].isWhitespace()) i++
+            val name = StringBuilder()
+            while (i < n && !s[i].isWhitespace() && s[i] != '=') { name.append(s[i]); i++ }
+            while (i < n && s[i].isWhitespace()) i++
+            val value = StringBuilder()
+            if (i < n && s[i] == '=') {
+                i++
+                while (i < n && s[i].isWhitespace()) i++
+                if (i < n && (s[i] == '"' || s[i] == '\'')) {
+                    val q = s[i]
+                    i++
+                    while (i < n && s[i] != q) { value.append(s[i]); i++ }
+                    if (i < n) i++
+                } else {
+                    while (i < n && !s[i].isWhitespace()) { value.append(s[i]); i++ }
+                }
+            }
+            if (name.isNotEmpty()) result[name.toString().lowercase()] = decodeEntities(value.toString())
+        }
+        return result
+    }
+
+    /**
+     * Extract `property: #hex` from an inline style, canonicalised to uppercase
+     * 6-digit "#RRGGBB" (3-digit shorthand expanded). Null otherwise.
+     */
+    fun cssColor(property: String, style: String?): String? {
+        if (style == null) return null
+        for (declaration in style.split(';')) {
+            val idx = declaration.indexOf(':')
+            if (idx < 0) continue
+            val key = declaration.substring(0, idx).trim().lowercase()
+            if (key != property) continue
+            return normalizeHex(declaration.substring(idx + 1).trim())
+        }
+        return null
+    }
+
+    /** "#abc" / "#AABBCC" → "#AABBCC". Null for anything else. */
+    fun normalizeHex(raw: String): String? {
+        var s = raw.trim()
+        if (!s.startsWith("#")) return null
+        s = s.substring(1)
+        if (s.length == 3) s = s.map { "$it$it" }.joinToString("")
+        if (s.length != 6 || !s.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }) return null
+        return "#" + s.uppercase()
+    }
+
+    /** Keep only http(s)/mailto/tel hrefs (input tolerance — no auto-fixing). */
+    fun allowedHref(href: String?): String? {
+        val trimmed = href?.trim().orEmpty()
+        if (trimmed.isEmpty()) return null
+        val lower = trimmed.lowercase()
+        return if (lower.startsWith("http://") || lower.startsWith("https://") ||
+            lower.startsWith("mailto:") || lower.startsWith("tel:")
+        ) trimmed else null
+    }
+}
+
+// ── Toolbar icons ───────────────────────────────────────────────────────────
+
+/**
+ * One toolbar glyph: outline path data in a 24×24 box, plus its stroke weight.
+ *
+ * The path strings below are the SINGLE SOURCE OF TRUTH for the toolbar's
+ * appearance and are duplicated VERBATIM in the iOS file — that is deliberate.
+ * Platform icon sets (SF Symbols / Material) have no common subset, so drawing
+ * the same vectors on both sides is the only way the two toolbars can actually
+ * match. Keep the two copies in sync when editing.
+ *
+ * Supported path commands (a deliberately tiny SVG subset, so the renderer on
+ * each platform stays ~40 lines): M x y · L x y · C x1 y1 x2 y2 x y · Z.
+ * A zero-length line with a round cap renders as a dot (used by the lists).
+ */
+internal data class ToolIcon(val path: String, val stroke: Float = 2f)
+
+internal val TOOL_ICONS: Map<String, ToolIcon> = mapOf(
+    "undo" to ToolIcon("M9 7L4 12L9 17M4 12L14 12C17.3 12 20 14.7 20 18"),
+    "redo" to ToolIcon("M15 7L20 12L15 17M20 12L10 12C6.7 12 4 14.7 4 18"),
+    "bold" to ToolIcon(
+        "M8 5L8 19M8 5L13 5C15.2 5 17 6.8 17 9C17 11.2 15.2 12 13 12L8 12" +
+            "M8 12L14 12C16.2 12 18 13.8 18 16C18 18.2 16.2 19 14 19L8 19"
+    ),
+    "italic" to ToolIcon("M10 5L18 5M6 19L14 19M14.5 5L9.5 19"),
+    "underline" to ToolIcon("M6 4L6 11C6 14.3 8.7 17 12 17C15.3 17 18 14.3 18 11L18 4M5 20L19 20"),
+    "strikethrough" to ToolIcon(
+        "M16 7C16 5.3 14.2 4 12 4C9.8 4 8 5.3 8 7C8 8.7 9.8 10 12 10" +
+            "M12 14C14.2 14 16 15.3 16 17C16 18.7 14.2 20 12 20C9.8 20 8 18.7 8 17M4 12L20 12"
+    ),
+    "h1" to ToolIcon("M4 6L4 18M4 12L11 12M11 6L11 18M15 9.5L17.5 8L17.5 18"),
+    "h2" to ToolIcon(
+        "M4 6L4 18M4 12L11 12M11 6L11 18" +
+            "M15 9.5C15 8.4 16 7.5 17.2 7.5C18.7 7.5 19.7 8.6 19.7 10C19.7 12.5 15 14.5 15 18L19.7 18"
+    ),
+    "h3" to ToolIcon(
+        "M4 6L4 18M4 12L11 12M11 6L11 18" +
+            "M15 8L19.5 8L16.8 11.5C18.6 11.5 19.9 12.7 19.9 14.5C19.9 16.5 18.5 18 16.7 18C15.8 18 15.2 17.7 14.8 17.2"
+    ),
+    "bulletList" to ToolIcon("M4 7L4.01 7M9 7L20 7M4 12L4.01 12M9 12L20 12M4 17L4.01 17M9 17L20 17"),
+    "orderedList" to ToolIcon(
+        "M3.6 5.2L4.7 4.6L4.7 8.4" +
+            "M3.2 11.1C3.2 10.4 3.8 9.9 4.5 9.9C5.3 9.9 5.8 10.5 5.8 11.2C5.8 12.4 3.2 13.2 3.2 14.5L5.9 14.5" +
+            "M3.3 15.9L5.9 15.9L4.5 17.7C5.3 17.7 6 18.3 6 19.1C6 19.9 5.4 20.5 4.6 20.5C4 20.5 3.6 20.3 3.3 20" +
+            "M9 6.5L20 6.5M9 12.2L20 12.2M9 18L20 18",
+        stroke = 1.5f,
+    ),
+    "blockquote" to ToolIcon("M4 5L4 19M9 8L20 8M9 12L20 12M9 16L17 16"),
+    "link" to ToolIcon(
+        "M9.5 12L14.5 12" +
+            "M10 8L7.5 8C5.3 8 3.5 9.8 3.5 12C3.5 14.2 5.3 16 7.5 16L10 16" +
+            "M14 8L16.5 8C18.7 8 20.5 9.8 20.5 12C20.5 14.2 18.7 16 16.5 16L14 16"
+    ),
+    "code" to ToolIcon("M9 8L4.5 12L9 16M15 8L19.5 12L15 16"),
+    "textColor" to ToolIcon("M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 19.5L20 19.5"),
+    "highlight" to ToolIcon("M15 4L20 9L10 19L5 19L5 14L15 4M13 6L18 11"),
+    "clearFormat" to ToolIcon("M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 4L20 20"),
+)
+
+/**
+ * Parse the mini path language into a Compose Path, scaled from the 24×24
+ * design box to `size` pixels. Unknown commands are ignored rather than
+ * throwing — a malformed glyph should never crash the editor.
+ */
+internal fun buildIconPath(data: String, size: Float): androidx.compose.ui.graphics.Path {
+    val path = androidx.compose.ui.graphics.Path()
+    val k = size / 24f
+    val args = mutableListOf<Float>()
+    var command = ' '
+    var i = 0
+
+    fun expected(c: Char): Int = when (c) {
+        'M', 'L' -> 2
+        'C' -> 6
+        else -> 0
+    }
+
+    fun emit() {
+        when (command) {
+            'M' -> if (args.size >= 2) path.moveTo(args[0] * k, args[1] * k)
+            'L' -> if (args.size >= 2) path.lineTo(args[0] * k, args[1] * k)
+            'C' -> if (args.size >= 6) path.cubicTo(
+                args[0] * k, args[1] * k, args[2] * k, args[3] * k, args[4] * k, args[5] * k,
+            )
+        }
+        args.clear()
+    }
+
+    while (i < data.length) {
+        val c = data[i]
+        when {
+            c.isLetter() -> {
+                args.clear()
+                command = c.uppercaseChar()
+                if (command == 'Z') path.close()
+                i++
+            }
+            c == ' ' || c == ',' -> i++
+            else -> {
+                val start = i
+                if (data[i] == '-') i++
+                while (i < data.length && (data[i].isDigit() || data[i] == '.')) i++
+                args.add(data.substring(start, i).toFloatOrNull() ?: 0f)
+                if (args.size == expected(command)) emit()
+            }
+        }
+    }
+
+    return path
+}
+
+// ── Spans ───────────────────────────────────────────────────────────────────
+
+/**
+ * Marker interface for spans that carry DOCUMENT meaning (and therefore
+ * round-trip to HTML). Everything else applied to the Editable — heading
+ * sizes, quote indents, list margins — is presentation only and is ignored by
+ * the serializer, which is why display styling can reuse the platform spans
+ * freely without corrupting the document.
+ */
+internal interface SemanticSpan
+
+internal class BoldMarkSpan : android.text.style.StyleSpan(android.graphics.Typeface.BOLD), SemanticSpan
+internal class ItalicMarkSpan : android.text.style.StyleSpan(android.graphics.Typeface.ITALIC), SemanticSpan
+internal class UnderlineMarkSpan : android.text.style.UnderlineSpan(), SemanticSpan
+internal class StrikeMarkSpan : android.text.style.StrikethroughSpan(), SemanticSpan
+internal class ColorMarkSpan(val hex: String, color: Int) :
+    android.text.style.ForegroundColorSpan(color), SemanticSpan
+internal class HighlightMarkSpan(val hex: String, color: Int) :
+    android.text.style.BackgroundColorSpan(color), SemanticSpan
+internal class LinkMarkSpan(val url: String, private val tint: Int) :
+    android.text.style.CharacterStyle(), SemanticSpan, android.text.style.UpdateAppearance {
+    override fun updateDrawState(tp: android.text.TextPaint) {
+        tp.color = tint
+        tp.isUnderlineText = true
+    }
+}
+
+internal class CodeMarkSpan(private val background: Int) :
+    android.text.style.MetricAffectingSpan(), SemanticSpan {
+    override fun updateDrawState(tp: android.text.TextPaint) {
+        apply(tp)
+        tp.bgColor = background
+    }
+
+    override fun updateMeasureState(tp: android.text.TextPaint) = apply(tp)
+
+    private fun apply(tp: android.text.TextPaint) {
+        tp.typeface = android.graphics.Typeface.MONOSPACE
+    }
+}
+
+/**
+ * Paragraph type ("p", "h1", … "blockquote"). Attached with SPAN_PARAGRAPH so
+ * Android keeps it aligned to newline boundaries as the user edits.
+ */
+internal class BlockSpan(val type: String)
+
+/**
+ * Covers a list item's literal marker text ("• " / "1. "). The
+ * serializer strips it, and the editor treats it as one indivisible unit so a
+ * backspace at the start of an item removes the whole marker rather than
+ * leaving "1" behind.
+ */
+internal class MarkerSpan
+
+// ── Styler ──────────────────────────────────────────────────────────────────
+
+/** Non-breaking space — keeps a list marker glued to its item while wrapping. */
+internal const val NBSP = '\u00A0'
+
+/**
+ * Converts between the document model and the Editable the EditText renders.
+ * Display styling (sizes, indents, quote bars) is applied here and deliberately
+ * NOT read back — see [SemanticSpan].
+ */
+internal object Styler {
+
+    fun markerFor(type: String, ordinal: Int): String = when (type) {
+        "ul" -> "•$NBSP"
+        "ol" -> "$ordinal.$NBSP"
+        else -> ""
+    }
+
+    /** Build the editable text for a whole document. */
+    fun toSpannable(
+        blocks: List<WysiwygBlock>,
+        theme: WysiwygEditorFunctions.EditorTheme,
+        night: Boolean,
+    ): android.text.SpannableStringBuilder {
+        val out = android.text.SpannableStringBuilder()
+        val source = if (blocks.isEmpty()) listOf(WysiwygBlock("p")) else blocks
+        var ordinal = 1
+
+        source.forEachIndexed { index, block ->
+            if (index > 0) out.append('\n')
+            val start = out.length
+
+            // Ordered-list numbering restarts whenever the run of items breaks.
+            if (block.type == "ol") {
+                val previous = source.getOrNull(index - 1)
+                if (previous?.type != "ol") ordinal = 1
+            }
+
+            val marker = markerFor(block.type, ordinal)
+            if (marker.isNotEmpty()) {
+                out.append(marker)
+                out.setSpan(
+                    MarkerSpan(), start, out.length,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+                if (block.type == "ol") ordinal++
+            }
+
+            for (run in block.runs) {
+                if (run.text.isEmpty()) continue
+                val runStart = out.length
+                out.append(run.text)
+                applyMarks(out, runStart, out.length, run.marks, theme, night)
+            }
+
+            applyBlockStyle(out, start, out.length, block.type, theme, night)
+        }
+
+        return out
+    }
+
+    /** Attach the semantic mark spans for one run. */
+    fun applyMarks(
+        out: android.text.Spannable,
+        start: Int,
+        end: Int,
+        marks: MarkSet,
+        theme: WysiwygEditorFunctions.EditorTheme,
+        night: Boolean,
+    ) {
+        if (end <= start) return
+        val flag = android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+
+        if (marks.bold) out.setSpan(BoldMarkSpan(), start, end, flag)
+        if (marks.italic) out.setSpan(ItalicMarkSpan(), start, end, flag)
+        if (marks.underline) out.setSpan(UnderlineMarkSpan(), start, end, flag)
+        if (marks.strike) out.setSpan(StrikeMarkSpan(), start, end, flag)
+        if (marks.code) {
+            val bg = if (night) 0x22FFFFFF else 0x14000000
+            out.setSpan(CodeMarkSpan(bg), start, end, flag)
+        }
+        marks.color?.let { hex ->
+            out.setSpan(ColorMarkSpan(hex, android.graphics.Color.parseColor(hex)), start, end, flag)
+        }
+        marks.highlight?.let { hex ->
+            out.setSpan(HighlightMarkSpan(hex, android.graphics.Color.parseColor(hex)), start, end, flag)
+        }
+        marks.link?.let { url ->
+            out.setSpan(LinkMarkSpan(url, theme.accentColor().toArgb()), start, end, flag)
+        }
+    }
+
+    /** Attach the block type plus its presentation spans. */
+    fun applyBlockStyle(
+        out: android.text.Spannable,
+        start: Int,
+        end: Int,
+        type: String,
+        theme: WysiwygEditorFunctions.EditorTheme,
+        night: Boolean,
+    ) {
+        // Android only honours SPAN_PARAGRAPH when the span ends AFTER a
+        // newline (charAt(end - 1) == '\n') or at the very end of the buffer.
+        // Ending exactly AT the newline makes it silently drop the span, which
+        // loses the block type of every paragraph but the last — so extend the
+        // block span over its terminating newline.
+        val hasTrailingNewline = end < out.length
+        val blockEnd = if (hasTrailingNewline) end + 1 else out.length
+        val blockFlag = when {
+            start >= blockEnd -> android.text.Spanned.SPAN_INCLUSIVE_INCLUSIVE
+            hasTrailingNewline -> android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            // Last paragraph: typing at the end must extend the block.
+            else -> android.text.Spanned.SPAN_EXCLUSIVE_INCLUSIVE
+        }
+        out.setSpan(BlockSpan(type), start, blockEnd, blockFlag)
+
+        if (end <= start) return
+        val inclusive = android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        val paragraph = android.text.Spanned.SPAN_PARAGRAPH
+
+        when (type) {
+            "h1" -> {
+                out.setSpan(android.text.style.AbsoluteSizeSpan(28, true), start, end, inclusive)
+                out.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, end, inclusive)
+            }
+            "h2" -> {
+                out.setSpan(android.text.style.AbsoluteSizeSpan(22, true), start, end, inclusive)
+                out.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, end, inclusive)
+            }
+            "h3" -> {
+                out.setSpan(android.text.style.AbsoluteSizeSpan(18, true), start, end, inclusive)
+                out.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, end, inclusive)
+            }
+            "blockquote" -> {
+                out.setSpan(android.text.style.LeadingMarginSpan.Standard(48), start, blockEnd, paragraph)
+                out.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.ITALIC), start, end, inclusive)
+                val dim = theme.textColor(night).copy(alpha = 0.72f).toArgb()
+                out.setSpan(android.text.style.ForegroundColorSpan(dim), start, end, inclusive)
+            }
+            "ul", "ol" -> {
+                // Wrapped lines align past the marker rather than under it.
+                out.setSpan(android.text.style.LeadingMarginSpan.Standard(0, 56), start, blockEnd, paragraph)
+            }
+        }
+    }
+
+    /** Read the document back out of the editable text. */
+    fun toBlocks(text: android.text.Spanned): MutableList<WysiwygBlock> {
+        val blocks = mutableListOf<WysiwygBlock>()
+        val whole = text.toString()
+        var lineStart = 0
+
+        while (lineStart <= whole.length) {
+            var lineEnd = whole.indexOf('\n', lineStart)
+            if (lineEnd < 0) lineEnd = whole.length
+
+            // Block spans cover their terminating newline, so a query for THIS
+            // line can also return the previous line's span — keep only a span
+            // that actually starts at or before this line.
+            val type = text.getSpans(lineStart, maxOf(lineStart, lineEnd), BlockSpan::class.java)
+                .firstOrNull { text.getSpanStart(it) <= lineStart }?.type ?: "p"
+            val block = WysiwygBlock(if (WysiwygBlock.KNOWN_TYPES.contains(type)) type else "p")
+
+            // Skip the marker prefix — it is chrome, never content.
+            var contentStart = lineStart
+            if (lineEnd > lineStart) {
+                val markers = text.getSpans(lineStart, lineEnd, MarkerSpan::class.java)
+                for (marker in markers) {
+                    val markerEnd = text.getSpanEnd(marker)
+                    if (text.getSpanStart(marker) <= contentStart && markerEnd > contentStart) {
+                        contentStart = minOf(markerEnd, lineEnd)
+                    }
+                }
+            }
+
+            var i = contentStart
+            while (i < lineEnd) {
+                val next = text.nextSpanTransition(i, lineEnd, android.text.style.CharacterStyle::class.java)
+                val segmentEnd = minOf(next, lineEnd)
+                if (segmentEnd > i) {
+                    val marks = marksIn(text, i, segmentEnd)
+                    val chunk = whole.substring(i, segmentEnd)
+                    val last = block.runs.lastOrNull()
+                    if (last != null && last.marks == marks) {
+                        block.runs[block.runs.size - 1] = WysiwygRun(last.text + chunk, marks)
+                    } else {
+                        block.runs.add(WysiwygRun(chunk, marks))
+                    }
+                }
+                i = segmentEnd
+            }
+
+            blocks.add(block)
+
+            if (lineEnd >= whole.length) break
+            lineStart = lineEnd + 1
+        }
+
+        return blocks
+    }
+
+    /** The marks covering [start, end) — semantic spans only. */
+    private fun marksIn(text: android.text.Spanned, start: Int, end: Int): MarkSet {
+        val builder = MarkBuilder()
+        for (span in text.getSpans(start, end, Any::class.java)) {
+            if (span !is SemanticSpan) continue
+            // A span that merely touches the segment edge does not cover it.
+            if (text.getSpanStart(span) > start || text.getSpanEnd(span) < end) continue
+            when (span) {
+                is BoldMarkSpan -> builder.bold = true
+                is ItalicMarkSpan -> builder.italic = true
+                is UnderlineMarkSpan -> builder.underline = true
+                is StrikeMarkSpan -> builder.strike = true
+                is CodeMarkSpan -> builder.code = true
+                is ColorMarkSpan -> builder.color = span.hex
+                is HighlightMarkSpan -> builder.highlight = span.hex
+                is LinkMarkSpan -> builder.link = span.url
+            }
+        }
+        return builder.build()
+    }
+}
+
+// ── Editor controller ───────────────────────────────────────────────────────
+
+/**
+ * All editing behaviour that is not view construction: mark toggles, block
+ * conversion, list renumbering, the undo stack and the length cap.
+ *
+ * The EditText's Editable is the single source of truth while the editor is
+ * open; the document model is derived from it on demand (and pushed to the
+ * host on every change so Save/Cancel can read it without touching the view).
+ */
+internal class EditorController(
+    private val editText: android.widget.EditText,
+    private val config: WysiwygEditorFunctions.EditorConfig,
+    private val night: Boolean,
+    private val onDocumentChanged: (List<WysiwygBlock>) -> Unit,
+    private val onStateChanged: () -> Unit,
+) {
+    private val theme get() = config.theme
+
+    /** Marks to apply to the NEXT typed character (collapsed-cursor toggles). */
+    private var pendingMarks: MarkSet? = null
+
+    private var programmatic = false
+    private var lastPushAt = 0L
+    private val undoStack = ArrayDeque<Snapshot>()
+    private val redoStack = ArrayDeque<Snapshot>()
+
+    private class Snapshot(val text: android.text.SpannableStringBuilder, val selection: Int)
+
+    val canUndo: Boolean get() = undoStack.isNotEmpty()
+    val canRedo: Boolean get() = redoStack.isNotEmpty()
+
+    /** Plain-text length as the user perceives it — markers are not content. */
+    fun plainLength(): Int = Styler.toBlocks(editText.text).sumOf { it.plainText.length }
+
+    fun document(): List<WysiwygBlock> = Styler.toBlocks(editText.text)
+
+    // ── change tracking ─────────────────────────────────────────────────────
+
+    fun attachWatcher() {
+        editText.addTextChangedListener(object : android.text.TextWatcher {
+            private var insertedAt = -1
+            private var insertedCount = 0
+
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
+                if (programmatic) return
+                pushUndo()
+            }
+
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (programmatic) return
+                insertedAt = start
+                insertedCount = count
+            }
+
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (programmatic || s == null) return
+                programmatic = true
+                try {
+                    if (insertedCount > 0) {
+                        styleInsertedText(s, insertedAt, insertedAt + insertedCount)
+                    }
+                    enforceMaxLength(s)
+                    refreshBlockStyles(s)
+                    renumberLists()
+                } finally {
+                    programmatic = false
+                }
+                emit()
+            }
+        })
+    }
+
+    /**
+     * Newly typed text inherits the marks of the character to its left (so a
+     * word typed inside a bold run stays bold), unless a toolbar toggle set an
+     * explicit pending style. A typed newline additionally continues the block.
+     */
+    private fun styleInsertedText(s: android.text.Editable, start: Int, end: Int) {
+        if (end <= start) return
+
+        val newlineAt = (start until end).firstOrNull { s[it] == '\n' }
+        val marks = pendingMarks ?: inheritedMarks(s, start)
+
+        // Clear any marks the platform copied onto the inserted range, then
+        // apply exactly what we intend — otherwise pasted text keeps its
+        // source styling and the document drifts from what the toolbar shows.
+        for (span in s.getSpans(start, end, Any::class.java)) {
+            if (span is SemanticSpan) {
+                val spanStart = s.getSpanStart(span)
+                val spanEnd = s.getSpanEnd(span)
+                if (spanStart >= start && spanEnd <= end) s.removeSpan(span)
+            }
+        }
+        Styler.applyMarks(s, start, end, marks, theme, night)
+        pendingMarks = null
+
+        if (newlineAt != null) continueBlockAfterNewline(s, newlineAt)
+    }
+
+    /**
+     * Re-apply every paragraph's DISPLAY styling from its BlockSpan.
+     *
+     * A block applied to an EMPTY paragraph has nowhere to hang its size /
+     * indent spans, so text typed afterwards would render as body text while
+     * still serializing as a heading. Rebuilding the presentation spans after
+     * each change keeps what the user sees and what they get in sync.
+     */
+    private fun refreshBlockStyles(s: android.text.Editable) {
+        val whole = s.toString()
+        var lineStart = 0
+
+        while (lineStart <= whole.length) {
+            val end = lineEnd(s, lineStart)
+            val type = s.getSpans(lineStart, maxOf(lineStart, end), BlockSpan::class.java)
+                .firstOrNull { s.getSpanStart(it) <= lineStart }?.type
+
+            if (type != null && end > lineStart) {
+                stripDisplaySpans(s, lineStart, end)
+                Styler.applyBlockStyle(s, lineStart, end, type, theme, night)
+            }
+
+            if (end >= whole.length) break
+            lineStart = end + 1
+        }
+    }
+
+    /**
+     * True when `span` belongs to the paragraph beginning at `start`, rather
+     * than being the tail of the paragraph above it. Block and paragraph spans
+     * extend over their terminating newline, so a naive range query returns
+     * the previous paragraph's spans at every boundary.
+     */
+    private fun spanBelongsTo(text: android.text.Spanned, span: Any, start: Int): Boolean {
+        val spanStart = text.getSpanStart(span)
+        val spanEnd = text.getSpanEnd(span)
+        return !(spanEnd <= start && spanStart < start)
+    }
+
+    /** Remove presentation-only spans in a range, leaving the document intact. */
+    private fun stripDisplaySpans(s: android.text.Editable, start: Int, end: Int) {
+        for (span in s.getSpans(start, end, Any::class.java)) {
+            if (span is SemanticSpan || span is MarkerSpan) continue
+            if (!spanBelongsTo(s, span, start)) continue
+            if (span is BlockSpan ||
+                span is android.text.style.AbsoluteSizeSpan ||
+                span is android.text.style.LeadingMarginSpan ||
+                span is android.text.style.StyleSpan ||
+                span is android.text.style.ForegroundColorSpan
+            ) {
+                s.removeSpan(span)
+            }
+        }
+    }
+
+    private fun inheritedMarks(s: android.text.Editable, start: Int): MarkSet {
+        if (start <= 0) return MarkSet()
+        val builder = MarkBuilder()
+        for (span in s.getSpans(start - 1, start, Any::class.java)) {
+            if (span !is SemanticSpan) continue
+            if (s.getSpanEnd(span) < start) continue
+            when (span) {
+                is BoldMarkSpan -> builder.bold = true
+                is ItalicMarkSpan -> builder.italic = true
+                is UnderlineMarkSpan -> builder.underline = true
+                is StrikeMarkSpan -> builder.strike = true
+                is CodeMarkSpan -> builder.code = true
+                is ColorMarkSpan -> builder.color = span.hex
+                is HighlightMarkSpan -> builder.highlight = span.hex
+                // Links deliberately do NOT extend by typing at their edge.
+                else -> Unit
+            }
+        }
+        return builder.build()
+    }
+
+    /**
+     * Enter inside a list continues it with a fresh marker; Enter on an EMPTY
+     * list item exits the list instead (the behaviour every editor has).
+     */
+    private fun continueBlockAfterNewline(s: android.text.Editable, newlineAt: Int) {
+        val previousStart = s.toString().lastIndexOf('\n', newlineAt - 1) + 1
+        val previousType = s.getSpans(previousStart, newlineAt, BlockSpan::class.java)
+            .firstOrNull { s.getSpanStart(it) <= previousStart }?.type ?: "p"
+
+        val previousContent = contentStart(s, previousStart, newlineAt)
+        val previousIsEmptyItem = (previousType == "ul" || previousType == "ol") &&
+            previousContent >= newlineAt
+
+        if (previousIsEmptyItem) {
+            // Exit the list: strip the marker and demote BOTH paragraphs.
+            removeMarker(s, previousStart, newlineAt)
+            val strippedEnd = s.toString().indexOf('\n', previousStart).let {
+                if (it < 0) s.length else it
+            }
+            retype(s, previousStart, strippedEnd, "p")
+            val nextStart = minOf(strippedEnd + 1, s.length)
+            retype(s, nextStart, lineEnd(s, nextStart), "p")
+            return
+        }
+
+        val nextStart = newlineAt + 1
+        val nextEnd = lineEnd(s, nextStart)
+        // Headings do not continue — Enter after a title starts body text.
+        val continued = when (previousType) {
+            "h1", "h2", "h3" -> "p"
+            else -> previousType
+        }
+        retype(s, nextStart, nextEnd, continued)
+    }
+
+    // ── length cap ──────────────────────────────────────────────────────────
+
+    /**
+     * Trim back to the cap. Enforced here rather than with an InputFilter
+     * because the cap counts PLAIN TEXT — list markers are chrome and must not
+     * consume the user's budget.
+     */
+    private fun enforceMaxLength(s: android.text.Editable) {
+        if (config.maxLength <= 0) return
+        var guard = 0
+        while (plainLength() > config.maxLength && s.isNotEmpty() && guard < 4096) {
+            val cursor = editText.selectionStart.coerceIn(0, s.length)
+            val cut = (cursor - 1).coerceAtLeast(0)
+            if (cut >= s.length) break
+            s.delete(cut, cut + 1)
+            guard++
+        }
+    }
+
+    // ── undo / redo ─────────────────────────────────────────────────────────
+
+    private fun pushUndo() {
+        val now = android.os.SystemClock.uptimeMillis()
+        // Coalesce a burst of keystrokes into one undo step.
+        if (now - lastPushAt < 400 && undoStack.isNotEmpty()) return
+        lastPushAt = now
+        undoStack.addLast(snapshot())
+        while (undoStack.size > 100) undoStack.removeFirst()
+        redoStack.clear()
+        onStateChanged()
+    }
+
+    private fun snapshot() = Snapshot(
+        android.text.SpannableStringBuilder(editText.text),
+        editText.selectionStart.coerceAtLeast(0),
+    )
+
+    private fun restore(snapshot: Snapshot) {
+        programmatic = true
+        try {
+            editText.text = android.text.SpannableStringBuilder(snapshot.text)
+            editText.setSelection(snapshot.selection.coerceIn(0, editText.text.length))
+        } finally {
+            programmatic = false
+        }
+        emit()
+        onStateChanged()
+    }
+
+    fun undo() {
+        val previous = undoStack.removeLastOrNull() ?: return
+        redoStack.addLast(snapshot())
+        restore(previous)
+    }
+
+    fun redo() {
+        val next = redoStack.removeLastOrNull() ?: return
+        undoStack.addLast(snapshot())
+        restore(next)
+    }
+
+    // ── toolbar actions ─────────────────────────────────────────────────────
+
+    /** Marks currently under the cursor / selection, for toolbar highlighting. */
+    fun activeMarks(): MarkSet {
+        pendingMarks?.let { return it }
+        val text = editText.text
+        val start = editText.selectionStart.coerceIn(0, text.length)
+        val end = editText.selectionEnd.coerceIn(0, text.length)
+        if (start == end) return inheritedMarks(text, start)
+
+        // A mark is "active" for a selection only when it covers all of it.
+        var result: MarkSet? = null
+        var i = start
+        while (i < end) {
+            val next = text.nextSpanTransition(i, end, android.text.style.CharacterStyle::class.java)
+            val segment = marksOf(text, i, minOf(next, end))
+            result = if (result == null) segment else intersect(result, segment)
+            i = minOf(next, end)
+        }
+        return result ?: MarkSet()
+    }
+
+    private fun marksOf(text: android.text.Spanned, start: Int, end: Int): MarkSet {
+        val builder = MarkBuilder()
+        for (span in text.getSpans(start, end, Any::class.java)) {
+            if (span !is SemanticSpan) continue
+            if (text.getSpanStart(span) > start || text.getSpanEnd(span) < end) continue
+            when (span) {
+                is BoldMarkSpan -> builder.bold = true
+                is ItalicMarkSpan -> builder.italic = true
+                is UnderlineMarkSpan -> builder.underline = true
+                is StrikeMarkSpan -> builder.strike = true
+                is CodeMarkSpan -> builder.code = true
+                is ColorMarkSpan -> builder.color = span.hex
+                is HighlightMarkSpan -> builder.highlight = span.hex
+                is LinkMarkSpan -> builder.link = span.url
+            }
+        }
+        return builder.build()
+    }
+
+    private fun intersect(a: MarkSet, b: MarkSet) = MarkSet(
+        link = if (a.link == b.link) a.link else null,
+        color = if (a.color == b.color) a.color else null,
+        highlight = if (a.highlight == b.highlight) a.highlight else null,
+        bold = a.bold && b.bold,
+        italic = a.italic && b.italic,
+        underline = a.underline && b.underline,
+        strike = a.strike && b.strike,
+        code = a.code && b.code,
+    )
+
+    /** Block type of the paragraph holding the cursor. */
+    fun activeBlock(): String {
+        val text = editText.text
+        val cursor = editText.selectionStart.coerceIn(0, text.length)
+        val start = text.toString().lastIndexOf('\n', (cursor - 1).coerceAtLeast(0))
+            .let { if (it < 0) 0 else it + 1 }
+        val end = lineEnd(text, start)
+        return text.getSpans(start, maxOf(start, end), BlockSpan::class.java)
+            .firstOrNull { text.getSpanStart(it) <= start }?.type ?: "p"
+    }
+
+    fun toggleInline(tool: String) {
+        val current = activeMarks()
+        val next = when (tool) {
+            "bold" -> current.copy(bold = !current.bold)
+            "italic" -> current.copy(italic = !current.italic)
+            "underline" -> current.copy(underline = !current.underline)
+            "strikethrough" -> current.copy(strike = !current.strike)
+            "code" -> current.copy(code = !current.code)
+            else -> return
+        }
+        applyMarksToSelection(next)
+    }
+
+    fun setColor(hex: String?) = applyMarksToSelection(activeMarks().copy(color = hex))
+
+    fun setHighlight(hex: String?) = applyMarksToSelection(activeMarks().copy(highlight = hex))
+
+    fun setLink(url: String?) = applyMarksToSelection(activeMarks().copy(link = url))
+
+    fun clearFormat() = applyMarksToSelection(MarkSet())
+
+    /** Current link under the cursor, for pre-filling the link dialog. */
+    fun currentLink(): String? = activeMarks().link
+
+    private fun applyMarksToSelection(marks: MarkSet) {
+        val text = editText.text
+        val start = editText.selectionStart.coerceIn(0, text.length)
+        val end = editText.selectionEnd.coerceIn(0, text.length)
+
+        if (start == end) {
+            // Nothing selected — arm the style for the next keystroke.
+            pendingMarks = marks
+            onStateChanged()
+            return
+        }
+
+        pushUndoForced()
+        programmatic = true
+        try {
+            for (span in text.getSpans(start, end, Any::class.java)) {
+                if (span !is SemanticSpan) continue
+                val spanStart = text.getSpanStart(span)
+                val spanEnd = text.getSpanEnd(span)
+                text.removeSpan(span)
+                // Re-apply the parts of a partially-covered span we did not touch.
+                if (spanStart < start) reapplySingle(text, span, spanStart, start)
+                if (spanEnd > end) reapplySingle(text, span, end, spanEnd)
+            }
+            Styler.applyMarks(text, start, end, marks, theme, night)
+        } finally {
+            programmatic = false
+        }
+        emit()
+        onStateChanged()
+    }
+
+    private fun reapplySingle(text: android.text.Spannable, span: Any, start: Int, end: Int) {
+        if (end <= start) return
+        val marks = when (span) {
+            is BoldMarkSpan -> MarkSet(bold = true)
+            is ItalicMarkSpan -> MarkSet(italic = true)
+            is UnderlineMarkSpan -> MarkSet(underline = true)
+            is StrikeMarkSpan -> MarkSet(strike = true)
+            is CodeMarkSpan -> MarkSet(code = true)
+            is ColorMarkSpan -> MarkSet(color = span.hex)
+            is HighlightMarkSpan -> MarkSet(highlight = span.hex)
+            is LinkMarkSpan -> MarkSet(link = span.url)
+            else -> return
+        }
+        Styler.applyMarks(text, start, end, marks, theme, night)
+    }
+
+    /** Convert every paragraph touched by the selection; toggles back to "p". */
+    fun applyBlock(tool: String) {
+        val target = when (tool) {
+            "h1", "h2", "h3" -> tool
+            "bulletList" -> "ul"
+            "orderedList" -> "ol"
+            "blockquote" -> "blockquote"
+            else -> return
+        }
+        val next = if (activeBlock() == target) "p" else target
+
+        pushUndoForced()
+        val text = editText.text
+        programmatic = true
+        try {
+            for (range in paragraphRanges()) {
+                removeMarker(text, range.first, range.second)
+                val end = lineEnd(text, range.first)
+                retype(text, range.first, end, next)
+            }
+            renumberLists()
+        } finally {
+            programmatic = false
+        }
+        emit()
+        onStateChanged()
+    }
+
+    private fun pushUndoForced() {
+        lastPushAt = 0L
+        pushUndo()
+    }
+
+    private fun emit() = onDocumentChanged(document())
+
+    // ── paragraph plumbing ──────────────────────────────────────────────────
+
+    /** [start, end) of every paragraph the selection touches. */
+    private fun paragraphRanges(): List<Pair<Int, Int>> {
+        val text = editText.text
+        val whole = text.toString()
+        val selStart = editText.selectionStart.coerceIn(0, whole.length)
+        val selEnd = editText.selectionEnd.coerceIn(0, whole.length)
+
+        val ranges = mutableListOf<Pair<Int, Int>>()
+        var lineStart = whole.lastIndexOf('\n', (selStart - 1).coerceAtLeast(0))
+            .let { if (it < 0) 0 else it + 1 }
+
+        while (lineStart <= whole.length) {
+            val end = lineEnd(text, lineStart)
+            ranges.add(lineStart to end)
+            if (end >= selEnd || end >= whole.length) break
+            lineStart = end + 1
+        }
+        return ranges
+    }
+
+    private fun lineEnd(text: CharSequence, start: Int): Int {
+        val idx = text.toString().indexOf('\n', start)
+        return if (idx < 0) text.length else idx
+    }
+
+    /** First index of real content in a paragraph (past any list marker). */
+    private fun contentStart(text: android.text.Spanned, start: Int, end: Int): Int {
+        if (end <= start) return start
+        var result = start
+        for (marker in text.getSpans(start, end, MarkerSpan::class.java)) {
+            val markerEnd = text.getSpanEnd(marker)
+            if (text.getSpanStart(marker) <= result && markerEnd > result) {
+                result = minOf(markerEnd, end)
+            }
+        }
+        return result
+    }
+
+    private fun removeMarker(text: android.text.Editable, start: Int, end: Int) {
+        if (end <= start) return
+        val markers = text.getSpans(start, end, MarkerSpan::class.java)
+        for (marker in markers) {
+            val markerStart = text.getSpanStart(marker)
+            val markerEnd = text.getSpanEnd(marker)
+            text.removeSpan(marker)
+            if (markerEnd > markerStart) text.delete(markerStart, markerEnd)
+        }
+    }
+
+    /** Restyle one paragraph as [type], inserting a list marker when needed. */
+    private fun retype(text: android.text.Editable, start: Int, end: Int, type: String) {
+        if (start > text.length) return
+        val safeEnd = end.coerceIn(start, text.length)
+
+        for (span in text.getSpans(start, maxOf(start, safeEnd), Any::class.java)) {
+            if (span is SemanticSpan) continue
+            // A block span covers its terminating newline, so the PREVIOUS
+            // paragraph's span reaches this paragraph's start offset. Removing
+            // it here would silently strip the type off the paragraph above.
+            if (!spanBelongsTo(text, span, start)) continue
+            if (span is BlockSpan || span is android.text.style.AbsoluteSizeSpan ||
+                span is android.text.style.LeadingMarginSpan ||
+                (span is android.text.style.StyleSpan) ||
+                (span is android.text.style.ForegroundColorSpan)
+            ) {
+                text.removeSpan(span)
+            }
+        }
+
+        var contentEnd = safeEnd
+        if (type == "ul" || type == "ol") {
+            val marker = Styler.markerFor(type, 1)
+            text.insert(start, marker)
+            text.setSpan(
+                MarkerSpan(), start, start + marker.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            contentEnd = safeEnd + marker.length
+        }
+
+        Styler.applyBlockStyle(text, start, contentEnd.coerceAtMost(text.length), type, theme, night)
+    }
+
+    /**
+     * Rewrite every ordered-list marker so numbering is correct after any edit
+     * that inserted, removed or re-typed items.
+     */
+    fun renumberLists() {
+        val text = editText.text
+        val whole = text.toString()
+        var lineStart = 0
+        var ordinal = 1
+        var previousWasOrdered = false
+
+        while (lineStart <= whole.length) {
+            val end = lineEnd(text, lineStart)
+            val type = text.getSpans(lineStart, maxOf(lineStart, end), BlockSpan::class.java)
+                .firstOrNull { text.getSpanStart(it) <= lineStart }?.type ?: "p"
+
+            if (type == "ol") {
+                if (!previousWasOrdered) ordinal = 1
+                val expected = Styler.markerFor("ol", ordinal)
+                val marker = text.getSpans(lineStart, maxOf(lineStart, end), MarkerSpan::class.java)
+                    .firstOrNull()
+                if (marker != null) {
+                    val markerStart = text.getSpanStart(marker)
+                    val markerEnd = text.getSpanEnd(marker)
+                    if (whole.substring(markerStart, markerEnd) != expected) {
+                        text.removeSpan(marker)
+                        text.replace(markerStart, markerEnd, expected)
+                        text.setSpan(
+                            MarkerSpan(), markerStart, markerStart + expected.length,
+                            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                        )
+                        // The buffer shifted — restart the sweep rather than
+                        // walking stale offsets.
+                        renumberLists()
+                        return
+                    }
+                }
+                ordinal++
+                previousWasOrdered = true
+            } else {
+                previousWasOrdered = false
+            }
+
+            if (end >= whole.length) break
+            lineStart = end + 1
+        }
+    }
+}
+
+// ── Palettes (normative — identical on iOS) ─────────────────────────────────
+
+internal val TEXT_COLORS = listOf("#EF4444", "#F97316", "#EAB308", "#22C55E", "#3B82F6", "#A855F7")
+internal val HIGHLIGHT_COLORS = listOf("#FDE68A", "#FED7AA", "#BBF7D0", "#BFDBFE", "#E9D5FF", "#FBCFE8")
+
+// ── EditText subclass ───────────────────────────────────────────────────────
+
+/** EditText that reports caret moves, so the toolbar can track active state. */
+internal class WysiwygEditText(context: android.content.Context) :
+    android.widget.EditText(context) {
+
+    var onSelectionMoved: (() -> Unit)? = null
+
+    override fun onSelectionChanged(selStart: Int, selEnd: Int) {
+        super.onSelectionChanged(selStart, selEnd)
+        onSelectionMoved?.invoke()
+    }
+}
+
+// ── Screen ──────────────────────────────────────────────────────────────────
+
+@Composable
+internal fun EditorScreen(
+    activity: FragmentActivity,
+    config: WysiwygEditorFunctions.EditorConfig,
+    initialBlocks: List<WysiwygBlock>,
+    onDocumentChanged: (List<WysiwygBlock>) -> Unit,
+    onCancel: () -> Unit,
+    onSave: () -> Unit,
+) {
+    val night = isSystemInDarkTheme()
+    val theme = config.theme
+    val background = theme.backgroundColor(night)
+    val foreground = theme.textColor(night)
+    val accent = theme.accentColor()
+
+    val controllerState = remember { mutableStateOf<EditorController?>(null) }
+    // Bumped on every edit / caret move so the toolbar re-reads active state.
+    val revision = remember { mutableStateOf(0) }
+    val palette = remember { mutableStateOf<String?>(null) }
+    val length = remember { mutableStateOf(0) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(background)
+            .systemBarsPadding()
+            .imePadding(),
+    ) {
+        // ── Top bar ─────────────────────────────────────────────────────────
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BarButton("Cancel", foreground.copy(alpha = 0.8f), FontWeight.Normal, onCancel)
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                if (config.title.isNotEmpty()) {
+                    BasicText(
+                        text = config.title,
+                        style = TextStyle(color = foreground, fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
+                    )
+                }
+            }
+            BarButton("Save", accent, FontWeight.SemiBold, onSave)
+        }
+
+        // ── Editor ──────────────────────────────────────────────────────────
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context ->
+                    WysiwygEditText(context).apply {
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        gravity = Gravity.TOP or Gravity.START
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                        setTextColor(foreground.toArgb())
+                        setHintTextColor(foreground.copy(alpha = 0.38f).toArgb())
+                        setLineSpacing(0f, 1.15f)
+                        hint = config.placeholder
+                        setPadding(56, 24, 56, 24)
+                        // Multi-line editor: no "done" action collapsing it.
+                        inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                            android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                            android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                        setText(Styler.toSpannable(initialBlocks, theme, night))
+
+                        val controller = EditorController(
+                            editText = this,
+                            config = config,
+                            night = night,
+                            onDocumentChanged = {
+                                onDocumentChanged(it)
+                                length.value = it.sumOf { block -> block.plainText.length }
+                            },
+                            onStateChanged = { revision.value++ },
+                        )
+                        controller.attachWatcher()
+                        controllerState.value = controller
+                        onSelectionMoved = { revision.value++ }
+
+                        length.value = initialBlocks.sumOf { it.plainText.length }
+
+                        // Open with the caret in the document and the keyboard
+                        // up, matching iOS — otherwise the user has to tap once
+                        // before they can type a single character.
+                        isFocusable = true
+                        isFocusableInTouchMode = true
+                        requestFocus()
+                        // Deferred: at factory time the view is not attached to
+                        // a window yet, so requestFocus alone does not raise the
+                        // IME. Retry once the overlay is actually on screen.
+                        postDelayed({
+                            requestFocus()
+                            val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                                as? android.view.inputmethod.InputMethodManager
+                            imm?.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                        }, 250)
+                    }
+                },
+            )
+        }
+
+        // ── Character counter ───────────────────────────────────────────────
+        if (config.maxLength > 0) {
+            val over = length.value >= config.maxLength
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
+            ) {
+                BasicText(
+                    text = "${length.value}/${config.maxLength}",
+                    style = TextStyle(
+                        color = if (over) Color(0xFFEF4444) else foreground.copy(alpha = 0.45f),
+                        fontSize = 12.sp,
+                    ),
+                )
+            }
+        }
+
+        // ── Colour palette (shown while a colour tool is armed) ─────────────
+        palette.value?.let { kind ->
+            PaletteRow(
+                colors = if (kind == "textColor") TEXT_COLORS else HIGHLIGHT_COLORS,
+                foreground = foreground,
+                onPick = { hex ->
+                    val controller = controllerState.value
+                    if (kind == "textColor") controller?.setColor(hex) else controller?.setHighlight(hex)
+                    palette.value = null
+                },
+            )
+        }
+
+        // ── Formatting toolbar ──────────────────────────────────────────────
+        ToolbarRow(
+            activity = activity,
+            config = config,
+            controllerState = controllerState,
+            revision = revision.value,
+            palette = palette,
+            foreground = foreground,
+            background = background,
+        )
+    }
+}
+
+@Composable
+private fun BarButton(label: String, color: Color, weight: FontWeight, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        BasicText(text = label, style = TextStyle(color = color, fontSize = 16.sp, fontWeight = weight))
+    }
+}
+
+// ── Toolbar ─────────────────────────────────────────────────────────────────
+
+@Composable
+private fun ToolbarRow(
+    activity: FragmentActivity,
+    config: WysiwygEditorFunctions.EditorConfig,
+    controllerState: androidx.compose.runtime.MutableState<EditorController?>,
+    revision: Int,
+    palette: androidx.compose.runtime.MutableState<String?>,
+    foreground: Color,
+    background: Color,
+) {
+    val controller = controllerState.value
+    // Reading `revision` here is what makes the bar recompose on caret moves.
+    @Suppress("UNUSED_EXPRESSION") revision
+
+    val marks = controller?.activeMarks() ?: MarkSet()
+    val block = controller?.activeBlock() ?: "p"
+    val highlightColor = config.theme.highlightColor()
+
+    Column(modifier = Modifier.fillMaxWidth().background(background)) {
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(foreground.copy(alpha = 0.12f)))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ToolButton("undo", false, controller?.canUndo == true, foreground, highlightColor) {
+                controller?.undo()
+            }
+            ToolButton("redo", false, controller?.canRedo == true, foreground, highlightColor) {
+                controller?.redo()
+            }
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 6.dp)
+                    .width(1.dp)
+                    .height(22.dp)
+                    .background(foreground.copy(alpha = 0.15f)),
+            )
+
+            for (tool in config.toolbar) {
+                val active = when (tool) {
+                    "bold" -> marks.bold
+                    "italic" -> marks.italic
+                    "underline" -> marks.underline
+                    "strikethrough" -> marks.strike
+                    "code" -> marks.code
+                    "link" -> marks.link != null
+                    "textColor" -> marks.color != null || palette.value == "textColor"
+                    "highlight" -> marks.highlight != null || palette.value == "highlight"
+                    "h1" -> block == "h1"
+                    "h2" -> block == "h2"
+                    "h3" -> block == "h3"
+                    "bulletList" -> block == "ul"
+                    "orderedList" -> block == "ol"
+                    "blockquote" -> block == "blockquote"
+                    else -> false
+                }
+
+                ToolButton(tool, active, true, foreground, highlightColor) {
+                    when (tool) {
+                        "bold", "italic", "underline", "strikethrough", "code" ->
+                            controller?.toggleInline(tool)
+                        "h1", "h2", "h3", "bulletList", "orderedList", "blockquote" ->
+                            controller?.applyBlock(tool)
+                        "clearFormat" -> controller?.clearFormat()
+                        "textColor" -> palette.value = if (palette.value == "textColor") null else "textColor"
+                        "highlight" -> palette.value = if (palette.value == "highlight") null else "highlight"
+                        "link" -> controller?.let { showLinkDialog(activity, it.currentLink()) { url -> it.setLink(url) } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolButton(
+    tool: String,
+    active: Boolean,
+    enabled: Boolean,
+    foreground: Color,
+    highlight: Color,
+    onClick: () -> Unit,
+) {
+    val icon = TOOL_ICONS[tool] ?: return
+    val tint = when {
+        active -> highlight
+        enabled -> foreground.copy(alpha = 0.78f)
+        else -> foreground.copy(alpha = 0.28f)
+    }
+
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (active) highlight.copy(alpha = 0.16f) else Color.Transparent)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.size(21.dp)) {
+            drawPath(
+                path = buildIconPath(icon.path, size.width),
+                color = tint,
+                style = Stroke(
+                    width = icon.stroke * size.width / 24f,
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round,
+                ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun PaletteRow(colors: List<String>, foreground: Color, onPick: (String?) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+    ) {
+        // "None" — clears the colour rather than applying one.
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.Transparent)
+                .clickable { onPick(null) },
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(modifier = Modifier.size(24.dp)) {
+                drawPath(
+                    path = buildIconPath("M4 20L20 4", size.width),
+                    color = foreground.copy(alpha = 0.6f),
+                    style = Stroke(width = 2f * size.width / 24f, cap = StrokeCap.Round),
+                )
+            }
+        }
+
+        for (hex in colors) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(android.graphics.Color.parseColor(hex)))
+                    .clickable { onPick(hex) },
+            )
+        }
+    }
+}
+
+// ── Link dialog ─────────────────────────────────────────────────────────────
+
+/**
+ * Prompt for a URL, pre-filled when the caret sits inside an existing link.
+ * A bare host gets an https:// prefix; something that looks like an address
+ * becomes a mailto:. Anything else is rejected by the serializer's scheme
+ * allow-list, so no javascript: URL can reach the document.
+ */
+private fun showLinkDialog(
+    activity: FragmentActivity,
+    current: String?,
+    onApply: (String?) -> Unit,
+) {
+    val input = android.widget.EditText(activity).apply {
+        setText(current ?: "")
+        hint = "https://"
+        setSingleLine()
+        inputType = android.text.InputType.TYPE_CLASS_TEXT or
+            android.text.InputType.TYPE_TEXT_VARIATION_URI
+    }
+    val padded = FrameLayout(activity).apply {
+        val pad = (16 * activity.resources.displayMetrics.density).toInt()
+        setPadding(pad, pad / 2, pad, 0)
+        addView(input)
+    }
+
+    val builder = AlertDialog.Builder(activity)
+        .setTitle("Link")
+        .setView(padded)
+        .setPositiveButton("Apply") { _, _ -> onApply(normalizeUrl(input.text.toString())) }
+        .setNegativeButton("Cancel", null)
+
+    if (current != null) {
+        builder.setNeutralButton("Remove") { _, _ -> onApply(null) }
+    }
+
+    builder.show()
+}
+
+private fun normalizeUrl(raw: String): String? {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return null
+    val lower = trimmed.lowercase()
+    return when {
+        lower.startsWith("http://") || lower.startsWith("https://") ||
+            lower.startsWith("mailto:") || lower.startsWith("tel:") -> trimmed
+        trimmed.contains('@') && !trimmed.contains(' ') -> "mailto:$trimmed"
+        else -> "https://$trimmed"
+    }
+}
