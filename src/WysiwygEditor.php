@@ -76,6 +76,29 @@ class WysiwygEditor
     public const THEME_KEYS = ['background', 'text', 'accent', 'highlight'];
 
     /**
+     * Live readouts the editor can show beneath the content.
+     *
+     *  - characters: plain-text character count
+     *  - words:      whitespace-delimited word count
+     *  - readingTime: minutes at 200 wpm, rounded up (minimum 1)
+     */
+    public const AVAILABLE_COUNTS = ['characters', 'words', 'readingTime'];
+
+    /**
+     * How the host application's NativeUI theme tokens map onto the editor's
+     * four surfaces. Consulted per colour scheme so the editor follows the app
+     * into dark mode without the developer configuring anything.
+     *
+     * @var array<string, list<string>>  editor key => host tokens, best first
+     */
+    protected const HOST_TOKEN_MAP = [
+        'background' => ['background', 'surface'],
+        'text' => ['on-background', 'on-surface'],
+        'accent' => ['primary', 'accent'],
+        'highlight' => ['accent', 'secondary', 'primary'],
+    ];
+
+    /**
      * Open the full-screen native editor.
      *
      * @param  string  $html  The current content as HTML (may be ''). Only the
@@ -88,6 +111,7 @@ class WysiwygEditor
      *     title?: string,
      *     placeholder?: string,
      *     maxLength?: int,
+     *     counts?: list<string>,
      *     theme?: array<string, string>,
      *     id?: string|null
      * }  $options  Editor configuration. `preset` picks a built-in toolbar
@@ -126,9 +150,63 @@ class WysiwygEditor
             'title' => (string) ($options['title'] ?? ''),
             'placeholder' => (string) ($options['placeholder'] ?? ''),
             'maxLength' => max(0, (int) ($options['maxLength'] ?? 0)),
+            'counts' => $this->resolveCounts($options['counts'] ?? []),
+            // Explicit overrides win; the two scheme maps below are the host
+            // app's own theme, so an unconfigured editor still looks native.
             'theme' => $this->resolveTheme($options['theme'] ?? []),
+            'themeLight' => $this->hostTheme('light'),
+            'themeDark' => $this->hostTheme('dark'),
             'id' => $options['id'] ?? null,
         ];
+    }
+
+    /**
+     * Keep only known count readouts, in the documented order.
+     *
+     * @param  list<string>  $counts
+     * @return list<string>
+     */
+    protected function resolveCounts(array $counts): array
+    {
+        return array_values(array_intersect(self::AVAILABLE_COUNTS, $counts));
+    }
+
+    /**
+     * Derive the editor's palette from the HOST application's NativeUI theme
+     * tokens, so it adopts the app's colours without the developer restating
+     * them. Returns an empty array when NativeUI isn't installed or has no
+     * tokens for the scheme — the native side then falls back to its own
+     * system-adaptive defaults, exactly as before.
+     *
+     * @return array<string, string>
+     */
+    protected function hostTheme(string $scheme): array
+    {
+        if (! class_exists(\Nativephp\NativeUi\Theme::class)) {
+            return [];
+        }
+
+        $tokens = \Nativephp\NativeUi\Theme::all()[$scheme] ?? [];
+
+        if (! is_array($tokens) || $tokens === []) {
+            return [];
+        }
+
+        $resolved = [];
+
+        foreach (self::HOST_TOKEN_MAP as $key => $candidates) {
+            foreach ($candidates as $token) {
+                $value = $tokens[$token] ?? null;
+
+                if (is_string($value) && preg_match('/^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/', $value, $m)) {
+                    $resolved[$key] = '#'.$m[1];
+
+                    break;
+                }
+            }
+        }
+
+        return $resolved;
     }
 
     /**

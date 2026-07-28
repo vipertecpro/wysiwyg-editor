@@ -151,6 +151,83 @@ describe('Config resolution', function () {
     });
 });
 
+describe('Counts', function () {
+    it('is off by default', function () {
+        expect(editor()->config('')['counts'])->toBe([]);
+    });
+
+    it('keeps known readouts in the documented order', function () {
+        $config = editor()->config('', ['counts' => ['words', 'characters']]);
+
+        expect($config['counts'])->toBe(['characters', 'words']);
+    });
+
+    it('drops unknown readouts', function () {
+        expect(editor()->config('', ['counts' => ['sentences']])['counts'])->toBe([]);
+    });
+});
+
+describe('Host theme adoption', function () {
+    it('emits a palette per colour scheme', function () {
+        $config = editor()->config('');
+
+        expect($config)->toHaveKeys(['themeLight', 'themeDark']);
+    });
+
+    it('derives the editor palette from the host tokens', function () {
+        \Nativephp\NativeUi\Theme::load([
+            'light' => [
+                'background' => '#FFFFFF',
+                'on-background' => '#111111',
+                'primary' => '#0000FF',
+                'accent' => '#FF00FF',
+            ],
+            'dark' => [
+                'surface' => '#000000',
+                'on-surface' => '#EEEEEE',
+                'primary' => '#00FFFF',
+            ],
+        ]);
+
+        $config = editor()->config('');
+
+        expect($config['themeLight'])->toBe([
+            'background' => '#FFFFFF',
+            'text' => '#111111',
+            'accent' => '#0000FF',
+            'highlight' => '#FF00FF',
+        ]);
+
+        // Dark has no `background`/`on-background`; the fallbacks are used,
+        // and `highlight` falls all the way back to `primary`.
+        expect($config['themeDark'])->toBe([
+            'background' => '#000000',
+            'text' => '#EEEEEE',
+            'accent' => '#00FFFF',
+            'highlight' => '#00FFFF',
+        ]);
+
+        \Nativephp\NativeUi\Theme::reset();
+    });
+
+    it('stays empty when the host has no tokens, so native defaults apply', function () {
+        \Nativephp\NativeUi\Theme::reset();
+
+        $config = editor()->config('');
+
+        expect($config['themeLight'])->toBe([])
+            ->and($config['themeDark'])->toBe([]);
+    });
+
+    it('ignores malformed host colours rather than passing them through', function () {
+        \Nativephp\NativeUi\Theme::load(['light' => ['background' => 'rebeccapurple']]);
+
+        expect(editor()->config('')['themeLight'])->toBe([]);
+
+        \Nativephp\NativeUi\Theme::reset();
+    });
+});
+
 describe('Theme resolution', function () {
     it('keeps valid hex colors and normalises the leading hash', function () {
         $config = editor()->config('', ['theme' => [

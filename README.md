@@ -102,7 +102,8 @@ All options are optional:
 | `title` | string | `''` | Heading shown in the editor's top bar |
 | `placeholder` | string | `''` | Shown while the editor is empty |
 | `maxLength` | int | `0` | Max **plain-text** length; `0` = unlimited. Shows a live counter |
-| `theme` | array | `[]` | Hex colors: `background`, `text`, `accent` (Save button), `highlight` (active states). Omitted keys keep the system-adaptive light/dark defaults |
+| `counts` | list | `[]` | Live readouts: `characters`, `words`, `readingTime` (200 wpm, min 1) |
+| `theme` | array | `[]` | Hex colors: `background`, `text`, `accent` (Save button), `highlight` (active states). Omitted keys fall back to the host app's theme, then to system-adaptive defaults |
 | `id` | string | `null` | Echoed back on the result event, to correlate concurrent editors |
 
 Available tools for `toolbar` (this order is the `full` preset):
@@ -121,7 +122,25 @@ WysiwygEditor::open($html, ['preset' => 'note']);               // bold italic u
 WysiwygEditor::open($html, ['toolbar' => ['bold', 'link']]);    // exactly these, in this order
 ```
 
-Theme it to match your app:
+### Theming
+
+The editor **adopts the host application's theme automatically**. When
+`nativephp/native-ui` is present the plugin reads its tokens
+(`Theme::all()`) and derives its four surfaces per colour scheme, so the
+editor follows your app into dark mode with no configuration:
+
+| Editor surface | Host token (first match wins) |
+| --- | --- |
+| `background` | `background`, `surface` |
+| `text` | `on-background`, `on-surface` |
+| `accent` (Save) | `primary`, `accent` |
+| `highlight` (active tools) | `accent`, `secondary`, `primary` |
+
+Precedence is **explicit `theme` option → host tokens → the plugin's
+system-adaptive defaults**, so passing colours still overrides everything and
+an app without NativeUI behaves exactly as before.
+
+Override it explicitly to match a specific look:
 
 ```php
 WysiwygEditor::open($html, [

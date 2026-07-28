@@ -54,18 +54,43 @@ struct WysiwygTheme {
     let accent: UIColor?       // the Save button / caret / link display
     let highlight: UIColor?    // active toolbar buttons
 
-    init(_ p: [String: Any]?) {
+    init(_ p: [String: Any]?, light: [String: Any]? = nil, dark: [String: Any]? = nil) {
         background = UIColor(wysiwygHex: p?["background"] as? String)
         text = UIColor(wysiwygHex: p?["text"] as? String)
         accent = UIColor(wysiwygHex: p?["accent"] as? String)
         highlight = UIColor(wysiwygHex: p?["highlight"] as? String)
+        self.light = WysiwygTheme.palette(light)
+        self.dark = WysiwygTheme.palette(dark)
     }
 
-    // Resolved SwiftUI colors with the classic defaults.
-    var backgroundColor: Color { background.map(Color.init) ?? Color(.systemBackground) }
-    var textColor: Color { text.map(Color.init) ?? .primary }
-    var accentColor: Color { accent.map(Color.init) ?? Color(red: 0.92, green: 0.47, blue: 0.18) }
-    var highlightColor: Color { highlight.map(Color.init) ?? .green }
+    /// One colour-scheme palette from PHP: editor key → colour.
+    private static func palette(_ raw: [String: Any]?) -> [String: UIColor] {
+        guard let raw else { return [:] }
+        var out: [String: UIColor] = [:]
+        for key in ["background", "text", "accent", "highlight"] {
+            if let color = UIColor(wysiwygHex: raw[key] as? String) { out[key] = color }
+        }
+        return out
+    }
+
+    /// The HOST app's palette per colour scheme, resolved in PHP from its
+    /// NativeUI theme tokens. Used when the caller gave no explicit colour, so
+    /// an unconfigured editor still looks like part of the app.
+    var light: [String: UIColor] = [:]
+    var dark: [String: UIColor] = [:]
+
+    private func host(_ key: String) -> Color? {
+        let night = UITraitCollection.current.userInterfaceStyle == .dark
+        return (night ? dark : light)[key].map(Color.init)
+    }
+
+    // Resolved SwiftUI colors: explicit → host theme → built-in default.
+    var backgroundColor: Color { background.map(Color.init) ?? host("background") ?? Color(.systemBackground) }
+    var textColor: Color { text.map(Color.init) ?? host("text") ?? .primary }
+    var accentColor: Color {
+        accent.map(Color.init) ?? host("accent") ?? Color(red: 0.92, green: 0.47, blue: 0.18)
+    }
+    var highlightColor: Color { highlight.map(Color.init) ?? host("highlight") ?? .green }
 
     // Resolved UIKit colors for the text engine.
     var backgroundUIColor: UIColor { background ?? .systemBackground }
@@ -108,6 +133,7 @@ struct WysiwygConfig {
     let title: String
     let placeholder: String
     let maxLength: Int
+    let counts: [String]
     let theme: WysiwygTheme
     let id: String?
 
@@ -118,7 +144,10 @@ struct WysiwygConfig {
         title = p["title"] as? String ?? ""
         placeholder = p["placeholder"] as? String ?? ""
         maxLength = max(0, (p["maxLength"] as? NSNumber)?.intValue ?? 0)
-        theme = WysiwygTheme(p["theme"] as? [String: Any])
+        counts = p["counts"] as? [String] ?? []
+        theme = WysiwygTheme(p["theme"] as? [String: Any],
+                             light: p["themeLight"] as? [String: Any],
+                             dark: p["themeDark"] as? [String: Any])
         id = p["id"] as? String
     }
 }
@@ -810,6 +839,15 @@ enum HtmlCoder {
     }
 }
 
+/// Whitespace-delimited words across the whole document.
+func countWords(_ blocks: [WysiwygBlock]) -> Int {
+    blocks.reduce(0) { total, block in
+        total + block.plainText
+            .split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" || $0 == "\u{00A0}" })
+            .count
+    }
+}
+
 // MARK: - JSON coder
 
 /// The FIDELITY format: unlike HTML it carries block ids, upload state and poll
@@ -1268,6 +1306,24 @@ struct WysiwygStyler {
     }
 }
 
+/// The readout beneath the content. `maxLength` always shows as "n/max" (it is
+/// a limit, not a statistic); the optional `counts` add statistics beside it.
+func countsReadout(_ config: WysiwygConfig, _ characters: Int, _ words: Int) -> String {
+    var parts: [String] = []
+
+    if config.maxLength > 0 {
+        parts.append("\(characters)/\(config.maxLength)")
+    } else if config.counts.contains("characters") {
+        parts.append("\(characters) chars")
+    }
+    if config.counts.contains("words") { parts.append("\(words) words") }
+    if config.counts.contains("readingTime") {
+        parts.append("\(max(1, Int(ceil(Double(words) / 200.0)))) min")
+    }
+
+    return parts.joined(separator: "  ·  ")
+}
+
 // MARK: - Editor model
 
 /// Owns the UITextView document: toolbar actions, typing/selection rules,
@@ -1288,6 +1344,7 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
     @Published var canUndo = false
     @Published var canRedo = false
     @Published var charCount = 0
+    @Published var wordCount = 0
 
     /// Re-entrancy guards: delegate callbacks fired by our own programmatic
     /// edits must not re-trigger the pipeline.
@@ -1406,6 +1463,7 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         activeMarks = m
         tv.typingAttributes = styler.attributes(block: activeBlock, marks: m)
         charCount = totalPlainCount()
+        wordCount = storage.map { countWords(styler.blocks(from: $0)) } ?? 0
         canUndo = tv.undoManager?.canUndo ?? false
         canRedo = tv.undoManager?.canRedo ?? false
         placeholderLabel?.isHidden = st.length > 0
@@ -1960,7 +2018,7 @@ private struct EditorScreen: View {
                 topBar
                 RichTextView(model: model)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if model.config.maxLength > 0 { counter }
+                if !countsReadout(model.config, model.charCount, model.wordCount).isEmpty { counter }
                 if let kind = palette {
                     PaletteRow(kind: kind, theme: theme) { hex in
                         if kind == .text { model.applyTextColor(hex) } else { model.applyHighlight(hex) }
@@ -2006,11 +2064,12 @@ private struct EditorScreen: View {
     }
 
     private var counter: some View {
-        HStack {
+        let over = model.config.maxLength > 0 && model.charCount >= model.config.maxLength
+        return HStack {
             Spacer()
-            Text("\(model.charCount)/\(model.config.maxLength)")
+            Text(countsReadout(model.config, model.charCount, model.wordCount))
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(model.charCount >= model.config.maxLength ? .red : theme.textColor.opacity(0.5))
+                .foregroundColor(over ? .red : theme.textColor.opacity(0.5))
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 4)

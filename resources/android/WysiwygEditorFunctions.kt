@@ -75,6 +75,9 @@ object WysiwygEditorFunctions {
     private const val EVENT_SAVED = "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved"
     private const val EVENT_CANCELLED = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
 
+    /** The four surfaces the editor colours. */
+    val THEME_KEYS = listOf("background", "text", "accent", "highlight")
+
     /** Every tool the toolbar can show, in the order the `full` preset uses. */
     val AVAILABLE_TOOLS = listOf(
         "bold", "italic", "underline", "strikethrough",
@@ -94,16 +97,30 @@ object WysiwygEditorFunctions {
         val text: Color? = null,        // body text, titles, inactive icons
         val accent: Color? = null,      // the Save button
         val highlight: Color? = null,   // active states (toggled tools, selection)
+        // The HOST app's palette per colour scheme, resolved in PHP from its
+        // NativeUI theme tokens. Used when the caller gave no explicit colour,
+        // so an unconfigured editor still looks like part of the app.
+        val light: Map<String, Color> = emptyMap(),
+        val dark: Map<String, Color> = emptyMap(),
     ) {
-        fun backgroundColor(night: Boolean): Color =
-            background ?: if (night) Color(0xFF0B0B0C) else Color(0xFFFFFFFF)
+        private fun host(key: String, night: Boolean): Color? =
+            (if (night) dark else light)[key]
 
-        fun textColor(night: Boolean): Color =
-            text ?: if (night) Color(0xFFF5F5F7) else Color(0xFF111113)
+        fun backgroundColor(night: Boolean): Color = background
+            ?: host("background", night)
+            ?: if (night) Color(0xFF0B0B0C) else Color(0xFFFFFFFF)
 
-        fun accentColor(): Color = accent ?: Color(0.92f, 0.47f, 0.18f)
+        fun textColor(night: Boolean): Color = text
+            ?: host("text", night)
+            ?: if (night) Color(0xFFF5F5F7) else Color(0xFF111113)
 
-        fun highlightColor(): Color = highlight ?: Color(0xFF22C55E)
+        fun accentColor(night: Boolean): Color = accent
+            ?: host("accent", night)
+            ?: Color(0.92f, 0.47f, 0.18f)
+
+        fun highlightColor(night: Boolean): Color = highlight
+            ?: host("highlight", night)
+            ?: Color(0xFF22C55E)
     }
 
     data class EditorConfig(
@@ -112,6 +129,7 @@ object WysiwygEditorFunctions {
         val title: String,
         val placeholder: String,
         val maxLength: Int,
+        val counts: List<String>,
         val theme: EditorTheme,
         val id: String?,
     )
@@ -128,7 +146,11 @@ object WysiwygEditorFunctions {
                 title = parameters["title"] as? String ?: "",
                 placeholder = parameters["placeholder"] as? String ?: "",
                 maxLength = ((parameters["maxLength"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
-                theme = parseTheme(parameters["theme"]),
+                counts = parseStringList(parameters["counts"]),
+                theme = parseTheme(parameters["theme"]).copy(
+                    light = parseThemeMap(parameters["themeLight"]),
+                    dark = parseThemeMap(parameters["themeDark"]),
+                ),
                 id = parameters["id"] as? String,
             )
 
@@ -281,6 +303,21 @@ private fun parseTheme(any: Any?): WysiwygEditorFunctions.EditorTheme = when (an
         highlight = parseHexColor(any.optString("highlight").takeIf { it.isNotEmpty() }),
     )
     else -> WysiwygEditorFunctions.EditorTheme()
+}
+
+/** One colour-scheme palette from PHP: editor key → colour. */
+private fun parseThemeMap(any: Any?): Map<String, Color> {
+    val source: Map<*, *> = when (any) {
+        is Map<*, *> -> any
+        is JSONObject -> any.keys().asSequence().associateWith { any.opt(it) }
+        else -> return emptyMap()
+    }
+
+    val out = mutableMapOf<String, Color>()
+    for (key in WysiwygEditorFunctions.THEME_KEYS) {
+        parseHexColor(source[key])?.let { out[key] = it }
+    }
+    return out
 }
 
 /** #RGB / #RRGGBB / #RRGGBBAA (leading '#' optional) → Compose Color, or null. */
@@ -1528,7 +1565,7 @@ internal object Styler {
             out.setSpan(HighlightMarkSpan(hex, android.graphics.Color.parseColor(hex)), start, end, flag)
         }
         marks.link?.let { url ->
-            out.setSpan(LinkMarkSpan(url, theme.accentColor().toArgb()), start, end, flag)
+            out.setSpan(LinkMarkSpan(url, theme.accentColor(night).toArgb()), start, end, flag)
         }
     }
 
@@ -2446,13 +2483,14 @@ internal fun EditorScreen(
     val theme = config.theme
     val background = theme.backgroundColor(night)
     val foreground = theme.textColor(night)
-    val accent = theme.accentColor()
+    val accent = theme.accentColor(night)
 
     val controllerState = remember { mutableStateOf<EditorController?>(null) }
     // Bumped on every edit / caret move so the toolbar re-reads active state.
     val revision = remember { mutableStateOf(0) }
     val palette = remember { mutableStateOf<String?>(null) }
     val length = remember { mutableStateOf(0) }
+    val words = remember { mutableStateOf(0) }
 
     Column(
         modifier = Modifier
@@ -2504,9 +2542,10 @@ internal fun EditorScreen(
                             editText = this,
                             config = config,
                             night = night,
-                            onDocumentChanged = {
-                                onDocumentChanged(it)
-                                length.value = it.sumOf { block -> block.plainText.length }
+                            onDocumentChanged = { document ->
+                                onDocumentChanged(document)
+                                length.value = document.sumOf { it.plainText.length }
+                                words.value = countWords(document)
                             },
                             onStateChanged = { revision.value++ },
                         )
@@ -2516,6 +2555,7 @@ internal fun EditorScreen(
                         onBackspace = { controller.handleBackspace() }
 
                         length.value = initialBlocks.sumOf { it.plainText.length }
+                        words.value = countWords(initialBlocks)
 
                         // Open with the caret in the document and the keyboard
                         // up, matching iOS — otherwise the user has to tap once
@@ -2537,15 +2577,16 @@ internal fun EditorScreen(
             )
         }
 
-        // ── Character counter ───────────────────────────────────────────────
-        if (config.maxLength > 0) {
-            val over = length.value >= config.maxLength
+        // ── Counts readout ──────────────────────────────────────────────────
+        val readout = countsReadout(config, length.value, words.value)
+        if (readout.isNotEmpty()) {
+            val over = config.maxLength > 0 && length.value >= config.maxLength
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
             ) {
                 BasicText(
-                    text = "${length.value}/${config.maxLength}",
+                    text = readout,
                     style = TextStyle(
                         color = if (over) Color(0xFFEF4444) else foreground.copy(alpha = 0.45f),
                         fontSize = 12.sp,
@@ -2578,8 +2619,40 @@ internal fun EditorScreen(
             palette = palette,
             foreground = foreground,
             background = background,
+            highlightColor = theme.highlightColor(night),
         )
     }
+}
+
+/** Whitespace-delimited words across the whole document. */
+internal fun countWords(blocks: List<WysiwygBlock>): Int =
+    blocks.sumOf { block ->
+        block.plainText.split(' ', '\n', '\t', '\u00A0')
+            .count { it.isNotBlank() }
+    }
+
+/**
+ * The readout beneath the content. `maxLength` always shows as "n/max" (it is
+ * a limit, not a statistic); the optional `counts` add statistics beside it.
+ */
+internal fun countsReadout(
+    config: WysiwygEditorFunctions.EditorConfig,
+    characters: Int,
+    words: Int,
+): String {
+    val parts = mutableListOf<String>()
+
+    if (config.maxLength > 0) {
+        parts.add("$characters/${config.maxLength}")
+    } else if (config.counts.contains("characters")) {
+        parts.add("$characters chars")
+    }
+    if (config.counts.contains("words")) parts.add("$words words")
+    if (config.counts.contains("readingTime")) {
+        parts.add("${maxOf(1, Math.ceil(words / 200.0).toInt())} min")
+    }
+
+    return parts.joinToString("  ·  ")
 }
 
 @Composable
@@ -2605,6 +2678,7 @@ private fun ToolbarRow(
     palette: androidx.compose.runtime.MutableState<String?>,
     foreground: Color,
     background: Color,
+    highlightColor: Color,
 ) {
     val controller = controllerState.value
     // Reading `revision` here is what makes the bar recompose on caret moves.
@@ -2612,7 +2686,7 @@ private fun ToolbarRow(
 
     val marks = controller?.activeMarks() ?: MarkSet()
     val block = controller?.activeBlock() ?: "p"
-    val highlightColor = config.theme.highlightColor()
+    // Passed in: the toolbar has no colour-scheme of its own.
 
     Column(modifier = Modifier.fillMaxWidth().background(background)) {
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(foreground.copy(alpha = 0.12f)))
