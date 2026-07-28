@@ -254,6 +254,27 @@ fixed 6-color palette (plus "none"). Cancelling with unsaved changes asks for
 confirmation. The editor follows the system light/dark theme unless overridden
 by `theme`.
 
+## Developing on a device
+
+Two caching traps will make you think your changes did nothing. Both bit us:
+
+- **Android caches the PHP bundle** in `app_storage`. Blade/PHP edits can keep
+  running the previous version across several rebuilds. Force a fresh extract
+  with `adb shell pm clear <applicationId>`.
+- **iOS can install an older `app.zip`** than the one the build just staged, so
+  the app runs stale PHP even after an uninstall + rebuild.
+
+Before trusting a screenshot, verify what is actually deployed:
+
+```bash
+# iOS — is the deployed PHP the code you just wrote?
+C=$(xcrun simctl get_app_container <udid> <applicationId> data)
+grep -c yourNewOption "$C/Documents/app/app/NativeComponents/YourScreen.php"
+```
+
+Native (Swift/Kotlin) code is compiled into the app and does NOT suffer from
+this — only the PHP bundle does.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -92,11 +92,23 @@ struct WysiwygTheme {
     }
     var highlightColor: Color { highlight.map(Color.init) ?? host("highlight") ?? .green }
 
+    /// Host palette for the UIKit side. Must mirror `host(_:)` — the text
+    /// engine renders the document itself, so if these skipped the host theme
+    /// the chrome would adopt the app's colours while the text stayed default.
+    private func hostUI(_ key: String) -> UIColor? {
+        let night = UITraitCollection.current.userInterfaceStyle == .dark
+        return (night ? dark : light)[key]
+    }
+
     // Resolved UIKit colors for the text engine.
-    var backgroundUIColor: UIColor { background ?? .systemBackground }
-    var textUIColor: UIColor { text ?? .label }
-    var secondaryTextUIColor: UIColor { text?.withAlphaComponent(0.6) ?? .secondaryLabel }
-    var accentUIColor: UIColor { accent ?? UIColor(red: 0.92, green: 0.47, blue: 0.18, alpha: 1) }
+    var backgroundUIColor: UIColor { background ?? hostUI("background") ?? .systemBackground }
+    var textUIColor: UIColor { text ?? hostUI("text") ?? .label }
+    var secondaryTextUIColor: UIColor {
+        (text ?? hostUI("text"))?.withAlphaComponent(0.6) ?? .secondaryLabel
+    }
+    var accentUIColor: UIColor {
+        accent ?? hostUI("accent") ?? UIColor(red: 0.92, green: 0.47, blue: 0.18, alpha: 1)
+    }
 }
 
 extension UIColor {

@@ -36,6 +36,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- iOS: the text engine ignored the host theme. Only the SwiftUI chrome adopted
+  the app's colours, so the caret, link colour, document text and background
+  stayed on the plugin's defaults while the Save button went teal. All four
+  UIKit colour accessors now consult the host palette like their SwiftUI
+  counterparts.
+
 Found by running the editor on a real simulator and emulator:
 
 - Android: the editor did not take focus when it opened, so the keyboard stayed
