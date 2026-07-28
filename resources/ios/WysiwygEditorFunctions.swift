@@ -1412,13 +1412,23 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
     /// paragraph starts as plain body text.
     private var makeNextParagraphPlain = false
 
-    init(config: WysiwygConfig) {
+    convenience init(config: WysiwygConfig) {
+        self.init(config: config, blocks: HtmlCoder.parse(config.content))
+    }
+
+    /// Seed from a specific run of blocks — one model per TEXT segment.
+    init(config: WysiwygConfig, blocks: [WysiwygBlock]) {
         self.config = config
         self.styler = WysiwygStyler(theme: config.theme)
-        let parsed = HtmlCoder.parse(config.content)
-        self.initialAttributed = styler.attributed(parsed)
-        self.initialNormalizedHtml = HtmlCoder.emit(parsed).html
+        self.initialAttributed = styler.attributed(blocks)
+        self.initialNormalizedHtml = HtmlCoder.emit(blocks).html
         super.init()
+    }
+
+    /// This segment's blocks, live from the text view.
+    func blocks() -> [WysiwygBlock] {
+        guard let tv = textView else { return HtmlCoder.parse(initialNormalizedHtml) }
+        return styler.blocks(from: tv.attributedText)
     }
 
     // MARK: serialization
@@ -1961,10 +1971,86 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
     }
 }
 
+// MARK: - Document model (segments)
+
+/**
+ Owns the whole document: one editor model per TEXT segment, the media blocks
+ between them, and which segment currently has the caret.
+
+ The toolbar, counters and Save all act through this, so they do not need to
+ know how many editors exist. See docs/DOCUMENT-MODEL.md.
+ */
+final class WysiwygDocumentModel: ObservableObject {
+    let config: WysiwygConfig
+    let segments: [Segment]
+    /// Editor models keyed by segment index (TEXT segments only).
+    private(set) var models: [Int: WysiwygEditorModel] = [:]
+
+    /// The segment the caret is in — what the toolbar drives.
+    @Published var focused: WysiwygEditorModel?
+    @Published var charCount = 0
+    @Published var wordCount = 0
+    /// Bumped whenever a segment changes, so the toolbar re-reads active state.
+    @Published var revision = 0
+
+    private let initialNormalizedHtml: String
+
+    init(config: WysiwygConfig) {
+        self.config = config
+        let parsed = HtmlCoder.parse(config.content)
+        self.segments = segmentsOf(parsed)
+        self.initialNormalizedHtml = HtmlCoder.emit(parsed).html
+
+        for (index, segment) in segments.enumerated() {
+            if case .text(let blocks) = segment {
+                models[index] = WysiwygEditorModel(config: config, blocks: blocks)
+            }
+        }
+
+        refreshCounts()
+        focused = models[models.keys.sorted().first ?? 0]
+    }
+
+    func model(at index: Int) -> WysiwygEditorModel? { models[index] }
+
+    /// Reassemble the document from every segment in order.
+    func blocks() -> [WysiwygBlock] {
+        segments.enumerated().flatMap { index, segment -> [WysiwygBlock] in
+            switch segment {
+            case .text(let seeded): return models[index]?.blocks() ?? seeded
+            case .media(let block): return [block]
+            }
+        }
+    }
+
+    func serialize() -> (html: String, text: String) { HtmlCoder.emit(blocks()) }
+
+    var hasChanges: Bool { serialize().html != initialNormalizedHtml }
+
+    func refreshCounts() {
+        let document = blocks()
+        charCount = document.reduce(0) { $0 + $1.plainText.count }
+        wordCount = countWords(document)
+    }
+
+    /// A segment changed: refresh the aggregate readouts and the toolbar.
+    func segmentChanged() {
+        refreshCounts()
+        revision &+= 1
+    }
+}
+
 // MARK: - UITextView wrapper
 
 private struct RichTextView: UIViewRepresentable {
     let model: WysiwygEditorModel
+    /// Segments live in a scroll view, so each editor grows to fit instead of
+    /// scrolling internally.
+    @Binding var height: CGFloat
+    /// Only the first editor takes the keyboard when the screen opens.
+    var autoFocus: Bool = true
+    var onFocus: () -> Void = {}
+    var onChange: () -> Void = {}
 
     func makeUIView(context: Context) -> UITextView {
         let theme = model.config.theme
@@ -1983,6 +2069,8 @@ private struct RichTextView: UIViewRepresentable {
         ]
         tv.attributedText = model.initialAttributed
         tv.typingAttributes = model.styler.attributes(block: "p", marks: MarkSet())
+        // The outer ScrollView scrolls; each editor sizes to its content.
+        tv.isScrollEnabled = false
 
         // Placeholder — a plain overlaid label, hidden as soon as there is text.
         let placeholder = UILabel()
@@ -1997,18 +2085,44 @@ private struct RichTextView: UIViewRepresentable {
         model.placeholderLabel = placeholder
         DispatchQueue.main.async {
             model.refreshState()
-            tv.becomeFirstResponder()
+            recalculateHeight(tv)
+            if autoFocus { tv.becomeFirstResponder() }
         }
         return tv
     }
 
-    func updateUIView(_ uiView: UITextView, context: Context) {}
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        recalculateHeight(uiView)
+    }
 
-    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+    /// Grow the editor to fit its content so the outer ScrollView can scroll
+    /// the whole document rather than each segment scrolling separately.
+    private func recalculateHeight(_ tv: UITextView) {
+        let width = tv.bounds.width
+        guard width > 0 else { return }
+        let fitted = tv.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        if abs(fitted - height) > 1 {
+            DispatchQueue.main.async { height = fitted }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model, onFocus: onFocus, onChange: onChange)
+    }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         let model: WysiwygEditorModel
-        init(model: WysiwygEditorModel) { self.model = model }
+        let onFocus: () -> Void
+        let onChange: () -> Void
+
+        init(model: WysiwygEditorModel, onFocus: @escaping () -> Void, onChange: @escaping () -> Void) {
+            self.model = model
+            self.onFocus = onFocus
+            self.onChange = onChange
+        }
+
+        /// The toolbar follows the caret between segments.
+        func textViewDidBeginEditing(_ textView: UITextView) { onFocus() }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
                       replacementText text: String) -> Bool {
@@ -2017,6 +2131,7 @@ private struct RichTextView: UIViewRepresentable {
 
         func textViewDidChange(_ textView: UITextView) {
             model.didChange()
+            onChange()
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
@@ -2060,30 +2175,48 @@ private final class KeyboardWatcher: NSObject, ObservableObject {
 private enum PaletteKind { case text, highlight }
 
 private struct EditorScreen: View {
-    @ObservedObject var model: WysiwygEditorModel
+    @ObservedObject var document: WysiwygDocumentModel
     let onCancel: () -> Void
     let onSave: (String, String) -> Void
 
     @StateObject private var keyboard = KeyboardWatcher()
     @State private var showDiscard = false
     @State private var palette: PaletteKind?
+    /// Measured height per TEXT segment — each editor grows to fit.
+    @State private var heights: [Int: CGFloat] = [:]
 
-    private var theme: WysiwygTheme { model.config.theme }
+    private var theme: WysiwygTheme { document.config.theme }
+
+    /// The first text segment takes the keyboard when the screen opens.
+    private var firstTextIndex: Int {
+        document.segments.firstIndex { if case .text = $0 { return true } else { return false } } ?? 0
+    }
 
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 topBar
-                RichTextView(model: model)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if !countsReadout(model.config, model.charCount, model.wordCount).isEmpty { counter }
-                if let kind = palette {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(document.segments.enumerated()), id: \.offset) { index, segment in
+                            segmentView(index: index, segment: segment)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if !countsReadout(document.config, document.charCount, document.wordCount).isEmpty {
+                    counter
+                }
+                if let kind = palette, let focused = document.focused {
                     PaletteRow(kind: kind, theme: theme) { hex in
-                        if kind == .text { model.applyTextColor(hex) } else { model.applyHighlight(hex) }
+                        if kind == .text { focused.applyTextColor(hex) } else { focused.applyHighlight(hex) }
                         palette = nil
                     }
                 }
-                ToolbarRow(model: model, palette: $palette)
+                if let focused = document.focused {
+                    ToolbarRow(model: focused, palette: $palette)
+                }
             }
             .padding(.bottom, max(0, keyboard.height - geo.safeAreaInsets.bottom))
         }
@@ -2097,21 +2230,44 @@ private struct EditorScreen: View {
         }
     }
 
+    @ViewBuilder
+    private func segmentView(index: Int, segment: Segment) -> some View {
+        switch segment {
+        case .media(let block):
+            MediaCardView(block: block, theme: theme)
+        case .text:
+            if let model = document.model(at: index) {
+                RichTextView(
+                    model: model,
+                    height: heightBinding(index),
+                    autoFocus: index == firstTextIndex,
+                    onFocus: { document.focused = model },
+                    onChange: { document.segmentChanged() }
+                )
+                .frame(height: heights[index] ?? 48)
+            }
+        }
+    }
+
+    private func heightBinding(_ index: Int) -> Binding<CGFloat> {
+        Binding(get: { heights[index] ?? 48 }, set: { heights[index] = $0 })
+    }
+
     private var topBar: some View {
         ZStack {
             HStack {
-                Button("Cancel") { model.hasChanges ? (showDiscard = true) : onCancel() }
+                Button("Cancel") { document.hasChanges ? (showDiscard = true) : onCancel() }
                     .font(.system(size: 16))
                     .foregroundColor(theme.textColor)
                 Spacer()
                 Button("Save") {
-                    let out = model.serialize()
+                    let out = document.serialize()
                     onSave(out.html, out.text)
                 }
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(theme.accentColor)
             }
-            Text(model.config.title)
+            Text(document.config.title)
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(theme.textColor)
                 .lineLimit(1)
@@ -2122,15 +2278,90 @@ private struct EditorScreen: View {
     }
 
     private var counter: some View {
-        let over = model.config.maxLength > 0 && model.charCount >= model.config.maxLength
+        let over = document.config.maxLength > 0 && document.charCount >= document.config.maxLength
         return HStack {
             Spacer()
-            Text(countsReadout(model.config, model.charCount, model.wordCount))
+            Text(countsReadout(document.config, document.charCount, document.wordCount))
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(over ? .red : theme.textColor.opacity(0.5))
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 4)
+    }
+}
+
+// MARK: - Media card
+
+/**
+ A media block inside the document.
+
+ Deliberately NOT editable text: it renders the block and its pending upload
+ state. Mirrors the Android MediaCard.
+ */
+private struct MediaCardView: View {
+    let block: WysiwygBlock
+    let theme: WysiwygTheme
+
+    private var pending: Bool {
+        (block.attrs["src"] ?? "").isEmpty && !(block.attrs["uploadId"] ?? "").isEmpty
+    }
+
+    private var label: String {
+        switch block.type {
+        case "image": return (block.attrs["alt"]?.isEmpty == false) ? block.attrs["alt"]! : "Image"
+        case "video": return "Video"
+        case "file": return (block.attrs["name"]?.isEmpty == false) ? block.attrs["name"]! : "File"
+        case "embed": return block.attrs["url"] ?? ""
+        case "poll": return (block.attrs["question"]?.isEmpty == false) ? block.attrs["question"]! : "Poll"
+        default: return block.type
+        }
+    }
+
+    var body: some View {
+        if block.type == "divider" {
+            Rectangle()
+                .fill(theme.textColor.opacity(0.25))
+                .frame(height: 1)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    IconShape(data: toolIcons[block.type == "poll" ? "orderedList" : "bulletList"]?.path ?? "")
+                        .stroke(style: StrokeStyle(lineWidth: 2 * 20 / 24, lineCap: .round, lineJoin: .round))
+                        .foregroundColor(theme.accentColor)
+                        .frame(width: 20, height: 20)
+                    Text(label)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(theme.textColor)
+                }
+
+                if block.type == "poll" {
+                    ForEach(block.options, id: \.id) { option in
+                        Text("•  \(option.label)")
+                            .font(.system(size: 14))
+                            .foregroundColor(theme.textColor.opacity(0.75))
+                    }
+                }
+
+                if let caption = block.attrs["caption"], !caption.isEmpty {
+                    Text(caption)
+                        .font(.system(size: 13))
+                        .foregroundColor(theme.textColor.opacity(0.6))
+                }
+
+                if pending {
+                    Text("Uploading…")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(theme.accentColor)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 12).fill(theme.textColor.opacity(0.06)))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
     }
 }
 
@@ -2387,12 +2618,12 @@ final class WysiwygEditorPresenter {
         guard hosting == nil else { send(WysiwygEvents.cancelled, ["id": config.id]); return }
 
         finished = false
-        let model = WysiwygEditorModel(config: config)
+        let document = WysiwygDocumentModel(config: config)
         let host = UIHostingController(rootView: AnyView(EmptyView()))
         host.modalPresentationStyle = .fullScreen
         host.view.backgroundColor = config.theme.backgroundUIColor
         host.rootView = AnyView(EditorScreen(
-            model: model,
+            document: document,
             onCancel: { [weak self] in
                 self?.finish(WysiwygEvents.cancelled, ["id": config.id])
             },

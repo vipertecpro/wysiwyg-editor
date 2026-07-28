@@ -34,6 +34,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   that run the SAME case list through each platform's real coder and assert
   byte-identical HTML, plain text and idempotence.
 
+- Segment editing shell on BOTH platforms: consecutive text blocks share one
+  editor (the v1 engine, unchanged) and media blocks render as cards between
+  them, so images, dividers, embeds and polls sit inline with the prose.
+
 ### Fixed
 
 - iOS: the text engine ignored the host theme. Only the SwiftUI chrome adopted
