@@ -372,13 +372,17 @@ Two caching traps will make you think your changes did nothing. Both bit us:
 - **Android caches the PHP bundle** in `app_storage`. Blade/PHP edits can keep
   running the previous version across several rebuilds. Force a fresh extract
   with `adb shell pm clear <applicationId>`.
-- **iOS can install an older `app.zip`** than the one the build just staged, so
-  the app runs stale PHP even after an uninstall + rebuild.
+- **iOS caches the *extracted* bundle** in `Documents/app`. A fresh `app.zip`
+  inside the app is not enough — if an extraction already exists it is reused,
+  so the app runs the previous PHP. `xcrun simctl uninstall <udid> <applicationId>`
+  before re-running forces a clean extract.
+- **iOS can also install an older `app.zip`** than the one the build just
+  staged, which looks identical from the outside.
 
-Before trusting a screenshot, verify what is actually deployed:
+Check the **extracted** copy, not the zip — the zip being fresh proves nothing:
 
 ```bash
-# iOS — is the deployed PHP the code you just wrote?
+# iOS — is the PHP the app will actually run the code you just wrote?
 C=$(xcrun simctl get_app_container <udid> <applicationId> data)
 grep -c yourNewOption "$C/Documents/app/app/NativeComponents/YourScreen.php"
 ```
