@@ -860,6 +860,52 @@ func countWords(_ blocks: [WysiwygBlock]) -> Int {
     }
 }
 
+// MARK: - Segments
+
+/// How a document is laid out for editing. Consecutive TEXT blocks collapse
+/// into one editor (the v1 engine, unchanged); each media block gets its own
+/// view. See docs/DOCUMENT-MODEL.md — this is what keeps caret handling to the
+/// rare text↔media boundary instead of every paragraph break.
+enum Segment {
+    /// A run of text blocks sharing one editor.
+    case text([WysiwygBlock])
+    /// A single media block rendered as its own card.
+    case media(WysiwygBlock)
+}
+
+/// Group a block list into segments, preserving document order.
+func segmentsOf(_ blocks: [WysiwygBlock]) -> [Segment] {
+    var segments: [Segment] = []
+
+    for block in blocks {
+        if block.isText {
+            if case .text(var run) = segments.last {
+                run.append(block)
+                segments[segments.count - 1] = .text(run)
+            } else {
+                segments.append(.text([block]))
+            }
+        } else {
+            segments.append(.media(block))
+        }
+    }
+
+    // An empty document still needs somewhere to type.
+    if segments.isEmpty { segments.append(.text([WysiwygBlock(type: "p", runs: [])])) }
+
+    return segments
+}
+
+/// Flatten segments back into a block list for serialization.
+func blocksOf(_ segments: [Segment]) -> [WysiwygBlock] {
+    segments.flatMap { segment -> [WysiwygBlock] in
+        switch segment {
+        case .text(let blocks): return blocks
+        case .media(let block): return [block]
+        }
+    }
+}
+
 // MARK: - JSON coder
 
 /// The FIDELITY format: unlike HTML it carries block ids, upload state and poll

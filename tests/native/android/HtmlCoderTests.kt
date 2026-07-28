@@ -309,6 +309,37 @@ fun main() {
         else { failures++; println("  ✗ text-only HTML changed: ${out.show()}") }
     }
 
+    println("Segments — how a document lays out for editing")
+    run {
+        val blocks = HtmlCoder.parse("""<h1>T</h1><p>a</p><hr><p>b</p><figure><img src="x.jpg" alt=""></figure>""")
+        val segments = segmentsOf(blocks)
+        val shape = segments.map { seg ->
+            when (seg) {
+                is Segment.Text -> "text(${seg.blocks.size})"
+                is Segment.Media -> "media(${seg.block.type})"
+            }
+        }
+        if (shape == listOf("text(2)", "media(divider)", "text(1)", "media(image)")) {
+            println("  ✓ consecutive text blocks collapse into one editor")
+        } else {
+            failures++
+            println("  ✗ consecutive text blocks collapse into one editor -> $shape")
+        }
+
+        // Round-tripping through segments must not disturb the document.
+        val back = HtmlCoder.serialize(blocksOf(segments)).first
+        val expected = HtmlCoder.serialize(blocks).first
+        if (back == expected) println("  ✓ segments flatten back to the same document")
+        else { failures++; println("  ✗ segments flatten back -> ${back.show()}") }
+    }
+
+    run {
+        val first = segmentsOf(emptyList()).first()
+        val ok = first is Segment.Text && first.blocks.size == 1 && first.blocks[0].type == "p"
+        if (ok) println("  ✓ an empty document still offers somewhere to type")
+        else { failures++; println("  ✗ an empty document still offers somewhere to type") }
+    }
+
     println("")
     if (failures == 0) {
         println("All HtmlCoder tests passed.")

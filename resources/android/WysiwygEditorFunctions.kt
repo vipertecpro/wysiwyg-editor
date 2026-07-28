@@ -1312,6 +1312,54 @@ internal class JsonScanner(private val src: String) {
     }
 }
 
+// ── Segments ────────────────────────────────────────────────────────────────
+
+/**
+ * How a document is laid out for editing. Consecutive TEXT blocks collapse
+ * into one editor (the v1 engine, unchanged); each media block gets its own
+ * view. See docs/DOCUMENT-MODEL.md — this is what keeps caret handling to the
+ * rare text↔media boundary instead of every paragraph break.
+ */
+internal sealed class Segment {
+    /** A run of text blocks sharing one editor. */
+    class Text(val blocks: MutableList<WysiwygBlock>) : Segment()
+
+    /** A single media block rendered as its own card. */
+    class Media(val block: WysiwygBlock) : Segment()
+}
+
+/** Group a block list into segments, preserving document order. */
+internal fun segmentsOf(blocks: List<WysiwygBlock>): List<Segment> {
+    val segments = mutableListOf<Segment>()
+
+    for (block in blocks) {
+        if (block.isText) {
+            val last = segments.lastOrNull()
+            if (last is Segment.Text) {
+                last.blocks.add(block)
+            } else {
+                segments.add(Segment.Text(mutableListOf(block)))
+            }
+        } else {
+            segments.add(Segment.Media(block))
+        }
+    }
+
+    // An empty document still needs somewhere to type.
+    if (segments.isEmpty()) segments.add(Segment.Text(mutableListOf(WysiwygBlock("p"))))
+
+    return segments
+}
+
+/** Flatten segments back into a block list for serialization. */
+internal fun blocksOf(segments: List<Segment>): List<WysiwygBlock> =
+    segments.flatMap { segment ->
+        when (segment) {
+            is Segment.Text -> segment.blocks
+            is Segment.Media -> listOf(segment.block)
+        }
+    }
+
 // ── Toolbar icons ───────────────────────────────────────────────────────────
 
 /**
@@ -2410,54 +2458,6 @@ internal class EditorController(
         }
     }
 }
-
-// ── Segments ────────────────────────────────────────────────────────────────
-
-/**
- * How a document is laid out for editing. Consecutive TEXT blocks collapse
- * into one editor (the v1 engine, unchanged); each media block gets its own
- * view. See docs/DOCUMENT-MODEL.md — this is what keeps caret handling to the
- * rare text↔media boundary instead of every paragraph break.
- */
-internal sealed class Segment {
-    /** A run of text blocks sharing one editor. */
-    class Text(val blocks: MutableList<WysiwygBlock>) : Segment()
-
-    /** A single media block rendered as its own card. */
-    class Media(val block: WysiwygBlock) : Segment()
-}
-
-/** Group a block list into segments, preserving document order. */
-internal fun segmentsOf(blocks: List<WysiwygBlock>): List<Segment> {
-    val segments = mutableListOf<Segment>()
-
-    for (block in blocks) {
-        if (block.isText) {
-            val last = segments.lastOrNull()
-            if (last is Segment.Text) {
-                last.blocks.add(block)
-            } else {
-                segments.add(Segment.Text(mutableListOf(block)))
-            }
-        } else {
-            segments.add(Segment.Media(block))
-        }
-    }
-
-    // An empty document still needs somewhere to type.
-    if (segments.isEmpty()) segments.add(Segment.Text(mutableListOf(WysiwygBlock("p"))))
-
-    return segments
-}
-
-/** Flatten segments back into a block list for serialization. */
-internal fun blocksOf(segments: List<Segment>): List<WysiwygBlock> =
-    segments.flatMap { segment ->
-        when (segment) {
-            is Segment.Text -> segment.blocks
-            is Segment.Media -> listOf(segment.block)
-        }
-    }
 
 // ── Palettes (normative — identical on iOS) ─────────────────────────────────
 

@@ -254,6 +254,39 @@ do {
     else { failures += 1; print("  ✗ text-only HTML changed: \(out.debugDescription)") }
 }
 
+print("Segments — how a document lays out for editing")
+do {
+    let blocks = HtmlCoder.parse("<h1>T</h1><p>a</p><hr><p>b</p><figure><img src=\"x.jpg\" alt=\"\"></figure>")
+    let segments = segmentsOf(blocks)
+    let shape = segments.map { seg -> String in
+        switch seg {
+        case .text(let b): return "text(\(b.count))"
+        case .media(let b): return "media(\(b.type))"
+        }
+    }
+    if shape == ["text(2)", "media(divider)", "text(1)", "media(image)"] {
+        print("  ✓ consecutive text blocks collapse into one editor")
+    } else {
+        failures += 1
+        print("  ✗ consecutive text blocks collapse into one editor -> \(shape)")
+    }
+
+    // Round-tripping through segments must not disturb the document.
+    let back = HtmlCoder.emit(blocksOf(segments)).html
+    let expected = HtmlCoder.emit(blocks).html
+    if back == expected { print("  ✓ segments flatten back to the same document") }
+    else { failures += 1; print("  ✗ segments flatten back -> \(back.debugDescription)") }
+}
+
+do {
+    if case .text(let blocks)? = segmentsOf([]).first, blocks.count == 1, blocks[0].type == "p" {
+        print("  ✓ an empty document still offers somewhere to type")
+    } else {
+        failures += 1
+        print("  ✗ an empty document still offers somewhere to type")
+    }
+}
+
 print("")
 if failures == 0 {
     print("All HtmlCoder tests passed.")
