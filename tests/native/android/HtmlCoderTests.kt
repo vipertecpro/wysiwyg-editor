@@ -145,6 +145,93 @@ fun main() {
         }
     }
 
+    println("JSON — the fidelity format")
+    run {
+        val doc = mutableListOf(
+            WysiwygBlock("p", id = "b1").apply {
+                runs.add(WysiwygRun("Hi ", MarkSet()))
+                runs.add(WysiwygRun("there", MarkSet(bold = true)))
+            },
+            WysiwygBlock("image", id = "b2").apply {
+                attrs["src"] = "a.jpg"
+                attrs["alt"] = "A photo"
+            },
+        )
+        val expected = """{"version":2,"blocks":[""" +
+            """{"id":"b1","type":"p","runs":[{"text":"Hi ","marks":{}},""" +
+            """{"text":"there","marks":{"bold":true}}]},""" +
+            """{"id":"b2","type":"image","src":"a.jpg","alt":"A photo"}]}"""
+        val actual = JsonCoder.encode(doc)
+        if (actual == expected) {
+            println("  ✓ encodes text + media blocks with fixed key order")
+        } else {
+            failures++
+            println("  ✗ encodes text + media blocks with fixed key order")
+            println("      got: $actual")
+            println("      exp: $expected")
+        }
+    }
+
+    run {
+        val json = """{"version":2,"blocks":[""" +
+            """{"id":"p1","type":"h2","runs":[{"text":"T","marks":{"italic":true,"link":"https://x.io"}}]},""" +
+            """{"id":"p2","type":"poll","question":"Best?","multiple":"false",""" +
+            """"options":[{"id":"o1","label":"One"},{"id":"o2","label":"Two"}]}]}"""
+        val decoded = JsonCoder.decode(json)
+        val ok = decoded.size == 2 &&
+            decoded[0].type == "h2" && decoded[0].id == "p1" &&
+            decoded[0].runs.single().marks.italic &&
+            decoded[0].runs.single().marks.link == "https://x.io" &&
+            decoded[1].type == "poll" && decoded[1].attrs["question"] == "Best?" &&
+            decoded[1].options.map { it.label } == listOf("One", "Two")
+        if (ok) println("  ✓ decodes marks, media attrs and poll options")
+        else { failures++; println("  ✗ decodes marks, media attrs and poll options -> $decoded") }
+    }
+
+    run {
+        // encode -> decode -> encode must be a fixed point.
+        val json = """{"version":2,"blocks":[""" +
+            """{"id":"a","type":"ul","runs":[{"text":"x","marks":{"code":true}}]},""" +
+            """{"id":"b","type":"divider"},""" +
+            """{"id":"c","type":"embed","url":"https://v.io/1","provider":"vimeo"}]}"""
+        val once = JsonCoder.encode(JsonCoder.decode(json))
+        val twice = JsonCoder.encode(JsonCoder.decode(once))
+        if (once == json && twice == once) {
+            println("  ✓ JSON round-trips unchanged")
+        } else {
+            failures++
+            println("  ✗ JSON round-trips unchanged")
+            println("      1st: $once")
+            println("      exp: $json")
+        }
+    }
+
+    run {
+        val decoded = JsonCoder.decode("not json at all")
+        if (decoded.isEmpty()) println("  ✓ malformed JSON yields an empty document")
+        else { failures++; println("  ✗ malformed JSON yields an empty document") }
+    }
+
+    run {
+        // Escaping: quotes, backslashes and newlines must survive.
+        val doc = mutableListOf(
+            WysiwygBlock("p", id = "e").apply {
+                runs.add(WysiwygRun("a \"q\" \\ b\nc", MarkSet()))
+            },
+        )
+        val text = JsonCoder.decode(JsonCoder.encode(doc)).single().runs.single().text
+        if (text == "a \"q\" \\ b\nc") println("  ✓ escapes and unescapes strings")
+        else { failures++; println("  ✗ escapes and unescapes strings -> ${text.show()}") }
+    }
+
+    println("v1 compatibility — text-only documents are unchanged")
+    run {
+        val v1 = "<h1>T</h1><p>a <strong>b</strong></p><ul><li>x</li><li>y</li></ul>"
+        val out = HtmlCoder.serialize(HtmlCoder.parse(v1)).first
+        if (out == v1) println("  ✓ text-only HTML is byte-identical to v1")
+        else { failures++; println("  ✗ text-only HTML changed: ${out.show()}") }
+    }
+
     println("")
     if (failures == 0) {
         println("All HtmlCoder tests passed.")

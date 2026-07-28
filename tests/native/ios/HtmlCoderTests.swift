@@ -116,6 +116,87 @@ for (index, sample) in samples.enumerated() {
     }
 }
 
+print("JSON — the fidelity format")
+do {
+    var text = WysiwygBlock(type: "p", runs: [], id: "b1")
+    text.runs = [WysiwygRun(text: "Hi ", marks: MarkSet()),
+                 WysiwygRun(text: "there", marks: MarkSet(bold: true))]
+    var image = WysiwygBlock(type: "image", runs: [], id: "b2")
+    image.attrs = ["src": "a.jpg", "alt": "A photo"]
+
+    let expected = #"{"version":2,"blocks":["#
+        + #"{"id":"b1","type":"p","runs":[{"text":"Hi ","marks":{}},"#
+        + #"{"text":"there","marks":{"bold":true}}]},"#
+        + #"{"id":"b2","type":"image","src":"a.jpg","alt":"A photo"}]}"#
+    let actual = JsonCoder.encode([text, image])
+    if actual == expected {
+        print("  ✓ encodes text + media blocks with fixed key order")
+    } else {
+        failures += 1
+        print("  ✗ encodes text + media blocks with fixed key order")
+        print("      got: \(actual)")
+        print("      exp: \(expected)")
+    }
+}
+
+do {
+    let json = #"{"version":2,"blocks":["#
+        + #"{"id":"p1","type":"h2","runs":[{"text":"T","marks":{"italic":true,"link":"https://x.io"}}]},"#
+        + #"{"id":"p2","type":"poll","question":"Best?","multiple":"false","#
+        + #""options":[{"id":"o1","label":"One"},{"id":"o2","label":"Two"}]}]}"#
+    let decoded = JsonCoder.decode(json)
+    let ok = decoded.count == 2
+        && decoded[0].type == "h2" && decoded[0].id == "p1"
+        && decoded[0].runs.first?.marks.italic == true
+        && decoded[0].runs.first?.marks.link == "https://x.io"
+        && decoded[1].type == "poll" && decoded[1].attrs["question"] == "Best?"
+        && decoded[1].options.map(\.label) == ["One", "Two"]
+    if ok { print("  ✓ decodes marks, media attrs and poll options") }
+    else { failures += 1; print("  ✗ decodes marks, media attrs and poll options") }
+}
+
+do {
+    let json = #"{"version":2,"blocks":["#
+        + #"{"id":"a","type":"ul","runs":[{"text":"x","marks":{"code":true}}]},"#
+        + #"{"id":"b","type":"divider"},"#
+        + #"{"id":"c","type":"embed","url":"https://v.io/1","provider":"vimeo"}]}"#
+    let once = JsonCoder.encode(JsonCoder.decode(json))
+    let twice = JsonCoder.encode(JsonCoder.decode(once))
+    if once == json && twice == once {
+        print("  ✓ JSON round-trips unchanged")
+    } else {
+        failures += 1
+        print("  ✗ JSON round-trips unchanged")
+        print("      1st: \(once)")
+        print("      exp: \(json)")
+    }
+}
+
+do {
+    if JsonCoder.decode("not json at all").isEmpty {
+        print("  ✓ malformed JSON yields an empty document")
+    } else {
+        failures += 1
+        print("  ✗ malformed JSON yields an empty document")
+    }
+}
+
+do {
+    var block = WysiwygBlock(type: "p", runs: [], id: "e")
+    block.runs = [WysiwygRun(text: "a \"q\" \\ b\nc", marks: MarkSet())]
+    let text = JsonCoder.decode(JsonCoder.encode([block])).first?.runs.first?.text
+    if text == "a \"q\" \\ b\nc" { print("  ✓ escapes and unescapes strings") }
+    else { failures += 1; print("  ✗ escapes and unescapes strings -> \(text.debugDescription)") }
+}
+
+print("v1 compatibility — text-only documents are unchanged")
+do {
+    let v1 = "<h1>T</h1><p>a <strong>b</strong></p><ul><li>x</li><li>y</li></ul>"
+    let out = HtmlCoder.emit(HtmlCoder.parse(v1)).html
+    if out == v1 { print("  ✓ text-only HTML is byte-identical to v1") }
+    else { failures += 1; print("  ✗ text-only HTML changed: \(out.debugDescription)") }
+}
+
 print("")
 if failures == 0 {
     print("All HtmlCoder tests passed.")

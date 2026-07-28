@@ -168,15 +168,44 @@ struct WysiwygRun: Equatable {
     var marks: MarkSet
 }
 
-/// One block (paragraph / heading / list item / blockquote) of the document.
+/// A poll choice. Ids are stable so a host can attribute votes to an option.
+struct PollOption: Equatable {
+    var id: String
+    var label: String
+}
+
+/// One block of the document.
+///
+/// TEXT blocks (p/h1-h3/ul/ol/blockquote) carry `runs` and are exactly the v1
+/// model. MEDIA blocks (image/video/file/embed/poll/divider) carry `attrs`
+/// instead — a flat string map rather than a field per type, so adding a block
+/// type does not ripple through both platforms' serializers.
+///
+/// `id` is stable for the block's lifetime and exists so hosts can map upload
+/// progress or comments to a specific block. It never appears in HTML.
 struct WysiwygBlock {
-    var type: String        // p | h1 | h2 | h3 | ul | ol | blockquote
+    var type: String        // p | h1…h3 | ul | ol | blockquote | image | video | …
     var runs: [WysiwygRun]
+    var id: String = ""
+    var attrs: [String: String] = [:]
+    var options: [PollOption] = []
 
     var isEmpty: Bool { runs.allSatisfy { $0.text.isEmpty } }
     var plainText: String { runs.map(\.text).joined() }
+    var isText: Bool { Self.knownTypes.contains(type) }
 
     static let knownTypes: Set<String> = ["p", "h1", "h2", "h3", "ul", "ol", "blockquote"]
+    static let mediaTypes: Set<String> = ["image", "video", "file", "embed", "poll", "divider"]
+
+    /// Attribute keys per media type, in SERIALIZATION order (normative).
+    static let mediaAttrs: [String: [String]] = [
+        "image": ["src", "alt", "caption", "width", "height", "uploadId"],
+        "video": ["src", "poster", "caption", "uploadId"],
+        "file": ["src", "name", "size", "mime", "uploadId"],
+        "embed": ["url", "provider", "html"],
+        "poll": ["question", "multiple", "closesAt"],
+        "divider": [],
+    ]
 }
 
 // MARK: - HTML coder
@@ -656,6 +685,274 @@ enum HtmlCoder {
             return href
         }
         return nil
+    }
+}
+
+// MARK: - JSON coder
+
+/// The FIDELITY format: unlike HTML it carries block ids, upload state and poll
+/// options. See docs/DOCUMENT-MODEL.md.
+///
+/// The writer is hand-rolled rather than `JSONSerialization` for two reasons:
+/// platform JSON writers make no guarantee about key ORDER, so the two
+/// platforms would emit different bytes for the same document and the parity
+/// harness could not compare them; and staying dependency-free keeps the coder
+/// pure Foundation, so it runs off-device in the test harness.
+enum JsonCoder {
+
+    // MARK: encode
+
+    static func encode(_ blocks: [WysiwygBlock]) -> String {
+        var out = "{\"version\":2,\"blocks\":["
+        for (index, block) in blocks.enumerated() {
+            if index > 0 { out += "," }
+            out += encodeBlock(block)
+        }
+        out += "]}"
+        return out
+    }
+
+    private static func encodeBlock(_ block: WysiwygBlock) -> String {
+        var out = "{\"id\":" + quote(block.id)
+        out += ",\"type\":" + quote(block.type)
+
+        if block.isText {
+            out += ",\"runs\":["
+            var first = true
+            for run in block.runs where !run.text.isEmpty {
+                if !first { out += "," }
+                first = false
+                out += "{\"text\":" + quote(run.text)
+                out += ",\"marks\":" + encodeMarks(run.marks) + "}"
+            }
+            out += "]"
+        } else {
+            // Fixed key order per type keeps both platforms byte-identical.
+            for key in WysiwygBlock.mediaAttrs[block.type] ?? [] {
+                guard let value = block.attrs[key] else { continue }
+                out += "," + quote(key) + ":" + quote(value)
+            }
+            if block.type == "poll" {
+                out += ",\"options\":["
+                for (index, option) in block.options.enumerated() {
+                    if index > 0 { out += "," }
+                    out += "{\"id\":" + quote(option.id)
+                    out += ",\"label\":" + quote(option.label) + "}"
+                }
+                out += "]"
+            }
+        }
+
+        return out + "}"
+    }
+
+    /// Only marks that are SET are emitted, in the contract's nesting order.
+    private static func encodeMarks(_ marks: MarkSet) -> String {
+        var parts: [String] = []
+        if let link = marks.link { parts.append("\"link\":" + quote(link)) }
+        if let color = marks.color { parts.append("\"color\":" + quote(color)) }
+        if let highlight = marks.highlight { parts.append("\"highlight\":" + quote(highlight)) }
+        if marks.bold { parts.append("\"bold\":true") }
+        if marks.italic { parts.append("\"italic\":true") }
+        if marks.underline { parts.append("\"underline\":true") }
+        if marks.strike { parts.append("\"strike\":true") }
+        if marks.code { parts.append("\"code\":true") }
+        return "{" + parts.joined(separator: ",") + "}"
+    }
+
+    static func quote(_ s: String) -> String {
+        var out = "\""
+        for c in s.unicodeScalars {
+            switch c {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if c.value < 0x20 {
+                    out += String(format: "\\u%04x", c.value)
+                } else {
+                    out.unicodeScalars.append(c)
+                }
+            }
+        }
+        return out + "\""
+    }
+
+    // MARK: decode
+
+    /// Tolerant reader: unknown keys ignored, malformed input yields no blocks.
+    static func decode(_ json: String) -> [WysiwygBlock] {
+        var scanner = JsonScanner(json)
+        guard let root = scanner.parseValue() as? [String: Any],
+              let rawBlocks = root["blocks"] as? [Any] else { return [] }
+
+        var blocks: [WysiwygBlock] = []
+
+        for raw in rawBlocks {
+            guard let map = raw as? [String: Any],
+                  let type = map["type"] as? String,
+                  WysiwygBlock.knownTypes.contains(type) || WysiwygBlock.mediaTypes.contains(type)
+            else { continue }
+
+            var block = WysiwygBlock(type: type, runs: [], id: map["id"] as? String ?? "")
+
+            if block.isText {
+                for rawRun in map["runs"] as? [Any] ?? [] {
+                    guard let runMap = rawRun as? [String: Any],
+                          let text = runMap["text"] as? String, !text.isEmpty else { continue }
+                    block.runs.append(WysiwygRun(text: text,
+                                                 marks: decodeMarks(runMap["marks"] as? [String: Any])))
+                }
+            } else {
+                for key in WysiwygBlock.mediaAttrs[type] ?? [] {
+                    if let value = map[key] { block.attrs[key] = stringify(value) }
+                }
+                for rawOption in map["options"] as? [Any] ?? [] {
+                    guard let optionMap = rawOption as? [String: Any] else { continue }
+                    block.options.append(PollOption(id: optionMap["id"] as? String ?? "",
+                                                    label: optionMap["label"] as? String ?? ""))
+                }
+            }
+
+            blocks.append(block)
+        }
+
+        return blocks
+    }
+
+    private static func stringify(_ value: Any) -> String {
+        if let s = value as? String { return s }
+        if let b = value as? Bool { return b ? "true" : "false" }
+        if let d = value as? Double {
+            return d == d.rounded() && d.isFinite ? String(Int(d)) : String(d)
+        }
+        return "\(value)"
+    }
+
+    private static func decodeMarks(_ map: [String: Any]?) -> MarkSet {
+        guard let map else { return MarkSet() }
+        func flag(_ key: String) -> Bool { (map[key] as? Bool) == true }
+        return MarkSet(
+            link: map["link"] as? String,
+            color: map["color"] as? String,
+            highlight: map["highlight"] as? String,
+            bold: flag("bold"),
+            italic: flag("italic"),
+            underline: flag("underline"),
+            strike: flag("strike"),
+            code: flag("code")
+        )
+    }
+}
+
+/// Minimal recursive-descent JSON reader — objects, arrays, strings, numbers,
+/// booleans and null. Enough for this document model, nothing more.
+struct JsonScanner {
+    private let chars: [Character]
+    private var i = 0
+
+    init(_ source: String) { chars = Array(source) }
+
+    mutating func parseValue() -> Any? {
+        skipWhitespace()
+        guard i < chars.count else { return nil }
+        switch chars[i] {
+        case "{": return parseObject()
+        case "[": return parseArray()
+        case "\"": return parseString()
+        case "t": return literal("true", true)
+        case "f": return literal("false", false)
+        case "n": return literal("null", nil)
+        default: return parseNumber()
+        }
+    }
+
+    private mutating func skipWhitespace() {
+        while i < chars.count, chars[i].isWhitespace { i += 1 }
+    }
+
+    private mutating func literal(_ word: String, _ value: Any?) -> Any? {
+        i += word.count
+        return value
+    }
+
+    private mutating func parseObject() -> [String: Any] {
+        var map: [String: Any] = [:]
+        i += 1 // '{'
+        skipWhitespace()
+        if i < chars.count, chars[i] == "}" { i += 1; return map }
+        while i < chars.count {
+            skipWhitespace()
+            let key = parseString()
+            skipWhitespace()
+            guard i < chars.count, chars[i] == ":" else { break }
+            i += 1
+            if let value = parseValue() { map[key] = value }
+            skipWhitespace()
+            if i < chars.count, chars[i] == "," { i += 1; continue }
+            if i < chars.count, chars[i] == "}" { i += 1; break }
+            break
+        }
+        return map
+    }
+
+    private mutating func parseArray() -> [Any] {
+        var list: [Any] = []
+        i += 1 // '['
+        skipWhitespace()
+        if i < chars.count, chars[i] == "]" { i += 1; return list }
+        while i < chars.count {
+            if let value = parseValue() { list.append(value) }
+            skipWhitespace()
+            if i < chars.count, chars[i] == "," { i += 1; continue }
+            if i < chars.count, chars[i] == "]" { i += 1; break }
+            break
+        }
+        return list
+    }
+
+    private mutating func parseString() -> String {
+        guard i < chars.count, chars[i] == "\"" else { return "" }
+        i += 1
+        var out = ""
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\"" { i += 1; return out }
+            if c == "\\" {
+                i += 1
+                guard i < chars.count else { break }
+                switch chars[i] {
+                case "\"": out.append("\"")
+                case "\\": out.append("\\")
+                case "/": out.append("/")
+                case "n": out.append("\n")
+                case "r": out.append("\r")
+                case "t": out.append("\t")
+                case "u":
+                    let start = i + 1
+                    let end = min(i + 5, chars.count)
+                    if start < end, let value = UInt32(String(chars[start..<end]), radix: 16),
+                       let scalar = Unicode.Scalar(value) {
+                        out.append(Character(scalar))
+                    }
+                    i += 4
+                default: out.append(chars[i])
+                }
+                i += 1
+                continue
+            }
+            out.append(c)
+            i += 1
+        }
+        return out
+    }
+
+    private mutating func parseNumber() -> Double {
+        let start = i
+        while i < chars.count, chars[i].isNumber || "-+.eE".contains(chars[i]) { i += 1 }
+        return Double(String(chars[start..<i])) ?? 0
     }
 }
 

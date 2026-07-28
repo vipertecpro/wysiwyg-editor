@@ -335,13 +335,44 @@ internal class MarkBuilder {
 
 internal data class WysiwygRun(val text: String, val marks: MarkSet)
 
-/** One block (paragraph / heading / list item / blockquote) of the document. */
-internal class WysiwygBlock(var type: String, val runs: MutableList<WysiwygRun> = mutableListOf()) {
+/** A poll choice. Ids are stable so a host can attribute votes to an option. */
+internal data class PollOption(val id: String, val label: String)
+
+/**
+ * One block of the document.
+ *
+ * TEXT blocks (p/h1-h3/ul/ol/blockquote) carry [runs] and are exactly the v1
+ * model. MEDIA blocks (image/video/file/embed/poll/divider) carry [attrs]
+ * instead — a flat string map rather than a field per type, so adding a block
+ * type does not ripple through both platforms' serializers.
+ *
+ * [id] is stable for the block's lifetime and exists so hosts can map upload
+ * progress or comments to a specific block. It never appears in HTML.
+ */
+internal class WysiwygBlock(
+    var type: String,
+    val runs: MutableList<WysiwygRun> = mutableListOf(),
+    var id: String = "",
+    val attrs: MutableMap<String, String> = mutableMapOf(),
+    val options: MutableList<PollOption> = mutableListOf(),
+) {
     val isEmpty: Boolean get() = runs.all { it.text.isEmpty() }
     val plainText: String get() = runs.joinToString("") { it.text }
+    val isText: Boolean get() = KNOWN_TYPES.contains(type)
 
     companion object {
         val KNOWN_TYPES = setOf("p", "h1", "h2", "h3", "ul", "ol", "blockquote")
+        val MEDIA_TYPES = setOf("image", "video", "file", "embed", "poll", "divider")
+
+        /** Attribute keys per media type, in SERIALIZATION order (normative). */
+        val MEDIA_ATTRS = mapOf(
+            "image" to listOf("src", "alt", "caption", "width", "height", "uploadId"),
+            "video" to listOf("src", "poster", "caption", "uploadId"),
+            "file" to listOf("src", "name", "size", "mime", "uploadId"),
+            "embed" to listOf("url", "provider", "html"),
+            "poll" to listOf("question", "multiple", "closesAt"),
+            "divider" to listOf(),
+        )
     }
 }
 
@@ -831,6 +862,296 @@ internal object HtmlCoder {
         return if (lower.startsWith("http://") || lower.startsWith("https://") ||
             lower.startsWith("mailto:") || lower.startsWith("tel:")
         ) trimmed else null
+    }
+}
+
+// ── JSON coder ──────────────────────────────────────────────────────────────
+
+/**
+ * The FIDELITY format: unlike HTML it carries block ids, upload state and poll
+ * options. See docs/DOCUMENT-MODEL.md.
+ *
+ * The writer is hand-rolled rather than `org.json` / `JSONObject` for two
+ * reasons: platform JSON writers make no guarantee about key ORDER, so the two
+ * platforms would emit different bytes for the same document and the parity
+ * harness could not compare them; and staying dependency-free keeps the coder
+ * pure Kotlin, so it runs off-device in the test harness.
+ */
+internal object JsonCoder {
+
+    // ── encode ──────────────────────────────────────────────────────────────
+
+    fun encode(blocks: List<WysiwygBlock>): String {
+        val out = StringBuilder()
+        out.append("{\"version\":2,\"blocks\":[")
+        blocks.forEachIndexed { index, block ->
+            if (index > 0) out.append(',')
+            encodeBlock(out, block)
+        }
+        out.append("]}")
+        return out.toString()
+    }
+
+    private fun encodeBlock(out: StringBuilder, block: WysiwygBlock) {
+        out.append("{\"id\":").append(quote(block.id))
+        out.append(",\"type\":").append(quote(block.type))
+
+        if (block.isText) {
+            out.append(",\"runs\":[")
+            var first = true
+            for (run in block.runs) {
+                if (run.text.isEmpty()) continue
+                if (!first) out.append(',')
+                first = false
+                out.append("{\"text\":").append(quote(run.text))
+                out.append(",\"marks\":")
+                encodeMarks(out, run.marks)
+                out.append('}')
+            }
+            out.append(']')
+        } else {
+            // Fixed key order per type keeps both platforms byte-identical.
+            for (key in WysiwygBlock.MEDIA_ATTRS[block.type].orEmpty()) {
+                val value = block.attrs[key] ?: continue
+                out.append(',').append(quote(key)).append(':').append(quote(value))
+            }
+            if (block.type == "poll") {
+                out.append(",\"options\":[")
+                block.options.forEachIndexed { index, option ->
+                    if (index > 0) out.append(',')
+                    out.append("{\"id\":").append(quote(option.id))
+                    out.append(",\"label\":").append(quote(option.label)).append('}')
+                }
+                out.append(']')
+            }
+        }
+
+        out.append('}')
+    }
+
+    /** Only marks that are SET are emitted, in the contract's nesting order. */
+    private fun encodeMarks(out: StringBuilder, marks: MarkSet) {
+        out.append('{')
+        var first = true
+        fun pair(key: String, value: String) {
+            if (!first) out.append(',')
+            first = false
+            out.append(quote(key)).append(':').append(value)
+        }
+        marks.link?.let { pair("link", quote(it)) }
+        marks.color?.let { pair("color", quote(it)) }
+        marks.highlight?.let { pair("highlight", quote(it)) }
+        if (marks.bold) pair("bold", "true")
+        if (marks.italic) pair("italic", "true")
+        if (marks.underline) pair("underline", "true")
+        if (marks.strike) pair("strike", "true")
+        if (marks.code) pair("code", "true")
+        out.append('}')
+    }
+
+    fun quote(s: String): String {
+        val out = StringBuilder(s.length + 2)
+        out.append('"')
+        for (c in s) {
+            when (c) {
+                '"' -> out.append("\\\"")
+                '\\' -> out.append("\\\\")
+                '\n' -> out.append("\\n")
+                '\r' -> out.append("\\r")
+                '\t' -> out.append("\\t")
+                else -> if (c < ' ') {
+                    out.append("\\u").append(String.format("%04x", c.code))
+                } else {
+                    out.append(c)
+                }
+            }
+        }
+        out.append('"')
+        return out.toString()
+    }
+
+    // ── decode ──────────────────────────────────────────────────────────────
+
+    /** Tolerant reader: unknown keys ignored, malformed input yields no blocks. */
+    fun decode(json: String): MutableList<WysiwygBlock> {
+        val value = try {
+            JsonScanner(json).parseValue()
+        } catch (e: Exception) {
+            return mutableListOf()
+        }
+
+        val root = value as? Map<*, *> ?: return mutableListOf()
+        val rawBlocks = root["blocks"] as? List<*> ?: return mutableListOf()
+        val blocks = mutableListOf<WysiwygBlock>()
+
+        for (raw in rawBlocks) {
+            val map = raw as? Map<*, *> ?: continue
+            val type = map["type"] as? String ?: continue
+            if (!WysiwygBlock.KNOWN_TYPES.contains(type) && !WysiwygBlock.MEDIA_TYPES.contains(type)) {
+                continue
+            }
+
+            val block = WysiwygBlock(type, id = map["id"] as? String ?: "")
+
+            if (block.isText) {
+                for (rawRun in map["runs"] as? List<*> ?: emptyList<Any>()) {
+                    val runMap = rawRun as? Map<*, *> ?: continue
+                    val text = runMap["text"] as? String ?: continue
+                    if (text.isEmpty()) continue
+                    block.runs.add(WysiwygRun(text, decodeMarks(runMap["marks"] as? Map<*, *>)))
+                }
+            } else {
+                for (key in WysiwygBlock.MEDIA_ATTRS[type].orEmpty()) {
+                    val value2 = map[key]
+                    if (value2 != null) block.attrs[key] = stringify(value2)
+                }
+                for (rawOption in map["options"] as? List<*> ?: emptyList<Any>()) {
+                    val optionMap = rawOption as? Map<*, *> ?: continue
+                    block.options.add(
+                        PollOption(
+                            optionMap["id"] as? String ?: "",
+                            optionMap["label"] as? String ?: "",
+                        )
+                    )
+                }
+            }
+
+            blocks.add(block)
+        }
+
+        return blocks
+    }
+
+    private fun stringify(value: Any?): String = when (value) {
+        null -> ""
+        is String -> value
+        is Boolean -> if (value) "true" else "false"
+        is Double -> if (value == Math.floor(value) && !value.isInfinite()) {
+            value.toLong().toString()
+        } else {
+            value.toString()
+        }
+        else -> value.toString()
+    }
+
+    private fun decodeMarks(map: Map<*, *>?): MarkSet {
+        if (map == null) return MarkSet()
+        fun flag(key: String) = map[key] == true
+        return MarkSet(
+            link = map["link"] as? String,
+            color = map["color"] as? String,
+            highlight = map["highlight"] as? String,
+            bold = flag("bold"),
+            italic = flag("italic"),
+            underline = flag("underline"),
+            strike = flag("strike"),
+            code = flag("code"),
+        )
+    }
+}
+
+/** Minimal recursive-descent JSON reader — objects, arrays, strings, numbers,
+ *  booleans and null. Enough for this document model, nothing more. */
+internal class JsonScanner(private val src: String) {
+    private var i = 0
+
+    fun parseValue(): Any? {
+        skipWhitespace()
+        if (i >= src.length) return null
+        return when (src[i]) {
+            '{' -> parseObject()
+            '[' -> parseArray()
+            '"' -> parseString()
+            't' -> literal("true", true)
+            'f' -> literal("false", false)
+            'n' -> literal("null", null)
+            else -> parseNumber()
+        }
+    }
+
+    private fun skipWhitespace() {
+        while (i < src.length && src[i].isWhitespace()) i++
+    }
+
+    private fun literal(word: String, value: Any?): Any? {
+        require(src.startsWith(word, i)) { "bad literal at $i" }
+        i += word.length
+        return value
+    }
+
+    private fun parseObject(): Map<String, Any?> {
+        val map = LinkedHashMap<String, Any?>()
+        i++ // '{'
+        skipWhitespace()
+        if (i < src.length && src[i] == '}') { i++; return map }
+        while (i < src.length) {
+            skipWhitespace()
+            val key = parseString()
+            skipWhitespace()
+            require(i < src.length && src[i] == ':') { "expected ':' at $i" }
+            i++
+            map[key] = parseValue()
+            skipWhitespace()
+            if (i < src.length && src[i] == ',') { i++; continue }
+            if (i < src.length && src[i] == '}') { i++; break }
+            break
+        }
+        return map
+    }
+
+    private fun parseArray(): List<Any?> {
+        val list = mutableListOf<Any?>()
+        i++ // '['
+        skipWhitespace()
+        if (i < src.length && src[i] == ']') { i++; return list }
+        while (i < src.length) {
+            list.add(parseValue())
+            skipWhitespace()
+            if (i < src.length && src[i] == ',') { i++; continue }
+            if (i < src.length && src[i] == ']') { i++; break }
+            break
+        }
+        return list
+    }
+
+    private fun parseString(): String {
+        require(i < src.length && src[i] == '"') { "expected string at $i" }
+        i++
+        val out = StringBuilder()
+        while (i < src.length) {
+            val c = src[i]
+            when {
+                c == '"' -> { i++; return out.toString() }
+                c == '\\' -> {
+                    i++
+                    when (val esc = src.getOrNull(i)) {
+                        '"' -> out.append('"')
+                        '\\' -> out.append('\\')
+                        '/' -> out.append('/')
+                        'n' -> out.append('\n')
+                        'r' -> out.append('\r')
+                        't' -> out.append('\t')
+                        'b' -> out.append('\b')
+                        'f' -> out.append('')
+                        'u' -> {
+                            val hex = src.substring(i + 1, minOf(i + 5, src.length))
+                            out.append(hex.toInt(16).toChar())
+                            i += 4
+                        }
+                        else -> if (esc != null) out.append(esc)
+                    }
+                    i++
+                }
+                else -> { out.append(c); i++ }
+            }
+        }
+        return out.toString()
+    }
+
+    private fun parseNumber(): Double {
+        val start = i
+        while (i < src.length && (src[i].isDigit() || src[i] in "-+.eE")) i++
+        return src.substring(start, i).toDoubleOrNull() ?: 0.0
     }
 }
 
