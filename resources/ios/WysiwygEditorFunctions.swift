@@ -27,6 +27,45 @@ import SwiftUI
 // MARK: - Bridge function
 
 enum WysiwygEditorFunctions {
+    /// The editor currently on screen. InsertMedia / UpdateUpload arrive as
+    /// separate bridge calls while the editor is open, so they need a way to
+    /// reach it. Cleared when the editor closes.
+    static weak var live: WysiwygDocumentModel?
+
+    /// Insert a media block at the caret. The host calls this after picking
+    /// (and optionally cropping) the media — the editor never opens a picker.
+    class InsertMedia: BridgeFunction {
+        func execute(parameters: [String: Any]) throws -> [String: Any] {
+            guard let kind = parameters["kind"] as? String else { return [:] }
+            var attrs: [String: String] = [:]
+            if let raw = parameters["attributes"] as? [String: Any] {
+                for (key, value) in raw {
+                    if let text = value as? String { attrs[key] = text }
+                }
+            }
+            DispatchQueue.main.async {
+                WysiwygEditorFunctions.live?.insertMedia(kind: kind, attrs: attrs)
+            }
+            return [:]
+        }
+    }
+
+    /// Report upload progress / completion / failure for an inserted block.
+    class UpdateUpload: BridgeFunction {
+        func execute(parameters: [String: Any]) throws -> [String: Any] {
+            guard let uploadId = parameters["uploadId"] as? String else { return [:] }
+            let state = parameters["state"] as? String ?? "progress"
+            let src = parameters["src"] as? String ?? ""
+            let message = parameters["message"] as? String ?? ""
+            DispatchQueue.main.async {
+                WysiwygEditorFunctions.live?.updateUpload(
+                    uploadId: uploadId, state: state, src: src, message: message
+                )
+            }
+            return [:]
+        }
+    }
+
     class Open: BridgeFunction {
         func execute(parameters: [String: Any]) throws -> [String: Any] {
             let config = WysiwygConfig(parameters)
@@ -41,6 +80,7 @@ enum WysiwygEditorFunctions {
 private enum WysiwygEvents {
     static let saved = "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved"
     static let cancelled = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
+    static let mediaRequested = "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested"
 }
 
 // MARK: - Theme
@@ -134,10 +174,11 @@ extension UIColor {
 
 struct WysiwygConfig {
     /// The `full` preset order — also the whitelist for the toolbar option.
+    static let insertTools = ["image", "video", "file"]
     static let allTools = [
         "bold", "italic", "underline", "strikethrough", "h1", "h2", "h3",
         "bulletList", "orderedList", "blockquote", "link", "code",
-        "textColor", "highlight", "clearFormat",
+        "textColor", "highlight", "image", "video", "file", "clearFormat",
     ]
 
     let content: String
@@ -1980,11 +2021,20 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
  The toolbar, counters and Save all act through this, so they do not need to
  know how many editors exist. See docs/DOCUMENT-MODEL.md.
  */
+/// A segment plus a STABLE id. Editor models are keyed by this rather than by
+/// list position, so inserting media mid-document does not silently re-point
+/// every model after it.
+struct SegmentEntry: Identifiable {
+    let id: Int
+    var segment: Segment
+}
+
 final class WysiwygDocumentModel: ObservableObject {
     let config: WysiwygConfig
-    let segments: [Segment]
-    /// Editor models keyed by segment index (TEXT segments only).
+    @Published private(set) var entries: [SegmentEntry] = []
+    /// Editor models keyed by segment ENTRY ID (TEXT segments only).
     private(set) var models: [Int: WysiwygEditorModel] = [:]
+    private var nextId = 0
 
     /// The segment the caret is in — what the toolbar drives.
     @Published var focused: WysiwygEditorModel?
@@ -1998,29 +2048,75 @@ final class WysiwygDocumentModel: ObservableObject {
     init(config: WysiwygConfig) {
         self.config = config
         let parsed = HtmlCoder.parse(config.content)
-        self.segments = segmentsOf(parsed)
         self.initialNormalizedHtml = HtmlCoder.emit(parsed).html
 
-        for (index, segment) in segments.enumerated() {
+        for segment in segmentsOf(parsed) {
+            let entry = SegmentEntry(id: nextId, segment: segment)
+            nextId += 1
+            entries.append(entry)
             if case .text(let blocks) = segment {
-                models[index] = WysiwygEditorModel(config: config, blocks: blocks)
+                models[entry.id] = WysiwygEditorModel(config: config, blocks: blocks)
             }
         }
 
         refreshCounts()
-        focused = models[models.keys.sorted().first ?? 0]
+        focused = entries.compactMap { models[$0.id] }.first
     }
 
-    func model(at index: Int) -> WysiwygEditorModel? { models[index] }
+    func model(for entry: SegmentEntry) -> WysiwygEditorModel? { models[entry.id] }
 
     /// Reassemble the document from every segment in order.
     func blocks() -> [WysiwygBlock] {
-        segments.enumerated().flatMap { index, segment -> [WysiwygBlock] in
-            switch segment {
-            case .text(let seeded): return models[index]?.blocks() ?? seeded
+        entries.flatMap { entry -> [WysiwygBlock] in
+            switch entry.segment {
+            case .text(let seeded): return models[entry.id]?.blocks() ?? seeded
             case .media(let block): return [block]
             }
         }
+    }
+
+    // MARK: media
+
+    /// Place a media block after the focused segment, then give the user a
+    /// fresh paragraph below so typing can continue.
+    func insertMedia(kind: String, attrs: [String: String]) {
+        var block = WysiwygBlock(type: kind, runs: [])
+        block.attrs = attrs
+
+        let at = entries.firstIndex { models[$0.id] === focused }
+        let insertAt = at.map { $0 + 1 } ?? entries.count
+
+        let mediaEntry = SegmentEntry(id: nextId, segment: .media(block))
+        nextId += 1
+        let textEntry = SegmentEntry(id: nextId, segment: .text([WysiwygBlock(type: "p", runs: [])]))
+        nextId += 1
+        models[textEntry.id] = WysiwygEditorModel(config: config, blocks: [WysiwygBlock(type: "p", runs: [])])
+
+        entries.insert(contentsOf: [mediaEntry, textEntry], at: insertAt)
+        segmentChanged()
+    }
+
+    /// Report upload progress / completion / failure for an inserted block.
+    func updateUpload(uploadId: String, state: String, src: String, message: String) {
+        guard let index = entries.firstIndex(where: { entry in
+            if case .media(let block) = entry.segment { return block.attrs["uploadId"] == uploadId }
+            return false
+        }) else { return }
+
+        guard case .media(var block) = entries[index].segment else { return }
+
+        switch state {
+        case "completed":
+            if !src.isEmpty { block.attrs["src"] = src }
+            block.attrs.removeValue(forKey: "uploadId")
+        case "failed":
+            block.attrs["uploadError"] = message.isEmpty ? "Upload failed" : message
+        default:
+            block.attrs["uploadProgress"] = src
+        }
+
+        entries[index].segment = .media(block)
+        segmentChanged()
     }
 
     func serialize() -> (html: String, text: String) { HtmlCoder.emit(blocks()) }
@@ -2188,8 +2284,8 @@ private struct EditorScreen: View {
     private var theme: WysiwygTheme { document.config.theme }
 
     /// The first text segment takes the keyboard when the screen opens.
-    private var firstTextIndex: Int {
-        document.segments.firstIndex { if case .text = $0 { return true } else { return false } } ?? 0
+    private var firstTextId: Int {
+        document.entries.first { if case .text = $0.segment { return true } else { return false } }?.id ?? -1
     }
 
     var body: some View {
@@ -2198,8 +2294,8 @@ private struct EditorScreen: View {
                 topBar
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(document.segments.enumerated()), id: \.offset) { index, segment in
-                            segmentView(index: index, segment: segment)
+                        ForEach(document.entries) { entry in
+                            segmentView(entry: entry)
                         }
                     }
                 }
@@ -2231,20 +2327,20 @@ private struct EditorScreen: View {
     }
 
     @ViewBuilder
-    private func segmentView(index: Int, segment: Segment) -> some View {
-        switch segment {
+    private func segmentView(entry: SegmentEntry) -> some View {
+        switch entry.segment {
         case .media(let block):
             MediaCardView(block: block, theme: theme)
         case .text:
-            if let model = document.model(at: index) {
+            if let model = document.model(for: entry) {
                 RichTextView(
                     model: model,
-                    height: heightBinding(index),
-                    autoFocus: index == firstTextIndex,
+                    height: heightBinding(entry.id),
+                    autoFocus: entry.id == firstTextId,
                     onFocus: { document.focused = model },
                     onChange: { document.segmentChanged() }
                 )
-                .frame(height: heights[index] ?? 48)
+                .frame(height: heights[entry.id] ?? 48)
             }
         }
     }
@@ -2406,6 +2502,12 @@ private let toolIcons: [String: ToolIcon] = [
     "textColor": ToolIcon(path: "M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 19.5L20 19.5"),
     "highlight": ToolIcon(path: "M15 4L20 9L10 19L5 19L5 14L15 4M13 6L18 11"),
     "clearFormat": ToolIcon(path: "M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 4L20 20"),
+    // Insert tools: a framed picture, a play triangle, a paperclip.
+    "image": ToolIcon(path: "M3.5 5.5L20.5 5.5L20.5 18.5L3.5 18.5L3.5 5.5"
+        + "M3.5 15L8.5 10.5L12.5 14L15.5 11.5L20.5 16M15.5 9.2L15.51 9.2"),
+    "video": ToolIcon(path: "M3.5 6L16 6L16 18L3.5 18L3.5 6M16 10.5L20.5 8L20.5 16L16 13.5"),
+    "file": ToolIcon(path: "M16.5 7.5L9 15C7.6 16.4 7.6 18.6 9 20C10.4 21.4 12.6 21.4 14 20L19.5 14.5"
+        + "C21.6 12.4 21.6 9.1 19.5 7C17.4 4.9 14.1 4.9 12 7L6.5 12.5"),
 ]
 
 /**
@@ -2543,6 +2645,8 @@ private struct ToolbarRow: View {
             }
         case "clearFormat":
             button("clearFormat", active: false) { model.clearFormat() }
+        case "image", "video", "file":
+            button(tool, active: false) { requestMedia(tool) }
         default:
             EmptyView()
         }
@@ -2550,6 +2654,13 @@ private struct ToolbarRow: View {
 
     /// Draws the SHARED vector glyph for `tool` — deliberately not an SF
     /// Symbol, so the toolbar is identical to Android's (see ToolIcon).
+    /// Ask the HOST to pick media — the editor ships no picker.
+    private func requestMedia(_ kind: String) {
+        var payload: [String: Any] = ["kind": kind]
+        if let id = model.config.id { payload["id"] = id }
+        LaravelBridge.shared.send?(WysiwygEvents.mediaRequested, payload)
+    }
+
     private func button(_ tool: String, active: Bool, enabled: Bool = true,
                         action: @escaping () -> Void) -> some View {
         let icon = toolIcons[tool] ?? ToolIcon(path: "")
@@ -2619,6 +2730,8 @@ final class WysiwygEditorPresenter {
 
         finished = false
         let document = WysiwygDocumentModel(config: config)
+        // Reachable by the InsertMedia / UpdateUpload bridge functions while open.
+        WysiwygEditorFunctions.live = document
         let host = UIHostingController(rootView: AnyView(EmptyView()))
         host.modalPresentationStyle = .fullScreen
         host.view.backgroundColor = config.theme.backgroundUIColor
