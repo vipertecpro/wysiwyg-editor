@@ -366,9 +366,9 @@ internal class WysiwygBlock(
 
         /** Attribute keys per media type, in SERIALIZATION order (normative). */
         val MEDIA_ATTRS = mapOf(
-            "image" to listOf("src", "alt", "caption", "width", "height", "uploadId"),
-            "video" to listOf("src", "poster", "caption", "uploadId"),
-            "file" to listOf("src", "name", "size", "mime", "uploadId"),
+            "image" to listOf("src", "localPath", "alt", "caption", "width", "height", "uploadId"),
+            "video" to listOf("src", "localPath", "poster", "caption", "uploadId"),
+            "file" to listOf("src", "localPath", "name", "size", "mime", "uploadId"),
             "embed" to listOf("url", "provider", "html"),
             "poll" to listOf("question", "multiple", "closesAt"),
             "divider" to listOf(),
@@ -401,6 +401,9 @@ internal object HtmlCoder {
         var openedByBr = false
         val listStack = mutableListOf<String>()
         val markStack = mutableListOf<Pair<String, (MarkBuilder) -> Unit>>()
+        // The media block currently being assembled from a <figure>, if any.
+        var mediaBlock: WysiwygBlock? = null
+        var inFigcaption = false
         val n = html.length
         var i = 0
 
@@ -437,6 +440,13 @@ internal object HtmlCoder {
 
         fun appendText(decoded: String) {
             val text = collapseWhitespace(decoded)
+            val media = mediaBlock
+            if (media != null) {
+                // Inside a <figure>: only the caption is content; anything else
+                // (whitespace between the img and figcaption) is layout noise.
+                if (inFigcaption) media.attrs["caption"] = media.attrs["caption"].orEmpty() + text
+                return
+            }
             if (current == null) {
                 // No open block: whitespace between blocks is ignored; real
                 // text opens an implicit paragraph (tolerance).
@@ -482,6 +492,38 @@ internal object HtmlCoder {
                     commit()
                     open(type, byBr = true)
                 }
+                "hr" -> { closeBlock(); blocks.add(WysiwygBlock("divider")) }
+                "figure" -> {
+                    closeBlock()
+                    val a = attributes(attrText)
+                    mediaBlock = when {
+                        a["data-poll"] != null ->
+                            JsonCoder.decode(a["data-poll"]!!).firstOrNull() ?: WysiwygBlock("poll")
+                        a["data-embed"] != null -> WysiwygBlock("embed").apply {
+                            attrs["url"] = a["data-embed"]!!
+                            a["data-provider"]?.takeIf { it.isNotEmpty() }?.let { attrs["provider"] = it }
+                        }
+                        // Type is decided by whatever <img>/<video> it contains.
+                        else -> WysiwygBlock("figure")
+                    }
+                    a["data-pending"]?.takeIf { it.isNotEmpty() }?.let { mediaBlock?.attrs?.put("uploadId", it) }
+                }
+                "img", "video" -> {
+                    val a = attributes(attrText)
+                    val target = mediaBlock ?: WysiwygBlock(name)
+                    target.type = if (name == "img") "image" else "video"
+                    a["src"]?.takeIf { it.isNotEmpty() }?.let { target.attrs["src"] = it }
+                    a["alt"]?.takeIf { it.isNotEmpty() }?.let { target.attrs["alt"] = it }
+                    a["poster"]?.takeIf { it.isNotEmpty() }?.let { target.attrs["poster"] = it }
+                    if (mediaBlock == null) {
+                        // A bare <img>/<video> outside a figure is still a block.
+                        closeBlock()
+                        blocks.add(target)
+                    } else {
+                        mediaBlock = target
+                    }
+                }
+                "figcaption" -> inFigcaption = true
                 "p", "div" -> open("p")
                 "h1" -> open("h1")
                 "h2" -> open("h2")
@@ -513,6 +555,12 @@ internal object HtmlCoder {
 
         fun handleClose(name: String) {
             when (name) {
+                "figure" -> {
+                    mediaBlock?.let { if (it.type != "figure") blocks.add(it) }
+                    mediaBlock = null
+                    inFigcaption = false
+                }
+                "figcaption" -> inFigcaption = false
                 "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li" -> closeBlock()
                 "ul", "ol" -> {
                     closeBlock()
@@ -606,6 +654,13 @@ internal object HtmlCoder {
         while (i < blocks.size) {
             val type = blocks[i].type
 
+            if (WysiwygBlock.MEDIA_TYPES.contains(type)) {
+                html.append(mediaHtml(blocks[i]))
+                lines.add(mediaText(blocks[i]))
+                i++
+                continue
+            }
+
             if (type == "ul" || type == "ol") {
                 html.append('<').append(type).append('>')
                 var ordinal = 1
@@ -633,6 +688,70 @@ internal object HtmlCoder {
         }
 
         return html.toString() to lines.joinToString("\n")
+    }
+
+    /**
+     * Media blocks as HTML. `src` is the PUBLIC url — a block whose upload has
+     * not finished exports with `data-pending` and no src rather than leaking
+     * a device path into published HTML, so the host can find unfinished
+     * uploads instead of silently shipping a broken image.
+     */
+    private fun mediaHtml(block: WysiwygBlock): String {
+        val src = block.attrs["src"].orEmpty()
+        val caption = block.attrs["caption"].orEmpty()
+        val uploadId = block.attrs["uploadId"].orEmpty()
+        val pending = if (src.isEmpty() && uploadId.isNotEmpty()) {
+            " data-pending=\"" + escapeAttribute(uploadId) + "\""
+        } else {
+            ""
+        }
+        val figcaption = if (caption.isEmpty()) "" else "<figcaption>" + escapeText(caption) + "</figcaption>"
+
+        return when (block.type) {
+            "divider" -> "<hr>"
+            "image" -> {
+                val attrs = StringBuilder()
+                if (src.isNotEmpty()) attrs.append(" src=\"").append(escapeAttribute(src)).append('"')
+                attrs.append(" alt=\"").append(escapeAttribute(block.attrs["alt"].orEmpty())).append('"')
+                "<figure$pending><img$attrs>$figcaption</figure>"
+            }
+            "video" -> {
+                val attrs = StringBuilder()
+                if (src.isNotEmpty()) attrs.append(" src=\"").append(escapeAttribute(src)).append('"')
+                block.attrs["poster"]?.takeIf { it.isNotEmpty() }?.let {
+                    attrs.append(" poster=\"").append(escapeAttribute(it)).append('"')
+                }
+                "<figure$pending><video$attrs controls></video>$figcaption</figure>"
+            }
+            "file" -> "<p><a href=\"" + escapeAttribute(src) + "\" download>" +
+                escapeText(block.attrs["name"].orEmpty()) + "</a></p>"
+            "embed" -> {
+                val provider = block.attrs["provider"].orEmpty()
+                val providerAttr = if (provider.isEmpty()) {
+                    ""
+                } else {
+                    " data-provider=\"" + escapeAttribute(provider) + "\""
+                }
+                "<figure data-embed=\"" + escapeAttribute(block.attrs["url"].orEmpty()) +
+                    "\"" + providerAttr + "></figure>"
+            }
+            // The whole block round-trips as escaped JSON — HTML has nowhere
+            // else to keep option ids.
+            "poll" -> "<figure data-poll=\"" + escapeAttribute(JsonCoder.encode(listOf(block))) +
+                "\"></figure>"
+            else -> ""
+        }
+    }
+
+    /** The plain-text stand-in for a media block (used for excerpts/search). */
+    private fun mediaText(block: WysiwygBlock): String = when (block.type) {
+        "divider" -> "---"
+        "image" -> block.attrs["caption"]?.takeIf { it.isNotEmpty() } ?: block.attrs["alt"].orEmpty()
+        "video" -> block.attrs["caption"].orEmpty()
+        "file" -> block.attrs["name"].orEmpty()
+        "embed" -> block.attrs["url"].orEmpty()
+        "poll" -> block.attrs["question"].orEmpty()
+        else -> ""
     }
 
     /**

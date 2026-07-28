@@ -224,6 +224,83 @@ fun main() {
         else { failures++; println("  ✗ escapes and unescapes strings -> ${text.show()}") }
     }
 
+    println("Media blocks in HTML")
+    check(
+        "image with caption",
+        """<figure><img src="a.jpg" alt="A"><figcaption>Cap</figcaption></figure>""",
+        """<figure><img src="a.jpg" alt="A"><figcaption>Cap</figcaption></figure>""",
+    )
+    check(
+        "image without a caption",
+        """<figure><img src="a.jpg" alt=""></figure>""",
+        """<figure><img src="a.jpg" alt=""></figure>""",
+    )
+    check(
+        "bare img outside a figure becomes a block",
+        """<img src="a.jpg" alt="A">""",
+        """<figure><img src="a.jpg" alt="A"></figure>""",
+    )
+    check(
+        "video with poster",
+        """<figure><video src="v.mp4" poster="p.jpg" controls></video></figure>""",
+        """<figure><video src="v.mp4" poster="p.jpg" controls></video></figure>""",
+    )
+    check("divider", "<hr>", "<hr>")
+    check(
+        "embed with provider",
+        """<figure data-embed="https://v.io/1" data-provider="vimeo"></figure>""",
+        """<figure data-embed="https://v.io/1" data-provider="vimeo"></figure>""",
+    )
+    check(
+        "media mixes with text blocks",
+        """<p>Before</p><hr><p>After</p>""",
+        """<p>Before</p><hr><p>After</p>""",
+    )
+
+    run {
+        // A block still uploading exports with data-pending and NO src, so the
+        // host can find it — rather than leaking a device path.
+        val block = WysiwygBlock("image", id = "u1").apply {
+            attrs["localPath"] = "/data/user/0/tmp/x.jpg"
+            attrs["uploadId"] = "up-7"
+            attrs["alt"] = "Pending"
+        }
+        val html = HtmlCoder.serialize(listOf(block)).first
+        val expected = """<figure data-pending="up-7"><img alt="Pending"></figure>"""
+        if (html == expected && !html.contains("/data/user")) {
+            println("  ✓ a pending upload exports data-pending and never a device path")
+        } else {
+            failures++
+            println("  ✗ a pending upload exports data-pending and never a device path")
+            println("      got: ${html.show()}")
+        }
+    }
+
+    run {
+        // Polls survive an HTML round-trip via their escaped JSON payload.
+        val poll = WysiwygBlock("poll", id = "pl").apply {
+            attrs["question"] = "Best?"
+            options.add(PollOption("o1", "One"))
+            options.add(PollOption("o2", "Two"))
+        }
+        val html = HtmlCoder.serialize(listOf(poll)).first
+        val back = HtmlCoder.parse(html).single()
+        if (back.type == "poll" && back.attrs["question"] == "Best?" &&
+            back.options.map { it.label } == listOf("One", "Two")
+        ) {
+            println("  ✓ poll options survive an HTML round-trip")
+        } else {
+            failures++
+            println("  ✗ poll options survive an HTML round-trip -> ${html.show()}")
+        }
+    }
+
+    checkText(
+        "media contributes its caption / label to the plain text",
+        """<p>A</p><figure><img src="a.jpg" alt="Alt"><figcaption>Cap</figcaption></figure><hr>""",
+        "A\nCap\n---",
+    )
+
     println("v1 compatibility — text-only documents are unchanged")
     run {
         val v1 = "<h1>T</h1><p>a <strong>b</strong></p><ul><li>x</li><li>y</li></ul>"

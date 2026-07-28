@@ -189,6 +189,63 @@ do {
     else { failures += 1; print("  ✗ escapes and unescapes strings -> \(text.debugDescription)") }
 }
 
+print("Media blocks in HTML")
+check("image with caption",
+      #"<figure><img src="a.jpg" alt="A"><figcaption>Cap</figcaption></figure>"#,
+      #"<figure><img src="a.jpg" alt="A"><figcaption>Cap</figcaption></figure>"#)
+check("image without a caption",
+      #"<figure><img src="a.jpg" alt=""></figure>"#,
+      #"<figure><img src="a.jpg" alt=""></figure>"#)
+check("bare img outside a figure becomes a block",
+      #"<img src="a.jpg" alt="A">"#,
+      #"<figure><img src="a.jpg" alt="A"></figure>"#)
+check("video with poster",
+      #"<figure><video src="v.mp4" poster="p.jpg" controls></video></figure>"#,
+      #"<figure><video src="v.mp4" poster="p.jpg" controls></video></figure>"#)
+check("divider", "<hr>", "<hr>")
+check("embed with provider",
+      #"<figure data-embed="https://v.io/1" data-provider="vimeo"></figure>"#,
+      #"<figure data-embed="https://v.io/1" data-provider="vimeo"></figure>"#)
+check("media mixes with text blocks",
+      "<p>Before</p><hr><p>After</p>",
+      "<p>Before</p><hr><p>After</p>")
+
+do {
+    // A block still uploading exports with data-pending and NO src, so the
+    // host can find it — rather than leaking a device path.
+    var block = WysiwygBlock(type: "image", runs: [], id: "u1")
+    block.attrs = ["localPath": "/var/mobile/tmp/x.jpg", "uploadId": "up-7", "alt": "Pending"]
+    let html = HtmlCoder.emit([block]).html
+    let expected = #"<figure data-pending="up-7"><img alt="Pending"></figure>"#
+    if html == expected && !html.contains("/var/mobile") {
+        print("  ✓ a pending upload exports data-pending and never a device path")
+    } else {
+        failures += 1
+        print("  ✗ a pending upload exports data-pending and never a device path")
+        print("      got: \(html.debugDescription)")
+    }
+}
+
+do {
+    // Polls survive an HTML round-trip via their escaped JSON payload.
+    var poll = WysiwygBlock(type: "poll", runs: [], id: "pl")
+    poll.attrs["question"] = "Best?"
+    poll.options = [PollOption(id: "o1", label: "One"), PollOption(id: "o2", label: "Two")]
+    let html = HtmlCoder.emit([poll]).html
+    let back = HtmlCoder.parse(html)
+    if back.count == 1, back[0].type == "poll", back[0].attrs["question"] == "Best?",
+       back[0].options.map(\.label) == ["One", "Two"] {
+        print("  ✓ poll options survive an HTML round-trip")
+    } else {
+        failures += 1
+        print("  ✗ poll options survive an HTML round-trip -> \(html.debugDescription)")
+    }
+}
+
+checkText("media contributes its caption / label to the plain text",
+          #"<p>A</p><figure><img src="a.jpg" alt="Alt"><figcaption>Cap</figcaption></figure><hr>"#,
+          "A\nCap\n---")
+
 print("v1 compatibility — text-only documents are unchanged")
 do {
     let v1 = "<h1>T</h1><p>a <strong>b</strong></p><ul><li>x</li><li>y</li></ul>"

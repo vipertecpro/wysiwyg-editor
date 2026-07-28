@@ -199,9 +199,9 @@ struct WysiwygBlock {
 
     /// Attribute keys per media type, in SERIALIZATION order (normative).
     static let mediaAttrs: [String: [String]] = [
-        "image": ["src", "alt", "caption", "width", "height", "uploadId"],
-        "video": ["src", "poster", "caption", "uploadId"],
-        "file": ["src", "name", "size", "mime", "uploadId"],
+        "image": ["src", "localPath", "alt", "caption", "width", "height", "uploadId"],
+        "video": ["src", "localPath", "poster", "caption", "uploadId"],
+        "file": ["src", "localPath", "name", "size", "mime", "uploadId"],
         "embed": ["url", "provider", "html"],
         "poll": ["question", "multiple", "closesAt"],
         "divider": [],
@@ -227,6 +227,9 @@ enum HtmlCoder {
         var current: WysiwygBlock?
         var openedByBr = false
         var listStack: [String] = []
+        // The media block currently being assembled from a <figure>, if any.
+        var mediaBlock: WysiwygBlock?
+        var inFigcaption = false
         var markStack: [(tag: String, apply: (inout MarkSet) -> Void)] = []
         let chars = Array(html)
         let n = chars.count
@@ -257,6 +260,15 @@ enum HtmlCoder {
         }
         func appendText(_ decoded: String) {
             let text = collapseWhitespace(decoded)
+            if mediaBlock != nil {
+                // Inside a <figure>: only the caption is content; anything else
+                // (whitespace between the img and figcaption) is layout noise.
+                if inFigcaption, var media = mediaBlock {
+                    media.attrs["caption"] = (media.attrs["caption"] ?? "") + text
+                    mediaBlock = media
+                }
+                return
+            }
             if current == nil {
                 // No open block: whitespace between blocks is ignored; real
                 // text opens an implicit paragraph (tolerance).
@@ -308,6 +320,44 @@ enum HtmlCoder {
                 let type = current?.type ?? "p"
                 commit()
                 open(type, byBr: true)
+            case "hr":
+                closeBlock()
+                blocks.append(WysiwygBlock(type: "divider", runs: []))
+            case "figure":
+                closeBlock()
+                let a = attributes(from: attrText)
+                if let payload = a["data-poll"] {
+                    mediaBlock = JsonCoder.decode(payload).first ?? WysiwygBlock(type: "poll", runs: [])
+                } else if let url = a["data-embed"] {
+                    var embed = WysiwygBlock(type: "embed", runs: [])
+                    embed.attrs["url"] = url
+                    if let provider = a["data-provider"], !provider.isEmpty {
+                        embed.attrs["provider"] = provider
+                    }
+                    mediaBlock = embed
+                } else {
+                    // Type is decided by whatever <img>/<video> it contains.
+                    mediaBlock = WysiwygBlock(type: "figure", runs: [])
+                }
+                if let pendingId = a["data-pending"], !pendingId.isEmpty {
+                    mediaBlock?.attrs["uploadId"] = pendingId
+                }
+            case "img", "video":
+                let a = attributes(from: attrText)
+                var target = mediaBlock ?? WysiwygBlock(type: name, runs: [])
+                target.type = (name == "img") ? "image" : "video"
+                if let src = a["src"], !src.isEmpty { target.attrs["src"] = src }
+                if let alt = a["alt"], !alt.isEmpty { target.attrs["alt"] = alt }
+                if let poster = a["poster"], !poster.isEmpty { target.attrs["poster"] = poster }
+                if mediaBlock == nil {
+                    // A bare <img>/<video> outside a figure is still a block.
+                    closeBlock()
+                    blocks.append(target)
+                } else {
+                    mediaBlock = target
+                }
+            case "figcaption":
+                inFigcaption = true
             case "p", "div":
                 open("p")
             case "h1":
@@ -351,6 +401,12 @@ enum HtmlCoder {
         }
         func handleClose(_ name: String) {
             switch name {
+            case "figure":
+                if let media = mediaBlock, media.type != "figure" { blocks.append(media) }
+                mediaBlock = nil
+                inFigcaption = false
+            case "figcaption":
+                inFigcaption = false
             case "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li":
                 closeBlock()
             case "ul", "ol":
@@ -439,6 +495,12 @@ enum HtmlCoder {
         var i = 0
         while i < blocks.count {
             let block = blocks[i]
+            if WysiwygBlock.mediaTypes.contains(block.type) {
+                html += mediaHtml(block)
+                lines.append(mediaText(block))
+                i += 1
+                continue
+            }
             switch block.type {
             case "ul", "ol":
                 let type = block.type
@@ -465,6 +527,66 @@ enum HtmlCoder {
             }
         }
         return (html, lines.joined(separator: "\n"))
+    }
+
+    /// Media blocks as HTML. `src` is the PUBLIC url — a block whose upload has
+    /// not finished exports with `data-pending` and no src rather than leaking
+    /// a device path into published HTML, so the host can find unfinished
+    /// uploads instead of silently shipping a broken image.
+    static func mediaHtml(_ block: WysiwygBlock) -> String {
+        let src = block.attrs["src"] ?? ""
+        let caption = block.attrs["caption"] ?? ""
+        let uploadId = block.attrs["uploadId"] ?? ""
+        let pending = (src.isEmpty && !uploadId.isEmpty)
+            ? " data-pending=\"" + escapeAttr(uploadId) + "\""
+            : ""
+        let figcaption = caption.isEmpty ? "" : "<figcaption>" + escapeText(caption) + "</figcaption>"
+
+        switch block.type {
+        case "divider":
+            return "<hr>"
+        case "image":
+            var attrs = ""
+            if !src.isEmpty { attrs += " src=\"" + escapeAttr(src) + "\"" }
+            attrs += " alt=\"" + escapeAttr(block.attrs["alt"] ?? "") + "\""
+            return "<figure\(pending)><img\(attrs)>\(figcaption)</figure>"
+        case "video":
+            var attrs = ""
+            if !src.isEmpty { attrs += " src=\"" + escapeAttr(src) + "\"" }
+            if let poster = block.attrs["poster"], !poster.isEmpty {
+                attrs += " poster=\"" + escapeAttr(poster) + "\""
+            }
+            return "<figure\(pending)><video\(attrs) controls></video>\(figcaption)</figure>"
+        case "file":
+            return "<p><a href=\"" + escapeAttr(src) + "\" download>"
+                + escapeText(block.attrs["name"] ?? "") + "</a></p>"
+        case "embed":
+            let provider = block.attrs["provider"] ?? ""
+            let providerAttr = provider.isEmpty ? "" : " data-provider=\"" + escapeAttr(provider) + "\""
+            return "<figure data-embed=\"" + escapeAttr(block.attrs["url"] ?? "") + "\""
+                + providerAttr + "></figure>"
+        case "poll":
+            // The whole block round-trips as escaped JSON — HTML has nowhere
+            // else to keep option ids.
+            return "<figure data-poll=\"" + escapeAttr(JsonCoder.encode([block])) + "\"></figure>"
+        default:
+            return ""
+        }
+    }
+
+    /// The plain-text stand-in for a media block (used for excerpts/search).
+    static func mediaText(_ block: WysiwygBlock) -> String {
+        switch block.type {
+        case "divider": return "---"
+        case "image":
+            let caption = block.attrs["caption"] ?? ""
+            return caption.isEmpty ? (block.attrs["alt"] ?? "") : caption
+        case "video": return block.attrs["caption"] ?? ""
+        case "file": return block.attrs["name"] ?? ""
+        case "embed": return block.attrs["url"] ?? ""
+        case "poll": return block.attrs["question"] ?? ""
+        default: return ""
+        }
     }
 
     /// Merge adjacent identical runs, then wrap them in the fixed nesting
