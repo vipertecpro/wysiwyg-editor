@@ -28,6 +28,7 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -48,12 +49,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -2874,6 +2878,50 @@ internal fun countsReadout(
 }
 
 /**
+ * Decode an image for a media card.
+ *
+ * Handles a local file (what the picker/cropper hands us) and an http(s) URL
+ * (what a re-opened, already-uploaded document contains). Downsampled so a
+ * full-resolution camera photo cannot blow up memory in a scrolling document.
+ * Hand-rolled rather than pulling in an image library — the plugin stays
+ * dependency-free, like the rest of it.
+ */
+internal fun decodeMediaImage(source: String, maxPixels: Int = 1200): android.graphics.Bitmap? {
+    return try {
+        val bytes: ByteArray = if (source.startsWith("http://", true) || source.startsWith("https://", true)) {
+            val connection = (java.net.URL(source).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 8000
+                readTimeout = 8000
+                instanceFollowRedirects = true
+            }
+            try {
+                if (connection.responseCode !in 200..299) return null
+                connection.inputStream.readBytes()
+            } finally {
+                connection.disconnect()
+            }
+        } else {
+            val file = java.io.File(source.removePrefix("file://"))
+            if (!file.exists()) return null
+            file.readBytes()
+        }
+
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxPixels) sample *= 2
+
+        android.graphics.BitmapFactory.decodeByteArray(
+            bytes, 0, bytes.size,
+            android.graphics.BitmapFactory.Options().apply { inSampleSize = sample },
+        )
+    } catch (e: Exception) {
+        Log.w("WysiwygEditor", "media decode failed for $source: ${e.message}")
+        null
+    }
+}
+
+/**
  * A media block inside the document.
  *
  * Deliberately NOT editable text: it renders the block and its pending upload
@@ -2907,6 +2955,23 @@ private fun MediaCard(block: WysiwygBlock, foreground: Color, accent: Color) {
     }
     val caption = block.attrs["caption"].orEmpty()
 
+    // Prefer the public url; fall back to the local file so a freshly picked
+    // image shows immediately, before any upload finishes.
+    val source = block.attrs["src"]?.takeIf { it.isNotEmpty() }
+        ?: block.attrs["localPath"].orEmpty()
+    val bitmap = androidx.compose.runtime.remember(source) {
+        androidx.compose.runtime.mutableStateOf<android.graphics.Bitmap?>(null)
+    }
+
+    if (source.isNotEmpty() && (block.type == "image" || block.type == "video")) {
+        LaunchedEffect(source) {
+            val decoded = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                decodeMediaImage(if (block.type == "video") block.attrs["poster"].orEmpty().ifEmpty { source } else source)
+            }
+            bitmap.value = decoded
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -2915,6 +2980,18 @@ private fun MediaCard(block: WysiwygBlock, foreground: Color, accent: Color) {
             .background(foreground.copy(alpha = 0.06f))
             .padding(horizontal = 14.dp, vertical = 14.dp),
     ) {
+        bitmap.value?.let { image ->
+            Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = block.attrs["alt"].orEmpty(),
+                contentScale = ContentScale.FillWidth,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp)),
+            )
+            Box(modifier = Modifier.height(10.dp))
+        }
+
         Row(verticalAlignment = Alignment.CenterVertically) {
             Canvas(modifier = Modifier.size(20.dp)) {
                 val icon = TOOL_ICONS[if (block.type == "poll") "orderedList" else "bulletList"]

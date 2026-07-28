@@ -2394,9 +2394,47 @@ private struct EditorScreen: View {
  Deliberately NOT editable text: it renders the block and its pending upload
  state. Mirrors the Android MediaCard.
  */
+/// Decode an image for a media card.
+///
+/// Handles a local file (what the picker/cropper hands us) and an http(s) URL
+/// (what a re-opened, already-uploaded document contains). Downsampled so a
+/// full-resolution camera photo cannot blow up memory in a scrolling document.
+/// Hand-rolled rather than pulling in an image library — the plugin stays
+/// dependency-free, like the rest of it.
+func decodeMediaImage(_ source: String, maxPixels: Int = 1200) -> UIImage? {
+    let url: URL?
+    if source.lowercased().hasPrefix("http://") || source.lowercased().hasPrefix("https://") {
+        url = URL(string: source)
+    } else {
+        url = URL(fileURLWithPath: source.replacingOccurrences(of: "file://", with: ""))
+    }
+    guard let url, let data = try? Data(contentsOf: url) else { return nil }
+
+    guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return UIImage(data: data) }
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,   // bake EXIF orientation
+        kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+    ]
+    guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else {
+        return UIImage(data: data)
+    }
+    return UIImage(cgImage: cg)
+}
+
 private struct MediaCardView: View {
     let block: WysiwygBlock
     let theme: WysiwygTheme
+
+    @State private var image: UIImage?
+
+    /// Prefer the public url; fall back to the local file so a freshly picked
+    /// image shows immediately, before any upload finishes.
+    private var source: String {
+        if block.type == "video", let poster = block.attrs["poster"], !poster.isEmpty { return poster }
+        if let src = block.attrs["src"], !src.isEmpty { return src }
+        return block.attrs["localPath"] ?? ""
+    }
 
     private var pending: Bool {
         (block.attrs["src"] ?? "").isEmpty && !(block.attrs["uploadId"] ?? "").isEmpty
@@ -2422,6 +2460,14 @@ private struct MediaCardView: View {
                 .padding(.vertical, 14)
         } else {
             VStack(alignment: .leading, spacing: 6) {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
                 HStack(spacing: 10) {
                     IconShape(data: toolIcons[block.type == "poll" ? "orderedList" : "bulletList"]?.path ?? "")
                         .stroke(style: StrokeStyle(lineWidth: 2 * 20 / 24, lineCap: .round, lineJoin: .round))
@@ -2457,6 +2503,13 @@ private struct MediaCardView: View {
             .background(RoundedRectangle(cornerRadius: 12).fill(theme.textColor.opacity(0.06)))
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
+            .task(id: source) {
+                guard !source.isEmpty, block.type == "image" || block.type == "video" else { return }
+                let decoded = await Task.detached(priority: .userInitiated) {
+                    decodeMediaImage(source)
+                }.value
+                image = decoded
+            }
         }
     }
 }

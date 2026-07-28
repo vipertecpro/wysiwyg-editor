@@ -38,6 +38,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   editor (the v1 engine, unchanged) and media blocks render as cards between
   them, so images, dividers, embeds and polls sit inline with the prose.
 
+- Media insertion: `image` / `video` / `file` toolbar tools, a `MediaRequested`
+  event and `insertMedia()` / `uploadProgress()` / `uploadCompleted()` /
+  `uploadFailed()`. The editor ships no picker and no uploader — the host
+  answers with whatever it already uses.
+- Media cards render REAL images, decoded from a local file or an http(s) URL
+  and downsampled, on both platforms. No image library — the plugin stays
+  dependency-free.
+
 ### Fixed
 
 - iOS: the text engine ignored the host theme. Only the SwiftUI chrome adopted
