@@ -314,6 +314,32 @@ do {
     }
 }
 
+print("Localization — host translations with placeholders")
+do {
+    let es = ["ruleMinWords": "Se necesitan {max} palabras — tienes {n}.", "save": "Guardar"]
+    let checks: [(String, String, String)] = [
+        ("falls back to English when untranslated",
+         localized([:], "save", "Save"), "Save"),
+        ("uses the host translation",
+         localized(es, "save", "Save"), "Guardar"),
+        ("substitutes placeholders in the translation's own word order",
+         localized(es, "ruleMinWords", "At least {max} words needed — you have {n}.", n: 12, max: 50),
+         "Se necesitan 50 palabras — tienes 12."),
+    ]
+    for (label, actual, expected) in checks {
+        if actual == expected { print("  ✓ \(label)") }
+        else { failures += 1; print("  ✗ \(label) -> \(actual)") }
+    }
+
+    let doc = HtmlCoder.parse("<p>one two</p>")
+    if validateDocument(doc, ["minWords": 50], es) == "Se necesitan 50 palabras — tienes 2." {
+        print("  ✓ validation messages are translated")
+    } else {
+        failures += 1
+        print("  ✗ validation messages are translated -> \(validateDocument(doc, ["minWords": 50], es) ?? "nil")")
+    }
+}
+
 print("")
 if failures == 0 {
     print("All HtmlCoder tests passed.")

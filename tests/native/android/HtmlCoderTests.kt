@@ -371,6 +371,36 @@ fun main() {
         }
     }
 
+    println("Localization — host translations with placeholders")
+    run {
+        val es = mapOf(
+            "ruleMinWords" to "Se necesitan {max} palabras — tienes {n}.",
+            "save" to "Guardar",
+        )
+        val checks = listOf(
+            Triple("falls back to English when untranslated",
+                localized(emptyMap(), "save", "Save"), "Save"),
+            Triple("uses the host translation",
+                localized(es, "save", "Save"), "Guardar"),
+            Triple("substitutes placeholders in the translation's own word order",
+                localized(es, "ruleMinWords", "At least {max} words needed — you have {n}.", n = 12, max = 50),
+                "Se necesitan 50 palabras — tienes 12."),
+        )
+        for ((label, actual, expected) in checks) {
+            if (actual == expected) println("  ✓ $label")
+            else { failures++; println("  ✗ $label -> $actual") }
+        }
+
+        val doc = HtmlCoder.parse("<p>one two</p>")
+        val message = validateDocument(doc, mapOf("minWords" to 50), es)
+        if (message == "Se necesitan 50 palabras — tienes 2.") {
+            println("  ✓ validation messages are translated")
+        } else {
+            failures++
+            println("  ✗ validation messages are translated -> $message")
+        }
+    }
+
     println("")
     if (failures == 0) {
         println("All HtmlCoder tests passed.")

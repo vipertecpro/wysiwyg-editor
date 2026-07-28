@@ -81,6 +81,7 @@ private enum WysiwygEvents {
     static let saved = "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved"
     static let cancelled = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
     static let mediaRequested = "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested"
+    static let changed = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
 }
 
 // MARK: - Theme
@@ -188,6 +189,9 @@ struct WysiwygConfig {
     let maxLength: Int
     let counts: [String]
     let validation: [String: Any]
+    let strings: [String: String]
+    let changeDebounce: Int
+    let haptics: Bool
     let theme: WysiwygTheme
     let id: String?
 
@@ -200,6 +204,9 @@ struct WysiwygConfig {
         maxLength = max(0, (p["maxLength"] as? NSNumber)?.intValue ?? 0)
         counts = p["counts"] as? [String] ?? []
         validation = p["validation"] as? [String: Any] ?? [:]
+        strings = p["strings"] as? [String: String] ?? [:]
+        changeDebounce = max(0, (p["changeDebounce"] as? NSNumber)?.intValue ?? 0)
+        haptics = (p["haptics"] as? NSNumber)?.boolValue ?? true
         theme = WysiwygTheme(p["theme"] as? [String: Any],
                              light: p["themeLight"] as? [String: Any],
                              dark: p["themeDark"] as? [String: Any])
@@ -903,29 +910,58 @@ func countWords(_ blocks: [WysiwygBlock]) -> Int {
     }
 }
 
+/// A user-visible string, translated by the host when it supplied one.
+///
+/// `{n}` / `{max}` / `{type}` placeholders are substituted here so the host's
+/// translation controls word order, which matters in languages where the
+/// number does not come first.
+func localized(
+    _ strings: [String: String],
+    _ key: String,
+    _ fallback: String,
+    n: Any? = nil,
+    max: Any? = nil,
+    type: String? = nil
+) -> String {
+    var out = strings[key] ?? fallback
+    if let n { out = out.replacingOccurrences(of: "{n}", with: "\(n)") }
+    if let max { out = out.replacingOccurrences(of: "{max}", with: "\(max)") }
+    if let type { out = out.replacingOccurrences(of: "{type}", with: type) }
+    return out
+}
+
 /// Declarative save-time rules. Evaluated natively so a failing document never
 /// makes the round-trip to PHP just to be rejected.
 ///
 /// Returns the first violation as a human-readable message, or nil when the
 /// document may be saved.
-func validateDocument(_ blocks: [WysiwygBlock], _ rules: [String: Any]) -> String? {
+func validateDocument(
+    _ blocks: [WysiwygBlock],
+    _ rules: [String: Any],
+    _ strings: [String: String] = [:]
+) -> String? {
     if rules.isEmpty { return nil }
 
     let words = countWords(blocks)
 
     if let min = (rules["minWords"] as? NSNumber)?.intValue, min > 0, words < min {
-        return "At least \(min) words needed — you have \(words)."
+        return localized(strings, "ruleMinWords",
+                         "At least {max} words needed — you have {n}.", n: words, max: min)
     }
     if let max = (rules["maxWords"] as? NSNumber)?.intValue, max > 0, words > max {
-        return "At most \(max) words allowed — you have \(words)."
+        return localized(strings, "ruleMaxWords",
+                         "At most {max} words allowed — you have {n}.", n: words, max: max)
     }
     if let max = (rules["maxImages"] as? NSNumber)?.intValue {
         let images = blocks.filter { $0.type == "image" }.count
-        if images > max { return "At most \(max) image(s) allowed — you have \(images)." }
+        if images > max {
+            return localized(strings, "ruleMaxImages",
+                             "At most {max} image(s) allowed — you have {n}.", n: images, max: max)
+        }
     }
     if let required = rules["requiredBlocks"] as? [String] {
         for type in required where !blocks.contains(where: { $0.type == type }) {
-            return "This needs at least one \(type)."
+            return localized(strings, "ruleRequiredBlock", "This needs at least one {type}.", type: type)
         }
     }
 
@@ -1444,11 +1480,14 @@ func countsReadout(_ config: WysiwygConfig, _ characters: Int, _ words: Int) -> 
     if config.maxLength > 0 {
         parts.append("\(characters)/\(config.maxLength)")
     } else if config.counts.contains("characters") {
-        parts.append("\(characters) chars")
+        parts.append(localized(config.strings, "countCharacters", "{n} chars", n: characters))
     }
-    if config.counts.contains("words") { parts.append("\(words) words") }
+    if config.counts.contains("words") {
+        parts.append(localized(config.strings, "countWords", "{n} words", n: words))
+    }
     if config.counts.contains("readingTime") {
-        parts.append("\(max(1, Int(ceil(Double(words) / 200.0)))) min")
+        let minutes = max(1, Int(ceil(Double(words) / 200.0)))
+        parts.append(localized(config.strings, "countReadingTime", "{n} min", n: minutes))
     }
 
     return parts.joined(separator: "  ·  ")
@@ -1975,22 +2014,24 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
     }
 
     private func presentLinkDialog(existing: String?, range: NSRange) {
-        let alert = UIAlertController(title: existing == nil ? "Add Link" : "Edit Link",
+        let alert = UIAlertController(title: localized(config.strings, "linkTitle", "Add Link"),
                                       message: nil, preferredStyle: .alert)
         alert.addTextField { tf in
-            tf.placeholder = "https://example.com"
+            tf.placeholder = localized(self.config.strings, "linkPlaceholder", "https://example.com")
             tf.text = existing
             tf.keyboardType = .URL
             tf.autocapitalizationType = .none
             tf.autocorrectionType = .no
         }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: localized(config.strings, "cancel", "Cancel"), style: .cancel))
         if existing != nil {
-            alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+            alert.addAction(UIAlertAction(title: localized(config.strings, "linkRemove", "Remove"),
+                                          style: .destructive) { [weak self] _ in
                 self?.applyMarks(in: range) { $0.link = nil }
             })
         }
-        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self, weak alert] _ in
+        alert.addAction(UIAlertAction(title: localized(config.strings, "save", "Save"),
+                                      style: .default) { [weak self, weak alert] _ in
             guard let self else { return }
             guard let url = Self.sanitizeLink(alert?.textFields?.first?.text ?? "") else { return }
             if range.length == 0 {
@@ -2160,10 +2201,33 @@ final class WysiwygDocumentModel: ObservableObject {
         wordCount = countWords(document)
     }
 
+    /// The auto-save seam: emit ContentChanged once the user stops typing, so
+    /// the host can persist a draft without the editor owning drafts itself.
+    /// Off unless `changeDebounce` > 0.
+    var onContentChanged: ((String, String, String) -> Void)?
+    private var changeWorkItem: DispatchWorkItem?
+
     /// A segment changed: refresh the aggregate readouts and the toolbar.
     func segmentChanged() {
         refreshCounts()
         revision &+= 1
+        scheduleChangeEvent()
+    }
+
+    private func scheduleChangeEvent() {
+        guard config.changeDebounce > 0, let emit = onContentChanged else { return }
+        changeWorkItem?.cancel()
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let document = self.blocks()
+            let out = HtmlCoder.emit(document)
+            emit(out.html, out.text, JsonCoder.encode(document))
+        }
+        changeWorkItem = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(config.changeDebounce), execute: item
+        )
     }
 }
 
@@ -2350,17 +2414,23 @@ private struct EditorScreen: View {
         }
         .background(theme.backgroundColor.ignoresSafeArea())
         .ignoresSafeArea(.keyboard, edges: .bottom)
-        .alert("Discard changes?", isPresented: $showDiscard) {
-            Button("Keep Editing", role: .cancel) {}
-            Button("Discard", role: .destructive) { onCancel() }
+        .alert(localized(document.config.strings, "discardTitle", "Discard changes?"),
+               isPresented: $showDiscard) {
+            Button(localized(document.config.strings, "keepEditing", "Keep Editing"), role: .cancel) {}
+            Button(localized(document.config.strings, "discard", "Discard"), role: .destructive) {
+                onCancel()
+            }
         } message: {
-            Text("Your edits will be lost.")
+            Text(localized(document.config.strings, "discardMessage", "Your edits will be lost."))
         }
-        .alert("Cannot save yet", isPresented: Binding(
+        .alert(localized(document.config.strings, "cannotSaveTitle", "Cannot save yet"),
+               isPresented: Binding(
             get: { validationMessage != nil },
             set: { if !$0 { validationMessage = nil } }
         )) {
-            Button("OK", role: .cancel) { validationMessage = nil }
+            Button(localized(document.config.strings, "ok", "OK"), role: .cancel) {
+                validationMessage = nil
+            }
         } message: {
             Text(validationMessage ?? "")
         }
@@ -2370,7 +2440,7 @@ private struct EditorScreen: View {
     private func segmentView(entry: SegmentEntry) -> some View {
         switch entry.segment {
         case .media(let block):
-            MediaCardView(block: block, theme: theme)
+            MediaCardView(block: block, theme: theme, strings: document.config.strings)
         case .text:
             if let model = document.model(for: entry) {
                 RichTextView(
@@ -2392,13 +2462,16 @@ private struct EditorScreen: View {
     private var topBar: some View {
         ZStack {
             HStack {
-                Button("Cancel") { document.hasChanges ? (showDiscard = true) : onCancel() }
+                Button(localized(document.config.strings, "cancel", "Cancel")) {
+                    document.hasChanges ? (showDiscard = true) : onCancel()
+                }
                     .font(.system(size: 16))
                     .foregroundColor(theme.textColor)
                 Spacer()
-                Button("Save") {
+                Button(localized(document.config.strings, "save", "Save")) {
                     let blocks = document.blocks()
-                    if let problem = validateDocument(blocks, document.config.validation) {
+                    if let problem = validateDocument(blocks, document.config.validation,
+                                                      document.config.strings) {
                         // Blocked natively — a failing document never makes the
                         // round-trip to PHP just to be rejected.
                         validationMessage = problem
@@ -2472,6 +2545,7 @@ func decodeMediaImage(_ source: String, maxPixels: Int = 1200) -> UIImage? {
 private struct MediaCardView: View {
     let block: WysiwygBlock
     let theme: WysiwygTheme
+    var strings: [String: String] = [:]
 
     @State private var image: UIImage?
 
@@ -2540,7 +2614,7 @@ private struct MediaCardView: View {
                 }
 
                 if pending {
-                    Text("Uploading…")
+                    Text(localized(strings, "uploading", "Uploading…"))
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(theme.accentColor)
                 }
@@ -2761,12 +2835,23 @@ private struct ToolbarRow: View {
         LaravelBridge.shared.send?(WysiwygEvents.mediaRequested, payload)
     }
 
+    /// A toggle you cannot see the result of (bold with no selection) should
+    /// still feel like it happened.
+    private func tap(_ action: @escaping () -> Void) -> () -> Void {
+        {
+            if model.config.haptics {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
+            action()
+        }
+    }
+
     private func button(_ tool: String, active: Bool, enabled: Bool = true,
                         action: @escaping () -> Void) -> some View {
         let icon = toolIcons[tool] ?? ToolIcon(path: "")
         let glyph: CGFloat = 21
 
-        return Button(action: action) {
+        return Button(action: tap(action)) {
             IconShape(data: icon.path)
                 .stroke(style: StrokeStyle(lineWidth: icon.stroke * glyph / 24,
                                            lineCap: .round, lineJoin: .round))
@@ -2832,6 +2917,12 @@ final class WysiwygEditorPresenter {
         let document = WysiwygDocumentModel(config: config)
         // Reachable by the InsertMedia / UpdateUpload bridge functions while open.
         WysiwygEditorFunctions.live = document
+        document.onContentChanged = { [weak self] html, text, json in
+            self?.send(
+                WysiwygEvents.changed,
+                ["html": html, "text": text, "json": json, "id": config.id]
+            )
+        }
         let host = UIHostingController(rootView: AnyView(EmptyView()))
         host.modalPresentationStyle = .fullScreen
         host.view.backgroundColor = config.theme.backgroundUIColor

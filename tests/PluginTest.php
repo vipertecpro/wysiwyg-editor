@@ -66,6 +66,21 @@ describe('Plugin Manifest', function () {
         expect(file_exists($this->pluginPath.'/resources/ios/WysiwygEditorFunctions.swift'))->toBeTrue();
         expect(file_exists($this->pluginPath.'/resources/android/WysiwygEditorFunctions.kt'))->toBeTrue();
     });
+
+    it('ships the icon it declares', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+
+        expect(file_exists($this->pluginPath.'/'.$manifest['icon']))->toBeTrue();
+    });
+
+    it('declares every event class that exists', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+
+        foreach (glob($this->pluginPath.'/src/Events/*.php') as $file) {
+            $event = 'Vipertecpro\\WysiwygEditor\\Events\\'.basename($file, '.php');
+            expect($manifest['events'])->toContain($event);
+        }
+    });
 });
 
 describe('Toolbar resolution', function () {
@@ -164,6 +179,69 @@ describe('Counts', function () {
 
     it('drops unknown readouts', function () {
         expect(editor()->config('', ['counts' => ['sentences']])['counts'])->toBe([]);
+    });
+});
+
+describe('Localization', function () {
+    it('ships English defaults for every string', function () {
+        $strings = editor()->config('')['strings'];
+
+        expect($strings)->toBe(WysiwygEditor::STRINGS)
+            ->and($strings['save'])->toBe('Save');
+    });
+
+    it('merges caller translations over the defaults', function () {
+        $config = editor()->config('', ['strings' => ['save' => 'Guardar', 'cancel' => 'Cancelar']]);
+
+        expect($config['strings']['save'])->toBe('Guardar')
+            ->and($config['strings']['cancel'])->toBe('Cancelar')
+            ->and($config['strings']['discard'])->toBe('Discard');
+    });
+
+    it('drops unknown keys so a typo cannot silently do nothing', function () {
+        $config = editor()->config('', ['strings' => ['saev' => 'Guardar']]);
+
+        expect($config['strings'])->not->toHaveKey('saev')
+            ->and($config['strings']['save'])->toBe('Save');
+    });
+
+    it('keeps placeholders so translations control word order', function () {
+        expect(WysiwygEditor::STRINGS['ruleMinWords'])->toContain('{n}')->toContain('{max}');
+    });
+});
+
+describe('Validation rules', function () {
+    it('is empty by default', function () {
+        expect(editor()->config('')['validation'])->toBe([]);
+    });
+
+    it('keeps known rules and coerces them', function () {
+        $config = editor()->config('', ['validation' => [
+            'minWords' => '50',
+            'requiredBlocks' => ['image', 42],
+            'nope' => 1,
+        ]]);
+
+        expect($config['validation'])->toBe([
+            'minWords' => 50,
+            'requiredBlocks' => ['image'],
+        ]);
+    });
+});
+
+describe('Auto-save seam', function () {
+    it('is off by default so apps that do not want it pay nothing', function () {
+        expect(editor()->config('')['changeDebounce'])->toBe(0);
+    });
+
+    it('carries the debounce and clamps negatives', function () {
+        expect(editor()->config('', ['changeDebounce' => 1500])['changeDebounce'])->toBe(1500)
+            ->and(editor()->config('', ['changeDebounce' => -5])['changeDebounce'])->toBe(0);
+    });
+
+    it('enables haptics unless turned off', function () {
+        expect(editor()->config('')['haptics'])->toBeTrue()
+            ->and(editor()->config('', ['haptics' => false])['haptics'])->toBeFalse();
     });
 });
 

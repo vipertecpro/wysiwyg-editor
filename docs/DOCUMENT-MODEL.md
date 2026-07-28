@@ -156,7 +156,7 @@ a bulleted list does not inflate the count with bullets.
 
 Drafts, scheduled publishing, auto-save persistence and background upload
 queues are **host application concerns**, not editor features. The editor
-gives you the seams — the upload contract above, and (NOT YET BUILT) an
-`onChange` event to debounce into auto-save — and stays out of your database
-and your scheduler.
+gives you the seams — the upload contract above, and a `ContentChanged` event
+debounced by `changeDebounce` — and stays out of your database and your
+scheduler.
 Owning those would turn a modular editor into a CMS.

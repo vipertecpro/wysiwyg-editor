@@ -80,6 +80,7 @@ object WysiwygEditorFunctions {
     private const val EVENT_SAVED = "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved"
     private const val EVENT_CANCELLED = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
     private const val EVENT_MEDIA = "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested"
+    private const val EVENT_CHANGED = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
 
     /** The four surfaces the editor colours. */
     val THEME_KEYS = listOf("background", "text", "accent", "highlight")
@@ -141,6 +142,9 @@ object WysiwygEditorFunctions {
         val maxLength: Int,
         val counts: List<String>,
         val validation: Map<String, Any>,
+        val strings: Map<String, String>,
+        val changeDebounce: Int,
+        val haptics: Boolean,
         val theme: EditorTheme,
         val id: String?,
     )
@@ -207,6 +211,9 @@ object WysiwygEditorFunctions {
                 maxLength = ((parameters["maxLength"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
                 counts = parseStringList(parameters["counts"]),
                 validation = parseValidation(parameters["validation"]),
+                strings = parseStringMap(parameters["strings"]),
+                changeDebounce = ((parameters["changeDebounce"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
+                haptics = parameters["haptics"] as? Boolean ?: true,
                 theme = parseTheme(parameters["theme"]).copy(
                     light = parseThemeMap(parameters["themeLight"]),
                     dark = parseThemeMap(parameters["themeDark"]),
@@ -265,9 +272,16 @@ object WysiwygEditorFunctions {
             // Deliver EXACTLY ONE terminal event: Save racing Cancel, a double
             // tap, or a Back press can otherwise fire two events — or none.
             val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+
+            // The auto-save seam: emit ContentChanged once the user stops
+            // typing, so the host can persist a draft without the editor
+            // owning drafts itself. Off unless changeDebounce > 0.
+            val changeHandler = Handler(Looper.getMainLooper())
+            var pendingChange: Runnable? = null
             lateinit var backCallback: androidx.activity.OnBackPressedCallback
 
             fun cleanup() {
+                pendingChange?.let(changeHandler::removeCallbacks)
                 (view.parent as? ViewGroup)?.removeView(view)
                 activity.requestedOrientation = prevOrientation
                 backCallback.remove()
@@ -291,6 +305,19 @@ object WysiwygEditorFunctions {
             // Compose tree having to hoist it back up on every keystroke.
             val documentRef = mutableStateOf<List<WysiwygBlock>>(initialBlocks)
 
+            fun scheduleChangeEvent() {
+                if (config.changeDebounce <= 0) return
+                pendingChange?.let(changeHandler::removeCallbacks)
+                val runnable = Runnable {
+                    if (finished.get()) return@Runnable
+                    val document = documentRef.value
+                    val (html, text) = HtmlCoder.serialize(document)
+                    dispatch(EVENT_CHANGED, config.id, html, text, JsonCoder.encode(document))
+                }
+                pendingChange = runnable
+                changeHandler.postDelayed(runnable, config.changeDebounce.toLong())
+            }
+
             /** Cancel path — confirm first when the document actually changed. */
             fun attemptCancel() {
                 val current = HtmlCoder.serialize(documentRef.value).first
@@ -299,10 +326,12 @@ object WysiwygEditorFunctions {
                     return
                 }
                 AlertDialog.Builder(activity)
-                    .setTitle("Discard changes?")
-                    .setMessage("Your edits will be lost.")
-                    .setPositiveButton("Discard") { _, _ -> finishCancelled() }
-                    .setNegativeButton("Keep editing", null)
+                    .setTitle(localized(config.strings, "discardTitle", "Discard changes?"))
+                    .setMessage(localized(config.strings, "discardMessage", "Your edits will be lost."))
+                    .setPositiveButton(localized(config.strings, "discard", "Discard")) { _, _ ->
+                        finishCancelled()
+                    }
+                    .setNegativeButton(localized(config.strings, "keepEditing", "Keep Editing"), null)
                     .setCancelable(true)
                     .show()
             }
@@ -318,18 +347,21 @@ object WysiwygEditorFunctions {
                     activity = activity,
                     config = config,
                     initialBlocks = initialBlocks,
-                    onDocumentChanged = { documentRef.value = it },
+                    onDocumentChanged = {
+                        documentRef.value = it
+                        scheduleChangeEvent()
+                    },
                     onCancel = { attemptCancel() },
                     onSave = {
                         val document = documentRef.value
-                        val problem = validateDocument(document, config.validation)
+                        val problem = validateDocument(document, config.validation, config.strings)
                         if (problem != null) {
                             // Blocked natively — a failing document never makes
                             // the round-trip to PHP just to be rejected.
                             AlertDialog.Builder(activity)
-                                .setTitle("Cannot save yet")
+                                .setTitle(localized(config.strings, "cannotSaveTitle", "Cannot save yet"))
                                 .setMessage(problem)
-                                .setPositiveButton("OK", null)
+                                .setPositiveButton(localized(config.strings, "ok", "OK"), null)
                                 .show()
                         } else {
                             val (html, text) = HtmlCoder.serialize(document)
@@ -376,6 +408,16 @@ private fun parseStringList(any: Any?): List<String> = when (any) {
     is List<*> -> any.mapNotNull { it as? String }
     is JSONArray -> (0 until any.length()).mapNotNull { i -> any.optString(i).takeIf { it.isNotEmpty() } }
     else -> emptyList()
+}
+
+private fun parseStringMap(any: Any?): Map<String, String> = when (any) {
+    is Map<*, *> -> any.entries.mapNotNull { (k, v) ->
+        if (k is String && v is String) k to v else null
+    }.toMap()
+    is JSONObject -> any.keys().asSequence().mapNotNull { key ->
+        any.optString(key).takeIf { it.isNotEmpty() }?.let { key to it }
+    }.toMap()
+    else -> emptyMap()
 }
 
 private fun parseValidation(any: Any?): Map<String, Any> = when (any) {
@@ -1423,30 +1465,68 @@ internal fun countWords(blocks: List<WysiwygBlock>): Int =
 
 
 /**
+ * A user-visible string, translated by the host when it supplied one.
+ *
+ * `{n}` / `{max}` / `{type}` placeholders are substituted here so the host's
+ * translation controls word order, which matters in languages where the number
+ * does not come first.
+ */
+internal fun localized(
+    strings: Map<String, String>,
+    key: String,
+    fallback: String,
+    n: Any? = null,
+    max: Any? = null,
+    type: String? = null,
+): String {
+    var out = strings[key] ?: fallback
+    if (n != null) out = out.replace("{n}", n.toString())
+    if (max != null) out = out.replace("{max}", max.toString())
+    if (type != null) out = out.replace("{type}", type)
+    return out
+}
+
+/**
  * Declarative save-time rules. Evaluated natively so a failing document never
  * makes the round-trip to PHP just to be rejected.
  *
  * Returns the first violation as a human-readable message, or null when the
  * document may be saved.
  */
-internal fun validateDocument(blocks: List<WysiwygBlock>, rules: Map<String, Any>): String? {
+internal fun validateDocument(
+    blocks: List<WysiwygBlock>,
+    rules: Map<String, Any>,
+    strings: Map<String, String> = emptyMap(),
+): String? {
     if (rules.isEmpty()) return null
 
     val words = countWords(blocks)
 
     (rules["minWords"] as? Number)?.toInt()?.let { min ->
-        if (min > 0 && words < min) return "At least $min words needed — you have $words."
+        if (min > 0 && words < min) {
+            return localized(strings, "ruleMinWords",
+                "At least {max} words needed — you have {n}.", n = words, max = min)
+        }
     }
     (rules["maxWords"] as? Number)?.toInt()?.let { max ->
-        if (max > 0 && words > max) return "At most $max words allowed — you have $words."
+        if (max > 0 && words > max) {
+            return localized(strings, "ruleMaxWords",
+                "At most {max} words allowed — you have {n}.", n = words, max = max)
+        }
     }
     (rules["maxImages"] as? Number)?.toInt()?.let { max ->
         val images = blocks.count { it.type == "image" }
-        if (images > max) return "At most $max image(s) allowed — you have $images."
+        if (images > max) {
+            return localized(strings, "ruleMaxImages",
+                "At most {max} image(s) allowed — you have {n}.", n = images, max = max)
+        }
     }
     @Suppress("UNCHECKED_CAST")
     (rules["requiredBlocks"] as? List<String>)?.forEach { type ->
-        if (blocks.none { it.type == type }) return "This needs at least one $type."
+        if (blocks.none { it.type == type }) {
+            return localized(strings, "ruleRequiredBlock",
+                "This needs at least one {type}.", type = type)
+        }
     }
 
     return null
@@ -2722,7 +2802,10 @@ internal fun EditorScreen(
                 .padding(horizontal = 8.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            BarButton("Cancel", foreground.copy(alpha = 0.8f), FontWeight.Normal, onCancel)
+            BarButton(
+                localized(config.strings, "cancel", "Cancel"),
+                foreground.copy(alpha = 0.8f), FontWeight.Normal, onCancel,
+            )
             Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 if (config.title.isNotEmpty()) {
                     BasicText(
@@ -2731,7 +2814,7 @@ internal fun EditorScreen(
                     )
                 }
             }
-            BarButton("Save", accent, FontWeight.SemiBold, onSave)
+            BarButton(localized(config.strings, "save", "Save"), accent, FontWeight.SemiBold, onSave)
         }
 
         // ── Editor: one view per segment ─────────────────────────────────────
@@ -2804,7 +2887,7 @@ internal fun EditorScreen(
             ) {
                 entries.forEachIndexed { index, entry ->
                     when (val segment = entry.segment) {
-                        is Segment.Media -> MediaCard(segment.block, foreground, accent)
+                        is Segment.Media -> MediaCard(segment.block, foreground, accent, config.strings)
                         is Segment.Text -> AndroidView(
                             modifier = Modifier.fillMaxWidth(),
                             factory = { context ->
@@ -2914,6 +2997,8 @@ internal fun EditorScreen(
             foreground = foreground,
             background = background,
             highlightColor = theme.highlightColor(night),
+            strings = config.strings,
+            haptics = config.haptics,
             onRequestMedia = onRequestMedia,
         )
     }
@@ -2933,11 +3018,14 @@ internal fun countsReadout(
     if (config.maxLength > 0) {
         parts.add("$characters/${config.maxLength}")
     } else if (config.counts.contains("characters")) {
-        parts.add("$characters chars")
+        parts.add(localized(config.strings, "countCharacters", "{n} chars", n = characters))
     }
-    if (config.counts.contains("words")) parts.add("$words words")
+    if (config.counts.contains("words")) {
+        parts.add(localized(config.strings, "countWords", "{n} words", n = words))
+    }
     if (config.counts.contains("readingTime")) {
-        parts.add("${maxOf(1, Math.ceil(words / 200.0).toInt())} min")
+        val minutes = maxOf(1, Math.ceil(words / 200.0).toInt())
+        parts.add(localized(config.strings, "countReadingTime", "{n} min", n = minutes))
     }
 
     return parts.joinToString("  ·  ")
@@ -2996,7 +3084,12 @@ internal fun decodeMediaImage(source: String, maxPixels: Int = 1200): android.gr
  * shell needs to prove.
  */
 @Composable
-private fun MediaCard(block: WysiwygBlock, foreground: Color, accent: Color) {
+private fun MediaCard(
+    block: WysiwygBlock,
+    foreground: Color,
+    accent: Color,
+    strings: Map<String, String> = emptyMap(),
+) {
     if (block.type == "divider") {
         Box(
             modifier = Modifier
@@ -3097,7 +3190,7 @@ private fun MediaCard(block: WysiwygBlock, foreground: Color, accent: Color) {
         if (pending) {
             Box(modifier = Modifier.height(6.dp))
             BasicText(
-                text = "Uploading…",
+                text = localized(strings, "uploading", "Uploading…"),
                 style = TextStyle(color = accent, fontSize = 12.sp, fontWeight = FontWeight.Medium),
             )
         }
@@ -3128,6 +3221,8 @@ private fun ToolbarRow(
     foreground: Color,
     background: Color,
     highlightColor: Color,
+    strings: Map<String, String>,
+    haptics: Boolean,
     onRequestMedia: (String) -> Unit,
 ) {
     val controller = controllerState.value
@@ -3147,10 +3242,10 @@ private fun ToolbarRow(
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ToolButton("undo", false, controller?.canUndo == true, foreground, highlightColor) {
+            ToolButton("undo", false, controller?.canUndo == true, foreground, highlightColor, haptics) {
                 controller?.undo()
             }
-            ToolButton("redo", false, controller?.canRedo == true, foreground, highlightColor) {
+            ToolButton("redo", false, controller?.canRedo == true, foreground, highlightColor, haptics) {
                 controller?.redo()
             }
             Box(
@@ -3180,7 +3275,7 @@ private fun ToolbarRow(
                     else -> false
                 }
 
-                ToolButton(tool, active, true, foreground, highlightColor) {
+                ToolButton(tool, active, true, foreground, highlightColor, haptics) {
                     when (tool) {
                         "bold", "italic", "underline", "strikethrough", "code" ->
                             controller?.toggleInline(tool)
@@ -3191,7 +3286,7 @@ private fun ToolbarRow(
                         "textColor" -> palette.value = if (palette.value == "textColor") null else "textColor"
                         "highlight" -> palette.value = if (palette.value == "highlight") null else "highlight"
                         "link" -> controller?.let { c ->
-                            showLinkDialog(activity, c.currentLink(), onDismiss = { c.refocus() }) { url ->
+                            showLinkDialog(activity, c.currentLink(), strings, onDismiss = { c.refocus() }) { url ->
                                 c.setLink(url)
                             }
                         }
@@ -3209,8 +3304,10 @@ private fun ToolButton(
     enabled: Boolean,
     foreground: Color,
     highlight: Color,
+    haptics: Boolean = true,
     onClick: () -> Unit,
 ) {
+    val view = androidx.compose.ui.platform.LocalView.current
     val icon = TOOL_ICONS[tool] ?: return
     val tint = when {
         active -> highlight
@@ -3223,7 +3320,14 @@ private fun ToolButton(
             .size(38.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(if (active) highlight.copy(alpha = 0.16f) else Color.Transparent)
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(enabled = enabled) {
+                // A toggle you cannot see the result of (bold with no
+                // selection) should still feel like it happened.
+                if (haptics) {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                }
+                onClick()
+            },
         contentAlignment = Alignment.Center,
     ) {
         Canvas(modifier = Modifier.size(21.dp)) {
@@ -3290,12 +3394,13 @@ private fun PaletteRow(colors: List<String>, foreground: Color, onPick: (String?
 private fun showLinkDialog(
     activity: FragmentActivity,
     current: String?,
+    strings: Map<String, String>,
     onDismiss: () -> Unit,
     onApply: (String?) -> Unit,
 ) {
     val input = android.widget.EditText(activity).apply {
         setText(current ?: "")
-        hint = "https://example.com"
+        hint = localized(strings, "linkPlaceholder", "https://example.com")
         setSingleLine()
         inputType = android.text.InputType.TYPE_CLASS_TEXT or
             android.text.InputType.TYPE_TEXT_VARIATION_URI
@@ -3307,13 +3412,15 @@ private fun showLinkDialog(
     }
 
     val builder = AlertDialog.Builder(activity)
-        .setTitle("Add Link")
+        .setTitle(localized(strings, "linkTitle", "Add Link"))
         .setView(padded)
-        .setPositiveButton("Save") { _, _ -> onApply(normalizeUrl(input.text.toString())) }
-        .setNegativeButton("Cancel", null)
+        .setPositiveButton(localized(strings, "save", "Save")) { _, _ ->
+            onApply(normalizeUrl(input.text.toString()))
+        }
+        .setNegativeButton(localized(strings, "cancel", "Cancel"), null)
 
     if (current != null) {
-        builder.setNeutralButton("Remove") { _, _ -> onApply(null) }
+        builder.setNeutralButton(localized(strings, "linkRemove", "Remove")) { _, _ -> onApply(null) }
     }
 
     builder.setOnDismissListener { onDismiss() }

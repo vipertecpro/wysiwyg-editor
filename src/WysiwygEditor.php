@@ -98,6 +98,40 @@ class WysiwygEditor
     public const VALIDATION_RULES = ['minWords', 'maxWords', 'requiredBlocks', 'maxImages'];
 
     /**
+     * Every user-visible string in the editor, with its English default.
+     *
+     * Pass `strings` to translate the editor into your app's locale — the
+     * plugin has no locale files of its own on purpose, because the host
+     * already knows the user's language and its own translation workflow.
+     *
+     * `{n}` / `{max}` / `{type}` placeholders are substituted natively.
+     *
+     * @var array<string, string>
+     */
+    public const STRINGS = [
+        'cancel' => 'Cancel',
+        'save' => 'Save',
+        'discardTitle' => 'Discard changes?',
+        'discardMessage' => 'Your edits will be lost.',
+        'keepEditing' => 'Keep Editing',
+        'discard' => 'Discard',
+        'linkTitle' => 'Add Link',
+        'linkPlaceholder' => 'https://example.com',
+        'linkRemove' => 'Remove',
+        'ok' => 'OK',
+        'uploading' => 'Uploading…',
+        'uploadFailed' => 'Upload failed',
+        'cannotSaveTitle' => 'Cannot save yet',
+        'countCharacters' => '{n} chars',
+        'countWords' => '{n} words',
+        'countReadingTime' => '{n} min',
+        'ruleMinWords' => 'At least {max} words needed — you have {n}.',
+        'ruleMaxWords' => 'At most {max} words allowed — you have {n}.',
+        'ruleMaxImages' => 'At most {max} image(s) allowed — you have {n}.',
+        'ruleRequiredBlock' => 'This needs at least one {type}.',
+    ];
+
+    /**
      * How the host application's NativeUI theme tokens map onto the editor's
      * four surfaces. Consulted per colour scheme so the editor follows the app
      * into dark mode without the developer configuring anything.
@@ -126,6 +160,9 @@ class WysiwygEditor
      *     maxLength?: int,
      *     counts?: list<string>,
      *     validation?: array<string, mixed>,
+     *     strings?: array<string, string>,
+     *     changeDebounce?: int,
+     *     haptics?: bool,
      *     theme?: array<string, string>,
      *     id?: string|null
      * }  $options  Editor configuration. `preset` picks a built-in toolbar
@@ -247,6 +284,11 @@ class WysiwygEditor
             'maxLength' => max(0, (int) ($options['maxLength'] ?? 0)),
             'counts' => $this->resolveCounts($options['counts'] ?? []),
             'validation' => $this->resolveValidation($options['validation'] ?? []),
+            'strings' => $this->resolveStrings($options['strings'] ?? []),
+            // 0 = off. When set, the editor emits ContentChanged this many
+            // milliseconds after the user stops typing — the auto-save seam.
+            'changeDebounce' => max(0, (int) ($options['changeDebounce'] ?? 0)),
+            'haptics' => (bool) ($options['haptics'] ?? true),
             // Explicit overrides win; the two scheme maps below are the host
             // app's own theme, so an unconfigured editor still looks native.
             'theme' => $this->resolveTheme($options['theme'] ?? []),
@@ -265,6 +307,26 @@ class WysiwygEditor
     protected function resolveCounts(array $counts): array
     {
         return array_values(array_intersect(self::AVAILABLE_COUNTS, $counts));
+    }
+
+    /**
+     * Merge caller translations over the English defaults, dropping unknown
+     * keys so a typo fails visibly rather than silently doing nothing.
+     *
+     * @param  array<string, string>  $strings
+     * @return array<string, string>
+     */
+    protected function resolveStrings(array $strings): array
+    {
+        $clean = self::STRINGS;
+
+        foreach ($strings as $key => $value) {
+            if (isset($clean[$key]) && is_string($value) && $value !== '') {
+                $clean[$key] = $value;
+            }
+        }
+
+        return $clean;
     }
 
     /**

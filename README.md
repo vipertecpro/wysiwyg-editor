@@ -104,6 +104,9 @@ All options are optional:
 | `maxLength` | int | `0` | Max **plain-text** length; `0` = unlimited. Shows a live counter |
 | `counts` | list | `[]` | Live readouts: `characters`, `words`, `readingTime` (200 wpm, min 1) |
 | `validation` | array | `[]` | Save-time rules: `minWords`, `maxWords`, `requiredBlocks`, `maxImages` |
+| `strings` | array | English | Translations for every user-visible string — see Localization |
+| `changeDebounce` | int | `0` | Emit `ContentChanged` this many ms after typing stops; `0` = off |
+| `haptics` | bool | `true` | Light haptic tap on toolbar buttons |
 | `theme` | array | `[]` | Hex colors: `background`, `text`, `accent` (Save button), `highlight` (active states). Omitted keys fall back to the host app's theme, then to system-adaptive defaults |
 | `id` | string | `null` | Echoed back on the result event, to correlate concurrent editors |
 
@@ -184,8 +187,46 @@ WysiwygEditor::open($html, [
 ```
 
 Checked natively when the user taps Save — a failing document never makes the
-round-trip to PHP just to be rejected. **The messages are English-only today;
-the editor is not yet localized.**
+round-trip to PHP just to be rejected.
+
+### Localization
+
+The plugin ships **no locale files**, on purpose: your app already knows the
+user's language and has its own translation workflow. Pass the strings you want
+changed and the rest keep their English defaults.
+
+```php
+WysiwygEditor::open($html, [
+    'strings' => [
+        'save' => __('editor.save'),
+        'cancel' => __('editor.cancel'),
+        'discardTitle' => __('editor.discard_title'),
+        'ruleMinWords' => __('editor.min_words'),   // "Se necesitan {max}…"
+    ],
+]);
+```
+
+`{n}`, `{max}` and `{type}` are substituted natively, so the **translation**
+controls word order — important in languages where the number does not come
+first. Unknown keys are dropped rather than silently ignored, so a typo shows
+up immediately. See `WysiwygEditor::STRINGS` for the full key list.
+
+### Auto-save
+
+The editor does not own drafts or persistence — it tells you the document
+changed and settled, and you decide what that means:
+
+```php
+WysiwygEditor::open($note->body, ['changeDebounce' => 1500]);
+
+#[On(ContentChanged::class)]
+public function onChanged(string $html, string $json): void
+{
+    $this->note->update(['body_html' => $html, 'body_json' => $json]);
+}
+```
+
+Off by default, so apps that don't want it pay nothing.
 
 ## HTML contract
 
