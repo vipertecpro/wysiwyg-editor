@@ -75,6 +75,7 @@ object WysiwygEditorFunctions {
     private const val TAG = "WysiwygEditor"
     private const val EVENT_SAVED = "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved"
     private const val EVENT_CANCELLED = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
+    private const val EVENT_MEDIA = "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested"
 
     /** The four surfaces the editor colours. */
     val THEME_KEYS = listOf("background", "text", "accent", "highlight")
@@ -85,8 +86,12 @@ object WysiwygEditorFunctions {
         "h1", "h2", "h3",
         "bulletList", "orderedList", "blockquote",
         "link", "code", "textColor", "highlight",
+        "image", "video", "file",
         "clearFormat",
     )
+
+    /** Toolbar tools that ask the HOST for media rather than formatting text. */
+    val INSERT_TOOLS = listOf("image", "video", "file")
 
     /**
      * Host-app theme overrides. Every color is optional: null falls back to the
@@ -134,6 +139,54 @@ object WysiwygEditorFunctions {
         val theme: EditorTheme,
         val id: String?,
     )
+
+    /**
+     * The editor currently on screen. InsertMedia / UpdateUpload arrive as
+     * separate bridge calls while the editor is open, so they need a way to
+     * reach it. Cleared when the editor closes.
+     */
+    internal var live: LiveEditor? = null
+
+    /** What the open editor exposes to the media bridge functions. */
+    internal interface LiveEditor {
+        fun insertMedia(kind: String, attrs: Map<String, String>)
+        fun updateUpload(uploadId: String, state: String, src: String, message: String)
+    }
+
+    /**
+     * Insert a media block at the caret. The host calls this after picking
+     * (and optionally cropping) the media — the editor never opens a picker.
+     */
+    class InsertMedia(private val activity: FragmentActivity) : BridgeFunction {
+        override fun execute(parameters: Map<String, Any>): Map<String, Any> {
+            val kind = parameters["kind"] as? String ?: return emptyMap()
+            val attrs = mutableMapOf<String, String>()
+            when (val raw = parameters["attributes"]) {
+                is Map<*, *> -> raw.forEach { (k, v) ->
+                    if (k is String && v is String) attrs[k] = v
+                }
+                is JSONObject -> raw.keys().forEach { k ->
+                    raw.optString(k).takeIf { it.isNotEmpty() }?.let { attrs[k] = it }
+                }
+            }
+            Handler(Looper.getMainLooper()).post { live?.insertMedia(kind, attrs) }
+            return emptyMap()
+        }
+    }
+
+    /** Report upload progress / completion / failure for an inserted block. */
+    class UpdateUpload(private val activity: FragmentActivity) : BridgeFunction {
+        override fun execute(parameters: Map<String, Any>): Map<String, Any> {
+            val uploadId = parameters["uploadId"] as? String ?: return emptyMap()
+            val state = parameters["state"] as? String ?: "progress"
+            val src = parameters["src"] as? String ?: ""
+            val message = parameters["message"] as? String ?: ""
+            Handler(Looper.getMainLooper()).post {
+                live?.updateUpload(uploadId, state, src, message)
+            }
+            return emptyMap()
+        }
+    }
 
     class Open(private val activity: FragmentActivity) : BridgeFunction {
         override fun execute(parameters: Map<String, Any>): Map<String, Any> {
@@ -265,6 +318,7 @@ object WysiwygEditorFunctions {
                         val (html, text) = HtmlCoder.serialize(documentRef.value)
                         finishSaved(html, text)
                     },
+                    onRequestMedia = { kind -> requestMedia(kind, config.id) },
                 )
             }
 
@@ -278,6 +332,15 @@ object WysiwygEditorFunctions {
                 id?.let { put("id", it) }
             }
             NativeActionCoordinator.dispatchEvent(activity, event, payload.toString())
+        }
+
+        /** Ask the HOST to pick media — the editor ships no picker. */
+        private fun requestMedia(kind: String, id: String?) {
+            val payload = JSONObject().apply {
+                put("kind", kind)
+                id?.let { put("id", it) }
+            }
+            NativeActionCoordinator.dispatchEvent(activity, EVENT_MEDIA, payload.toString())
         }
     }
 }
@@ -1417,6 +1480,16 @@ internal val TOOL_ICONS: Map<String, ToolIcon> = mapOf(
     "textColor" to ToolIcon("M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 19.5L20 19.5"),
     "highlight" to ToolIcon("M15 4L20 9L10 19L5 19L5 14L15 4M13 6L18 11"),
     "clearFormat" to ToolIcon("M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 4L20 20"),
+    // Insert tools: a framed picture, a play triangle, a paperclip.
+    "image" to ToolIcon(
+        "M3.5 5.5L20.5 5.5L20.5 18.5L3.5 18.5L3.5 5.5" +
+            "M3.5 15L8.5 10.5L12.5 14L15.5 11.5L20.5 16M15.5 9.2L15.51 9.2"
+    ),
+    "video" to ToolIcon("M3.5 6L16 6L16 18L3.5 18L3.5 6M16 10.5L20.5 8L20.5 16L16 13.5"),
+    "file" to ToolIcon(
+        "M16.5 7.5L9 15C7.6 16.4 7.6 18.6 9 20C10.4 21.4 12.6 21.4 14 20L19.5 14.5" +
+            "C21.6 12.4 21.6 9.1 19.5 7C17.4 4.9 14.1 4.9 12 7L6.5 12.5"
+    ),
 )
 
 /**
@@ -2459,6 +2532,15 @@ internal class EditorController(
     }
 }
 
+/**
+ * A segment plus a STABLE id.
+ *
+ * Editor controllers are keyed by this rather than by list position, so
+ * inserting media in the middle of a document does not silently re-point every
+ * controller after it.
+ */
+internal class SegmentEntry(val id: Int, val segment: Segment)
+
 // ── Palettes (normative — identical on iOS) ─────────────────────────────────
 
 internal val TEXT_COLORS = listOf("#EF4444", "#F97316", "#EAB308", "#22C55E", "#3B82F6", "#A855F7")
@@ -2532,6 +2614,7 @@ internal fun EditorScreen(
     onDocumentChanged: (List<WysiwygBlock>) -> Unit,
     onCancel: () -> Unit,
     onSave: () -> Unit,
+    onRequestMedia: (String) -> Unit,
 ) {
     val night = isSystemInDarkTheme()
     val theme = config.theme
@@ -2575,14 +2658,19 @@ internal fun EditorScreen(
         }
 
         // ── Editor: one view per segment ─────────────────────────────────────
-        val segments = remember { segmentsOf(initialBlocks) }
+        val nextId = remember { intArrayOf(0) }
+        val entries = remember {
+            androidx.compose.runtime.mutableStateListOf<SegmentEntry>().also { list ->
+                segmentsOf(initialBlocks).forEach { list.add(SegmentEntry(nextId[0]++, it)) }
+            }
+        }
 
         /** Reassemble the whole document from every segment's live state. */
         fun rebuildDocument() {
             val out = mutableListOf<WysiwygBlock>()
-            segments.forEachIndexed { index, segment ->
-                when (segment) {
-                    is Segment.Text -> out.addAll(controllers[index]?.document() ?: segment.blocks)
+            for (entry in entries) {
+                when (val segment = entry.segment) {
+                    is Segment.Text -> out.addAll(controllers[entry.id]?.document() ?: segment.blocks)
                     is Segment.Media -> out.add(segment.block)
                 }
             }
@@ -2591,14 +2679,54 @@ internal fun EditorScreen(
             words.value = countWords(out)
         }
 
+        // Expose this editor to the media bridge functions while it is open.
+        androidx.compose.runtime.DisposableEffect(Unit) {
+            WysiwygEditorFunctions.live = object : WysiwygEditorFunctions.LiveEditor {
+                override fun insertMedia(kind: String, attrs: Map<String, String>) {
+                    val block = WysiwygBlock(kind)
+                    attrs.forEach { (key, value) -> block.attrs[key] = value }
+                    // Place it after the focused segment, then give the user a
+                    // fresh paragraph below so typing can continue.
+                    val at = entries.indexOfFirst { controllers[it.id] === focused.value }
+                    val insertAt = if (at >= 0) at + 1 else entries.size
+                    entries.add(insertAt, SegmentEntry(nextId[0]++, Segment.Media(block)))
+                    entries.add(
+                        insertAt + 1,
+                        SegmentEntry(nextId[0]++, Segment.Text(mutableListOf(WysiwygBlock("p")))),
+                    )
+                    rebuildDocument()
+                }
+
+                override fun updateUpload(uploadId: String, state: String, src: String, message: String) {
+                    val index = entries.indexOfFirst { entry ->
+                        (entry.segment as? Segment.Media)?.block?.attrs?.get("uploadId") == uploadId
+                    }
+                    if (index < 0) return
+                    val block = (entries[index].segment as Segment.Media).block
+                    when (state) {
+                        "completed" -> {
+                            if (src.isNotEmpty()) block.attrs["src"] = src
+                            block.attrs.remove("uploadId")
+                        }
+                        "failed" -> block.attrs["uploadError"] = message.ifEmpty { "Upload failed" }
+                        else -> block.attrs["uploadProgress"] = src
+                    }
+                    // Swap the entry so Compose sees a change.
+                    entries[index] = SegmentEntry(entries[index].id, Segment.Media(block))
+                    rebuildDocument()
+                }
+            }
+            onDispose { WysiwygEditorFunctions.live = null }
+        }
+
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState()),
             ) {
-                segments.forEachIndexed { index, segment ->
-                    when (segment) {
+                entries.forEachIndexed { index, entry ->
+                    when (val segment = entry.segment) {
                         is Segment.Media -> MediaCard(segment.block, foreground, accent)
                         is Segment.Text -> AndroidView(
                             modifier = Modifier.fillMaxWidth(),
@@ -2626,7 +2754,7 @@ internal fun EditorScreen(
                                         onStateChanged = { revision.value++ },
                                     )
                                     controller.attachWatcher()
-                                    controllers[index] = controller
+                                    controllers[entry.id] = controller
                                     if (focused.value == null) focused.value = controller
 
                                     onSelectionMoved = { controller.onCaretMoved(); revision.value++ }
@@ -2709,6 +2837,7 @@ internal fun EditorScreen(
             foreground = foreground,
             background = background,
             highlightColor = theme.highlightColor(night),
+            onRequestMedia = onRequestMedia,
         )
     }
 }
@@ -2856,6 +2985,7 @@ private fun ToolbarRow(
     foreground: Color,
     background: Color,
     highlightColor: Color,
+    onRequestMedia: (String) -> Unit,
 ) {
     val controller = controllerState.value
     // Reading `revision` here is what makes the bar recompose on caret moves.
@@ -2914,6 +3044,7 @@ private fun ToolbarRow(
                         "h1", "h2", "h3", "bulletList", "orderedList", "blockquote" ->
                             controller?.applyBlock(tool)
                         "clearFormat" -> controller?.clearFormat()
+                        in WysiwygEditorFunctions.INSERT_TOOLS -> onRequestMedia(tool)
                         "textColor" -> palette.value = if (palette.value == "textColor") null else "textColor"
                         "highlight" -> palette.value = if (palette.value == "highlight") null else "highlight"
                         "link" -> controller?.let { c ->

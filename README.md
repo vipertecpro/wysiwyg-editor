@@ -254,6 +254,53 @@ fixed 6-color palette (plus "none"). Cancelling with unsaved changes asks for
 confirmation. The editor follows the system light/dark theme unless overridden
 by `theme`.
 
+## Inserting media
+
+The editor ships **no picker and no uploader**, on purpose. It asks, and your
+app answers with whatever it already uses — so permissions, auth and upload
+infrastructure stay in one place instead of being duplicated inside an editor.
+
+```
+  toolbar tap                                    insertMedia(localPath)
+      │                                                    ▲
+      ▼                                                    │
+MediaRequested ──▶ nativephp/mobile-camera ──▶ vipertecpro/image-cropper
+```
+
+```php
+#[On(MediaRequested::class)]
+public function onMediaRequested(string $kind): void
+{
+    Camera::pickImages('images', false);      // or your own picker
+}
+
+#[On(MediaSelected::class)]
+public function onMediaSelected(bool $success, array $files, int $count): void
+{
+    ImageCropper::open($files[0]['path'], ['preset' => 'landscape']);
+}
+
+#[On(ImageCropped::class)]
+public function onImageCropped(string $path): void
+{
+    WysiwygEditor::insertMedia('image', [
+        'localPath' => $path,
+        'uploadId' => $id = uniqid('up-'),
+    ]);
+
+    // Upload with your own stack (or nativephp/mobile-background-tasks),
+    // then tell the editor how it went:
+    WysiwygEditor::uploadProgress($id, 0.5);
+    WysiwygEditor::uploadCompleted($id, $cdnUrl);
+    WysiwygEditor::uploadFailed($id, 'Network unavailable');
+}
+```
+
+The block appears the moment it is inserted, rendering from `localPath`, so
+the user never waits on a network round-trip. Until an upload completes the
+block exports as `<figure data-pending="…">` with **no `src`** — the device
+path is never written into published HTML.
+
 ## Developing on a device
 
 Two caching traps will make you think your changes did nothing. Both bit us:

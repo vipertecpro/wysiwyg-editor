@@ -1,9 +1,16 @@
 {
     "name": "vipertecpro/wysiwyg-editor",
     "version": "0.1.0",
-    "description": "A fully native, hand-written WYSIWYG rich text editor for NativePHP Mobile — a full-screen editor with a formatting toolbar above the keyboard (bold, italic, headings, lists, links, colors…), returning clean HTML via an event. No webview, no third-party libraries.",
+    "description": "A fully native, hand-written WYSIWYG rich text editor for NativePHP Mobile \u2014 a full-screen editor with a formatting toolbar above the keyboard (bold, italic, headings, lists, links, colors\u2026), returning clean HTML via an event. No webview, no third-party libraries.",
     "namespace": "WysiwygEditor",
-    "keywords": ["wysiwyg", "editor", "rich-text", "html", "text", "notes"],
+    "keywords": [
+        "wysiwyg",
+        "editor",
+        "rich-text",
+        "html",
+        "text",
+        "notes"
+    ],
     "category": "utilities",
     "license": "MIT",
     "pricing": {
@@ -29,6 +36,18 @@
             "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.Open",
             "ios": "WysiwygEditorFunctions.Open",
             "description": "Open the full-screen native rich text editor and return the edited HTML via an event"
+        },
+        {
+            "name": "WysiwygEditor.InsertMedia",
+            "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.InsertMedia",
+            "ios": "WysiwygEditorFunctions.InsertMedia",
+            "description": "Insert a media block at the caret in the open editor"
+        },
+        {
+            "name": "WysiwygEditor.UpdateUpload",
+            "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.UpdateUpload",
+            "ios": "WysiwygEditorFunctions.UpdateUpload",
+            "description": "Report upload progress / completion / failure for an inserted media block"
         }
     ],
     "android": {
@@ -59,7 +78,8 @@
     "secrets": [],
     "events": [
         "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved",
-        "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
+        "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled",
+        "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested"
     ],
     "service_provider": "Vipertecpro\\WysiwygEditor\\WysiwygEditorServiceProvider",
     "hooks": {

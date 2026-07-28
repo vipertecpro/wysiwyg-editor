@@ -47,8 +47,12 @@ class WysiwygEditor
         'h1', 'h2', 'h3',
         'bulletList', 'orderedList', 'blockquote',
         'link', 'code', 'textColor', 'highlight',
+        'image', 'video', 'file',
         'clearFormat',
     ];
+
+    /** Toolbar tools that ask the HOST for media rather than formatting text. */
+    public const INSERT_TOOLS = ['image', 'video', 'file'];
 
     /**
      * Built-in toolbar presets → ordered tool lists, so common editors are a
@@ -134,6 +138,87 @@ class WysiwygEditor
         }
 
         nativephp_call('WysiwygEditor.Open', json_encode($this->resolveConfig($html, $options)));
+    }
+
+    /**
+     * Insert a media block at the caret.
+     *
+     * Call this after your app has picked (and optionally edited) the media —
+     * see {@see \Vipertecpro\WysiwygEditor\Events\MediaRequested}. The block
+     * appears immediately using `localPath`, so the user sees it before any
+     * upload finishes.
+     *
+     * @param  string  $kind  `image`, `video` or `file`.
+     * @param  array{
+     *     localPath?: string,
+     *     src?: string,
+     *     alt?: string,
+     *     caption?: string,
+     *     name?: string,
+     *     mime?: string,
+     *     poster?: string,
+     *     uploadId?: string
+     * }  $attributes  `localPath` shows it now; `src` is the public URL once
+     *                 uploaded. Pass an `uploadId` to correlate the upload
+     *                 callbacks below — the editor shows a pending state until
+     *                 one of them arrives.
+     */
+    public function insertMedia(string $kind, array $attributes = []): void
+    {
+        if (! in_array($kind, self::INSERT_TOOLS, true)) {
+            throw new \InvalidArgumentException(
+                "WysiwygEditor cannot insert \"{$kind}\" — insertable kinds are: "
+                .implode(', ', self::INSERT_TOOLS).'.'
+            );
+        }
+
+        $this->call('WysiwygEditor.InsertMedia', [
+            'kind' => $kind,
+            'attributes' => array_filter(
+                $attributes,
+                fn ($value) => is_string($value) && $value !== '',
+            ),
+        ]);
+    }
+
+    /** Report upload progress (0.0–1.0) for a block inserted with an uploadId. */
+    public function uploadProgress(string $uploadId, float $fraction): void
+    {
+        $this->call('WysiwygEditor.UpdateUpload', [
+            'uploadId' => $uploadId,
+            'state' => 'progress',
+            'fraction' => max(0.0, min(1.0, $fraction)),
+        ]);
+    }
+
+    /** The upload finished: swap the block onto its public URL. */
+    public function uploadCompleted(string $uploadId, string $url): void
+    {
+        $this->call('WysiwygEditor.UpdateUpload', [
+            'uploadId' => $uploadId,
+            'state' => 'completed',
+            'src' => $url,
+        ]);
+    }
+
+    /** The upload failed: the block stays on its local copy and shows the error. */
+    public function uploadFailed(string $uploadId, string $message = ''): void
+    {
+        $this->call('WysiwygEditor.UpdateUpload', [
+            'uploadId' => $uploadId,
+            'state' => 'failed',
+            'message' => $message,
+        ]);
+    }
+
+    /** Bridge call, skipped outside a native runtime so tests stay pure. */
+    protected function call(string $method, array $payload): void
+    {
+        if (! function_exists('nativephp_call')) {
+            return;
+        }
+
+        nativephp_call($method, json_encode($payload));
     }
 
     /**
