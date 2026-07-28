@@ -1242,8 +1242,18 @@ internal class EditorController(
 ) {
     private val theme get() = config.theme
 
-    /** Marks to apply to the NEXT typed character (collapsed-cursor toggles). */
+    /**
+     * Marks armed by a toolbar toggle made with no selection. They apply to
+     * everything typed CONTIGUOUSLY from [pendingAnchor] — arm bold, type a
+     * word, the whole word is bold — and are dropped as soon as the caret
+     * moves somewhere else.
+     */
     private var pendingMarks: MarkSet? = null
+    private var pendingAnchor = -1
+
+    /** True while a text change is being processed, so caret moves it causes
+     *  are not mistaken for the user moving the cursor. */
+    private var inTextChange = false
 
     private var programmatic = false
     private var lastPushAt = 0L
@@ -1260,6 +1270,32 @@ internal class EditorController(
 
     fun document(): List<WysiwygBlock> = Styler.toBlocks(editText.text)
 
+    /**
+     * Return focus (and the keyboard) to the document after a dialog or a
+     * palette tap. Without this the caret is gone when the dialog closes, so
+     * anything the tool just armed would be lost the moment the user taps back
+     * in to carry on typing.
+     */
+    fun refocus() {
+        editText.requestFocus()
+        val imm = editText.context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+            as? android.view.inputmethod.InputMethodManager
+        imm?.showSoftInput(editText, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    /**
+     * The caret moved. Armed marks survive contiguous typing but are dropped
+     * the moment the user puts the cursor somewhere else — otherwise a bold
+     * armed in one paragraph would leak into the next thing they type.
+     */
+    fun onCaretMoved() {
+        if (inTextChange || programmatic) return
+        if (pendingMarks != null && editText.selectionStart != pendingAnchor) {
+            pendingMarks = null
+            pendingAnchor = -1
+        }
+    }
+
     // ── change tracking ─────────────────────────────────────────────────────
 
     fun attachWatcher() {
@@ -1269,6 +1305,7 @@ internal class EditorController(
 
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
                 if (programmatic) return
+                inTextChange = true
                 pushUndo()
             }
 
@@ -1290,6 +1327,7 @@ internal class EditorController(
                     renumberLists()
                 } finally {
                     programmatic = false
+                    inTextChange = false
                 }
                 emit()
             }
@@ -1305,7 +1343,10 @@ internal class EditorController(
         if (end <= start) return
 
         val newlineAt = (start until end).firstOrNull { s[it] == '\n' }
-        val marks = pendingMarks ?: inheritedMarks(s, start)
+        // Armed marks apply only to text typed contiguously from the anchor;
+        // anything else falls back to inheriting from the character to the left.
+        val armed = pendingMarks?.takeIf { start == pendingAnchor }
+        val marks = armed ?: inheritedMarks(s, start)
 
         // Clear any marks the platform copied onto the inserted range, then
         // apply exactly what we intend — otherwise pasted text keeps its
@@ -1318,7 +1359,14 @@ internal class EditorController(
             }
         }
         Styler.applyMarks(s, start, end, marks, theme, night)
-        pendingMarks = null
+
+        if (armed != null) {
+            // Keep the arming alive so the REST of the word gets it too.
+            pendingAnchor = end
+        } else {
+            pendingMarks = null
+            pendingAnchor = -1
+        }
 
         if (newlineAt != null) continueBlockAfterNewline(s, newlineAt)
     }
@@ -1571,11 +1619,91 @@ internal class EditorController(
         applyMarksToSelection(next)
     }
 
+    /**
+     * Backspace at the very start of a list item's content removes the WHOLE
+     * marker and demotes the item to a paragraph — the standard editor
+     * behaviour. Without this the caret nibbles into the marker text and
+     * leaves a stray "•" or "1." behind. Returns true when it handled the key.
+     */
+    fun handleBackspace(): Boolean {
+        val text = editText.text
+        val caret = editText.selectionStart
+        if (caret != editText.selectionEnd || caret <= 0) return false
+
+        val whole = text.toString()
+        val lineStart = whole.lastIndexOf('\n', caret - 1).let { if (it < 0) 0 else it + 1 }
+        val lineEnd = lineEnd(text, lineStart)
+        val content = contentStart(text, lineStart, lineEnd)
+
+        // Only when there IS a marker and the caret sits just after it.
+        if (content <= lineStart || caret != content) return false
+
+        pushUndoForced()
+        programmatic = true
+        try {
+            removeMarker(text, lineStart, lineEnd)
+            retype(text, lineStart, lineEnd(text, lineStart), "p")
+            refreshBlockStyles(text)
+            renumberLists()
+        } finally {
+            programmatic = false
+        }
+        editText.setSelection(lineStart.coerceIn(0, editText.text.length))
+        emit()
+        onStateChanged()
+        return true
+    }
+
     fun setColor(hex: String?) = applyMarksToSelection(activeMarks().copy(color = hex))
 
     fun setHighlight(hex: String?) = applyMarksToSelection(activeMarks().copy(highlight = hex))
 
-    fun setLink(url: String?) = applyMarksToSelection(activeMarks().copy(link = url))
+    /**
+     * With a selection, link it. With none, INSERT the URL as its own linked
+     * text — the behaviour iOS has and the one Notes/Mail use. Arming a link
+     * for text the user hasn't typed yet is both undiscoverable and divergent
+     * across the two platforms.
+     */
+    fun setLink(url: String?) {
+        val start = editText.selectionStart
+        val end = editText.selectionEnd
+
+        if (url != null && start == end) {
+            insertLinkedText(url)
+            return
+        }
+        applyMarksToSelection(activeMarks().copy(link = url))
+    }
+
+    private fun insertLinkedText(url: String) {
+        pushUndoForced()
+        val text = editText.text
+        val at = editText.selectionStart.coerceIn(0, text.length)
+
+        programmatic = true
+        try {
+            text.insert(at, url)
+            val end = at + url.length
+            // Drop anything the platform copied onto the inserted range, then
+            // apply exactly the marks we intend.
+            for (span in text.getSpans(at, end, Any::class.java)) {
+                if (span !is SemanticSpan) continue
+                if (text.getSpanStart(span) >= at && text.getSpanEnd(span) <= end) {
+                    text.removeSpan(span)
+                }
+            }
+            Styler.applyMarks(text, at, end, inheritedMarks(text, at).copy(link = url), theme, night)
+            refreshBlockStyles(text)
+        } finally {
+            programmatic = false
+        }
+
+        editText.setSelection((at + url.length).coerceAtMost(editText.text.length))
+        pendingMarks = null
+        pendingAnchor = -1
+        emit()
+        onStateChanged()
+    }
 
     fun clearFormat() = applyMarksToSelection(MarkSet())
 
@@ -1588,8 +1716,9 @@ internal class EditorController(
         val end = editText.selectionEnd.coerceIn(0, text.length)
 
         if (start == end) {
-            // Nothing selected — arm the style for the next keystroke.
+            // Nothing selected — arm the style for what gets typed next.
             pendingMarks = marks
+            pendingAnchor = start
             onStateChanged()
             return
         }
@@ -1812,9 +1941,53 @@ internal class WysiwygEditText(context: android.content.Context) :
 
     var onSelectionMoved: (() -> Unit)? = null
 
+    /**
+     * Invoked before a backspace is applied. Returning true consumes it —
+     * used to delete a list marker as ONE unit instead of nibbling away its
+     * characters and leaving a stray bullet behind.
+     */
+    var onBackspace: (() -> Boolean)? = null
+
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
         onSelectionMoved?.invoke()
+    }
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if (keyCode == android.view.KeyEvent.KEYCODE_DEL && onBackspace?.invoke() == true) {
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    /**
+     * Soft keyboards usually delete via `deleteSurroundingText` rather than a
+     * DEL key event, so the interception has to happen on the input connection
+     * as well — otherwise this works with a hardware keyboard only.
+     */
+    override fun onCreateInputConnection(
+        outAttrs: android.view.inputmethod.EditorInfo,
+    ): android.view.inputmethod.InputConnection? {
+        val target = super.onCreateInputConnection(outAttrs) ?: return null
+
+        return object : android.view.inputmethod.InputConnectionWrapper(target, true) {
+            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                if (beforeLength == 1 && afterLength == 0 && onBackspace?.invoke() == true) {
+                    return true
+                }
+                return super.deleteSurroundingText(beforeLength, afterLength)
+            }
+
+            override fun sendKeyEvent(event: android.view.KeyEvent): Boolean {
+                if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+                    event.keyCode == android.view.KeyEvent.KEYCODE_DEL &&
+                    onBackspace?.invoke() == true
+                ) {
+                    return true
+                }
+                return super.sendKeyEvent(event)
+            }
+        }
     }
 }
 
@@ -1899,7 +2072,8 @@ internal fun EditorScreen(
                         )
                         controller.attachWatcher()
                         controllerState.value = controller
-                        onSelectionMoved = { revision.value++ }
+                        onSelectionMoved = { controller.onCaretMoved(); revision.value++ }
+                        onBackspace = { controller.handleBackspace() }
 
                         length.value = initialBlocks.sumOf { it.plainText.length }
 
@@ -1947,8 +2121,10 @@ internal fun EditorScreen(
                 foreground = foreground,
                 onPick = { hex ->
                     val controller = controllerState.value
-                    if (kind == "textColor") controller?.setColor(hex) else controller?.setHighlight(hex)
+                    val c = controllerState.value
+                    if (kind == "textColor") c?.setColor(hex) else c?.setHighlight(hex)
                     palette.value = null
+                    c?.refocus()
                 },
             )
         }
@@ -2049,7 +2225,11 @@ private fun ToolbarRow(
                         "clearFormat" -> controller?.clearFormat()
                         "textColor" -> palette.value = if (palette.value == "textColor") null else "textColor"
                         "highlight" -> palette.value = if (palette.value == "highlight") null else "highlight"
-                        "link" -> controller?.let { showLinkDialog(activity, it.currentLink()) { url -> it.setLink(url) } }
+                        "link" -> controller?.let { c ->
+                            showLinkDialog(activity, c.currentLink(), onDismiss = { c.refocus() }) { url ->
+                                c.setLink(url)
+                            }
+                        }
                     }
                 }
             }
@@ -2145,11 +2325,12 @@ private fun PaletteRow(colors: List<String>, foreground: Color, onPick: (String?
 private fun showLinkDialog(
     activity: FragmentActivity,
     current: String?,
+    onDismiss: () -> Unit,
     onApply: (String?) -> Unit,
 ) {
     val input = android.widget.EditText(activity).apply {
         setText(current ?: "")
-        hint = "https://"
+        hint = "https://example.com"
         setSingleLine()
         inputType = android.text.InputType.TYPE_CLASS_TEXT or
             android.text.InputType.TYPE_TEXT_VARIATION_URI
@@ -2161,15 +2342,16 @@ private fun showLinkDialog(
     }
 
     val builder = AlertDialog.Builder(activity)
-        .setTitle("Link")
+        .setTitle("Add Link")
         .setView(padded)
-        .setPositiveButton("Apply") { _, _ -> onApply(normalizeUrl(input.text.toString())) }
+        .setPositiveButton("Save") { _, _ -> onApply(normalizeUrl(input.text.toString())) }
         .setNegativeButton("Cancel", null)
 
     if (current != null) {
         builder.setNeutralButton("Remove") { _, _ -> onApply(null) }
     }
 
+    builder.setOnDismissListener { onDismiss() }
     builder.show()
 }
 

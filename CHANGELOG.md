@@ -50,3 +50,17 @@ Found by running the editor on a real simulator and emulator:
   stripped the preceding paragraph's block span, because block spans extend
   over their terminating newline and the strip ran at that exact offset. Span
   ownership is now checked before removal.
+- Android: backspacing at the start of a list item nibbled a single character
+  out of the marker, leaving a stray "•" on a paragraph that was still a list
+  item. The marker is now deleted as one unit and the item demoted to a
+  paragraph, intercepting both the DEL key and the soft keyboard's
+  `deleteSurroundingText`.
+- Android: a mark toggled with no selection applied to a single character
+  instead of the word being typed. Armed marks now persist for text typed
+  contiguously and are dropped when the caret moves elsewhere.
+- Android: the editor did not regain focus after the link dialog or a colour
+  swatch, so the armed formatting was lost as soon as the user tapped back in.
+- Android: the link tool with no selection ARMED a link, while iOS INSERTED
+  the URL as its own linked text — the same action produced different
+  documents per platform. Android now matches iOS. The dialog wording was
+  aligned too ("Add Link" / Cancel / Save on both).
