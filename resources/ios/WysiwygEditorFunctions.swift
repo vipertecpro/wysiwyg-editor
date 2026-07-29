@@ -126,6 +126,7 @@ private enum WysiwygEvents {
     static let mediaEditRequested = "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested"
     static let accessoryTapped = "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
     static let draftRequested = "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested"
+    static let toolTapped = "Vipertecpro\\WysiwygEditor\\Events\\ToolTapped"
     static let changed = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
 }
 
@@ -220,11 +221,11 @@ extension UIColor {
 
 struct WysiwygConfig {
     /// The `full` preset order — also the whitelist for the toolbar option.
-    static let insertTools = ["image", "video", "file"]
+    static let insertTools = ["image", "camera", "video", "file"]
     static let allTools = [
         "bold", "italic", "underline", "strikethrough", "h1", "h2", "h3",
         "bulletList", "orderedList", "blockquote", "link", "code",
-        "textColor", "highlight", "image", "video", "file",
+        "textColor", "highlight", "image", "camera", "video", "file",
         "poll", "divider", "embed", "clearFormat",
     ]
 
@@ -251,6 +252,10 @@ struct WysiwygConfig {
     let history: Bool
     /// Rows the HOST owns, drawn under the media. See WysiwygAccessory.
     let accessories: [WysiwygAccessory]
+    /// Extra toolbar buttons the host defines — see WysiwygCustomTool.
+    let customTools: [WysiwygCustomTool]
+    /// The author's picture, beside what they are writing.
+    let avatar: String
     let typography: WysiwygTypography
     let spacing: WysiwygSpacing
     let validation: [String: Any]
@@ -296,6 +301,8 @@ struct WysiwygConfig {
             .sorted { $0.minutes < $1.minutes }
         history = (p["history"] as? NSNumber)?.boolValue ?? true
         accessories = ((p["accessories"] as? [[String: Any]]) ?? []).map(WysiwygAccessory.init)
+        customTools = ((p["customTools"] as? [[String: Any]]) ?? []).map(WysiwygCustomTool.init)
+        avatar = p["avatar"] as? String ?? ""
         typography = WysiwygTypography(p["typography"] as? [String: Any])
         spacing = WysiwygSpacing(named: p["spacing"] as? String ?? "comfortable")
         validation = p["validation"] as? [String: Any] ?? [:]
@@ -1443,6 +1450,25 @@ struct JsonScanner {
  row means. That is the whole point — "Tag people" is the app's feature backed
  by the app's data, and an editor that tried to own it would be guessing.
  */
+/**
+ One toolbar button the host application added.
+
+ The editor draws it and reports the tap. It cannot know what a GIF picker or
+ a scheduler should do — those are the app's features, backed by the app's
+ services.
+ */
+struct WysiwygCustomTool: Identifiable {
+    let id: String
+    let icon: String
+    let label: String
+
+    init(_ p: [String: Any]) {
+        id = p["id"] as? String ?? ""
+        icon = p["icon"] as? String ?? ""
+        label = p["label"] as? String ?? ""
+    }
+}
+
 struct WysiwygAccessory: Identifiable {
     let id: String
     var label: String
@@ -2941,10 +2967,21 @@ private struct EditorScreen: View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 topBar
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(flowEntries) { entry in
-                            segmentView(entry: entry)
+                // The author's picture beside what they are writing, the way
+                // every social composer arranges it. Top-aligned, because the
+                // text grows downward past it.
+                HStack(alignment: .top, spacing: 0) {
+                    if !document.config.avatar.isEmpty {
+                        AvatarView(source: document.config.avatar, theme: theme)
+                            .padding(.leading, 16)
+                            .padding(.top, 14)
+                    }
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(flowEntries) { entry in
+                                segmentView(entry: entry)
+                            }
                         }
                     }
                 }
@@ -3175,7 +3212,12 @@ private struct EditorScreen: View {
         case "link":
             sheet = nil
             model.linkTapped()
-        case "image", "video", "file":
+        case let custom where custom.hasPrefix("custom:"):
+            sheet = nil
+            var payload: [String: Any] = ["tool": String(custom.dropFirst("custom:".count))]
+            if let id = document.config.id { payload["id"] = id }
+            LaravelBridge.shared.send?(WysiwygEvents.toolTapped, payload)
+        case "image", "camera", "video", "file":
             sheet = nil
             var payload: [String: Any] = ["kind": tool]
             if let id = document.config.id { payload["id"] = id }
@@ -3631,6 +3673,39 @@ private struct AccessoryRows: View {
     }
 }
 
+// MARK: - Avatar
+
+/// The author's picture. Decoded the same way media is, so a local file works
+/// as well as a url — an app that has not uploaded an avatar yet still shows
+/// one.
+private struct AvatarView: View {
+    let source: String
+    let theme: WysiwygTheme
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            Circle().fill(theme.textColor.opacity(0.1))
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .clipShape(Circle())
+            }
+        }
+        .frame(width: 40, height: 40)
+        .task(id: source) {
+            guard !source.isEmpty else { return }
+            let path = source
+            image = await Task.detached(priority: .userInitiated) {
+                decodeMediaImage(path, maxPixels: 160)
+            }.value
+        }
+    }
+}
+
 // MARK: - Media strip
 
 /**
@@ -4071,6 +4146,7 @@ private let toolIcons: [String: ToolIcon] = [
     "highlight": ToolIcon(path: "M15 4L20 9L10 19L5 19L5 14L15 4M13 6L18 11"),
     "clearFormat": ToolIcon(path: "M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 4L20 20"),
     // Insert tools: a framed picture, a play triangle, a paperclip.
+    "camera": ToolIcon(path: "M4 8L7 8L9 5L15 5L17 8L20 8L20 19L4 19ZM12 15.5C13.4 15.5 14.5 14.4 14.5 13C14.5 11.6 13.4 10.5 12 10.5C10.6 10.5 9.5 11.6 9.5 13C9.5 14.4 10.6 15.5 12 15.5Z"),
     "image": ToolIcon(path: "M3.5 5.5L20.5 5.5L20.5 18.5L3.5 18.5L3.5 5.5"
         + "M3.5 15L8.5 10.5L12.5 14L15.5 11.5L20.5 16M15.5 9.2L15.51 9.2"),
     "video": ToolIcon(path: "M3.5 6L16 6L16 18L3.5 18L3.5 6M16 10.5L20.5 8L20.5 16L16 13.5"),
@@ -4170,6 +4246,7 @@ let toolLabelKeys: [String: String] = [
     "textColor": "toolTextColor",
     "highlight": "toolHighlight",
     "image": "toolImage",
+    "camera": "toolCamera",
     "video": "toolVideo",
     "file": "toolFile",
     "poll": "toolPoll",
@@ -4183,7 +4260,7 @@ let sheetTextStyleTools = ["h1", "h2", "h3", "blockquote"]
 let sheetListTools = ["bulletList", "orderedList"]
 let sheetFormatTools = ["bold", "italic", "underline", "strikethrough",
                         "code", "textColor", "highlight", "clearFormat"]
-let sheetInsertTools = ["image", "video", "file", "poll", "embed", "divider", "link"]
+let sheetInsertTools = ["image", "camera", "video", "file", "poll", "embed", "divider", "link"]
 
 /// Which sheet, if any, is open.
 enum SheetKind: Identifiable {
@@ -4267,6 +4344,11 @@ private struct ToolbarRow: View {
                         toolButton(tool)
                     }
                 }
+
+                // The host's own buttons, after its tools.
+                ForEach(model.config.customTools) { tool in
+                    button(tool.icon, active: false) { onDocumentTool("custom:" + tool.id) }
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -4327,8 +4409,11 @@ private struct ToolbarRow: View {
             palette = palette == .highlight ? nil : .highlight
         case "clearFormat":
             model.clearFormat()
-        case "image", "video", "file":
+        case "image", "camera", "video", "file":
             requestMedia(tool)
+        case let tool where tool.hasPrefix("custom:"):
+            // Nothing for the editor to do — say who was tapped and stop.
+            onDocumentTool(tool)
         case "poll", "divider", "embed":
             // These change the DOCUMENT, not this segment's text, so the
             // screen handles them — the toolbar only knows about one editor.

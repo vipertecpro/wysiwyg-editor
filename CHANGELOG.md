@@ -5,6 +5,19 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-30
+
+### Added
+
+- **`customTools`** — extra toolbar buttons the host defines, emitting
+  `ToolTapped`. The editor cannot know what a GIF picker or a scheduler should
+  do; it draws the button and reports the tap. Drawn with the editor's own
+  glyphs, so they match on both platforms.
+- **`camera`** as a first-class insert tool, separate from `image`: a photo you
+  TAKE and a photo you PICK are different screens.
+- **`avatar`** — the author's picture beside the compose field, decoded the
+  same way media is so a local path works as well as a url.
+
 ## [0.3.0] - 2026-07-29
 
 ### Added

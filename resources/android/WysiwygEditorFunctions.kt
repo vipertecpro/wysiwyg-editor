@@ -37,6 +37,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -86,6 +87,7 @@ object WysiwygEditorFunctions {
     private const val EVENT_MEDIA_EDIT = "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested"
     private const val EVENT_ACCESSORY = "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
     private const val EVENT_DRAFT = "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested"
+    private const val EVENT_TOOL = "Vipertecpro\\WysiwygEditor\\Events\\ToolTapped"
 
     /** The four surfaces the editor colours. */
     val THEME_KEYS = listOf("background", "text", "accent", "highlight")
@@ -96,13 +98,13 @@ object WysiwygEditorFunctions {
         "h1", "h2", "h3",
         "bulletList", "orderedList", "blockquote",
         "link", "code", "textColor", "highlight",
-        "image", "video", "file",
+        "image", "camera", "video", "file",
         "poll", "divider", "embed",
         "clearFormat",
     )
 
     /** Toolbar tools that ask the HOST for media rather than formatting text. */
-    val INSERT_TOOLS = listOf("image", "video", "file")
+    val INSERT_TOOLS = listOf("image", "camera", "video", "file")
 
     /**
      * Block types the media strip carries. A poll is content you EDIT and a
@@ -172,6 +174,8 @@ object WysiwygEditorFunctions {
         val pollDurations: List<Pair<String, Int>>,
         /** Rows the HOST owns, drawn under the media. */
         val accessories: List<WysiwygAccessory>,
+        val customTools: List<WysiwygCustomTool>,
+        val avatar: String,
         val typography: WysiwygTypography,
         val spacing: WysiwygSpacing,
         val validation: Map<String, Any>,
@@ -306,6 +310,8 @@ object WysiwygEditorFunctions {
                 pollMaxOptions = ((parameters["pollMaxOptions"] as? Number)?.toInt() ?: 4).coerceAtLeast(2),
                 pollDurations = parsePollDurations(parameters["pollDurations"]),
                 accessories = parseAccessories(parameters["accessories"]),
+                customTools = parseCustomTools(parameters["customTools"]),
+                avatar = parameters["avatar"] as? String ?: "",
                 typography = parseTypography(parameters["typography"]),
                 spacing = WysiwygSpacing.named((parameters["spacing"] as? String) ?: "comfortable"),
                 validation = parseValidation(parameters["validation"]),
@@ -497,6 +503,7 @@ object WysiwygEditorFunctions {
                     onRequestMedia = { kind -> requestMedia(kind, config.id) },
                     onMediaEdit = { block -> requestMediaEdit(block, config.id) },
                     onAccessoryTapped = { accessory -> accessoryTapped(accessory, config.id) },
+                    onCustomTool = { tool -> customToolTapped(tool, config.id) },
                 )
             }
 
@@ -535,6 +542,15 @@ object WysiwygEditorFunctions {
                 id?.let { put("id", it) }
             }
             NativeActionCoordinator.dispatchEvent(activity, EVENT_MEDIA_EDIT, payload.toString())
+        }
+
+        /** One of the host's own toolbar buttons was tapped. */
+        private fun customToolTapped(tool: String, id: String?) {
+            val payload = JSONObject().apply {
+                put("tool", tool)
+                id?.let { put("id", it) }
+            }
+            NativeActionCoordinator.dispatchEvent(activity, EVENT_TOOL, payload.toString())
         }
 
         /** One of the host's own rows was tapped. */
@@ -626,6 +642,36 @@ private fun parseTypography(any: Any?): WysiwygTypography {
  * The editor draws it and reports the tap; it does not know what the row
  * means. Mirrors the Swift WysiwygAccessory.
  */
+/**
+ * One toolbar button the host application added.
+ *
+ * The editor draws it and reports the tap. It cannot know what a GIF picker or
+ * a scheduler should do — those are the app's features. Mirrors the Swift
+ * WysiwygCustomTool.
+ */
+class WysiwygCustomTool(val id: String, val icon: String, val label: String)
+
+private fun parseCustomTools(any: Any?): List<WysiwygCustomTool> {
+    val rows = when (any) {
+        is List<*> -> any
+        is JSONArray -> (0 until any.length()).map { any.opt(it) }
+        else -> emptyList<Any?>()
+    }
+
+    return rows.mapNotNull { row ->
+        val map = parseStringMap(row)
+        val id = map["id"].orEmpty()
+        val icon = map["icon"].orEmpty()
+
+        // No id could never report a tap; no icon would draw a blank gap.
+        if (id.isEmpty() || icon.isEmpty()) {
+            null
+        } else {
+            WysiwygCustomTool(id, icon, map["label"].orEmpty())
+        }
+    }
+}
+
 class WysiwygAccessory(
     val id: String,
     var label: String,
@@ -2044,6 +2090,7 @@ internal val TOOL_ICONS: Map<String, ToolIcon> = mapOf(
     "highlight" to ToolIcon("M15 4L20 9L10 19L5 19L5 14L15 4M13 6L18 11"),
     "clearFormat" to ToolIcon("M5 15L10 5L15 15M6.8 11.6L13.2 11.6M4 4L20 20"),
     // Insert tools: a framed picture, a play triangle, a paperclip.
+    "camera" to ToolIcon("M4 8L7 8L9 5L15 5L17 8L20 8L20 19L4 19ZM12 15.5C13.4 15.5 14.5 14.4 14.5 13C14.5 11.6 13.4 10.5 12 10.5C10.6 10.5 9.5 11.6 9.5 13C9.5 14.4 10.6 15.5 12 15.5Z"),
     "image" to ToolIcon(
         "M3.5 5.5L20.5 5.5L20.5 18.5L3.5 18.5L3.5 5.5" +
             "M3.5 15L8.5 10.5L12.5 14L15.5 11.5L20.5 16M15.5 9.2L15.51 9.2"
@@ -3272,6 +3319,8 @@ internal fun EditorScreen(
     onMediaEdit: (WysiwygBlock) -> Unit = {},
     /** One of the host's own rows was tapped. */
     onAccessoryTapped: (String) -> Unit = {},
+    /** One of the host's own toolbar buttons was tapped. */
+    onCustomTool: (String) -> Unit = {},
 ) {
     val night = isSystemInDarkTheme()
     val theme = config.theme
@@ -3549,7 +3598,15 @@ internal fun EditorScreen(
                 onDispose { WysiwygEditorFunctions.live = null }
             }
 
-            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                // The author's picture beside what they are writing, the way
+                // every social composer arranges it. Top-aligned, because the
+                // text grows downward past it.
+                if (config.avatar.isNotEmpty()) {
+                    AvatarView(config.avatar, foreground)
+                }
+
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -3732,6 +3789,7 @@ internal fun EditorScreen(
                     }
                 }
             }
+            }
 
             // ── Attachments, when they live in a strip ───────────────────────────
             if (config.mediaLayout == "strip") {
@@ -3815,6 +3873,10 @@ internal fun EditorScreen(
                 length = length.value,
                 onRequestMedia = onRequestMedia,
                 onDocumentTool = { tool ->
+                    if (tool.startsWith("custom:")) {
+                        // Nothing for the editor to do — say who was tapped.
+                        onCustomTool(tool.removePrefix("custom:"))
+                    }
                     when (tool) {
                         "poll" -> {
                             // Inserted blank and edited in place — a poll IS
@@ -4240,6 +4302,7 @@ internal val TOOL_LABEL_KEYS = mapOf(
     "textColor" to "toolTextColor",
     "highlight" to "toolHighlight",
     "image" to "toolImage",
+    "camera" to "toolCamera",
     "video" to "toolVideo",
     "file" to "toolFile",
     "poll" to "toolPoll",
@@ -4253,7 +4316,8 @@ internal val SHEET_TEXT_STYLE_TOOLS = listOf("h1", "h2", "h3", "blockquote")
 internal val SHEET_LIST_TOOLS = listOf("bulletList", "orderedList")
 internal val SHEET_FORMAT_TOOLS =
     listOf("bold", "italic", "underline", "strikethrough", "code", "textColor", "highlight", "clearFormat")
-internal val SHEET_INSERT_TOOLS = listOf("image", "video", "file", "poll", "embed", "divider", "link")
+internal val SHEET_INSERT_TOOLS =
+    listOf("image", "camera", "video", "file", "poll", "embed", "divider", "link")
 
 /**
  * The tick drawn beside an active row. Same 24x24 grid as the tool glyphs,
@@ -4360,6 +4424,13 @@ private fun ToolbarRow(
                 }
             }
 
+            // The host's own buttons, after its tools.
+            config.customTools.forEach { custom ->
+                ToolButton(custom.icon, false, true, foreground, highlightColor, haptics) {
+                    onDocumentTool("custom:" + custom.id)
+                }
+            }
+
             if (config.menu == "sheet") {
                 val formatTools = SHEET_TEXT_STYLE_TOOLS + SHEET_LIST_TOOLS + SHEET_FORMAT_TOOLS
                 if (config.toolbar.any { it in formatTools }) {
@@ -4426,6 +4497,8 @@ private fun runTool(
         // handles them — a dispatcher holding one controller cannot. Without
         // this they fell through the `when` and did nothing, silently.
         "poll", "divider", "embed" -> onDocumentTool(tool)
+        // Nothing for the editor to do — say who was tapped and stop.
+        else -> if (tool.startsWith("custom:")) onDocumentTool(tool) else Unit
     }
 }
 
@@ -4757,6 +4830,41 @@ private fun PollCard(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                 ),
+            )
+        }
+    }
+}
+
+/**
+ * The author's picture. Decoded the same way media is, so a local file works
+ * as well as a url — an app that has not uploaded an avatar yet still shows one.
+ */
+@Composable
+private fun AvatarView(source: String, foreground: Color) {
+    val bitmap = androidx.compose.runtime.remember(source) {
+        androidx.compose.runtime.mutableStateOf<android.graphics.Bitmap?>(null)
+    }
+
+    LaunchedEffect(source) {
+        bitmap.value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            decodeMediaImage(source, 160)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .padding(start = 16.dp, top = 14.dp)
+            .size(40.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(foreground.copy(alpha = 0.1f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        bitmap.value?.let { image ->
+            Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(40.dp),
             )
         }
     }

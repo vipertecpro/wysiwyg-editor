@@ -144,6 +144,8 @@ All options are optional:
 | `maxMedia` | int | `4` | Attachments allowed; `0` = no limit |
 | `countStyle` | string | `text` | `text` readout, or a `ring` counting down to `maxLength` |
 | `maxLengthMode` | string | `hard` | `hard` refuses the keystroke; `soft` allows the overrun, shades it and blocks save |
+| `avatar` | string | `''` | The author's picture beside the compose field — a url or a local path |
+| `customTools` | list | `[]` | Extra toolbar buttons: `id`, `icon`, optional `label`. Tapping emits `ToolTapped` |
 | `cancelMode` | string | `discard` | `discard` asks to throw the edits away; `draft` offers to keep them and emits `DraftRequested` |
 | `cancelStyle` | string | `text` | `text` shows "Cancel"; `icon` shows a ✕ |
 | `saveStyle` | string | `text` | `text` button, or a `filled` pill that dims until there is something to save |
@@ -209,6 +211,7 @@ WysiwygEditor::open($html, [
 | `…\Events\MediaRequested` | `string $kind`, `?string $id` | User tapped image / video / file. Answer with `insertMedia()` |
 | `…\Events\MediaEditRequested` | `string $kind`, `string $uploadId`, `string $source`, `?string $id` | User tapped edit on an attachment. Re-open your own picker |
 | `…\Events\DraftRequested` | `string $html`, `string $text`, `string $json`, `?string $id` | User backed out of a half-written document and chose to keep it (`cancelMode => 'draft'`) |
+| `…\Events\ToolTapped` | `string $tool`, `?string $id` | User tapped one of your own toolbar buttons |
 | `…\Events\AccessoryTapped` | `string $accessory`, `?string $id` | User tapped one of your own rows. Answer with `setAccessory()` |
 
 All events live under `Vipertecpro\WysiwygEditor\Events\`.
@@ -445,6 +448,39 @@ Opens a zoomable image viewer, or a player for video. It lives in the plugin
 because the editor already decodes images and plays video for its own cards,
 and because NativePHP ships no video element for a host to build a viewer out
 of.
+
+## Your own buttons in the toolbar
+
+The same idea as accessory rows, one level up. The editor cannot know what a
+GIF picker, a location tagger or a scheduler should do — those are your
+features, backed by your services — so it draws the button and reports the tap.
+
+```php
+WysiwygEditor::open($html, [
+    'toolbar' => ['image', 'camera', 'video', 'poll'],
+    'customTools' => [
+        ['id' => 'gif', 'icon' => 'embed', 'label' => 'GIF'],
+        ['id' => 'schedule', 'icon' => 'orderedList', 'label' => 'Schedule'],
+    ],
+    'avatar' => $user->avatarUrl,
+]);
+
+#[On(ToolTapped::class)]
+public function onToolTapped(string $tool): void
+{
+    // Your picker, your sheet, your data.
+}
+```
+
+`icon` names one of the editor's own glyphs, so your buttons are drawn by the
+same vector code as everything else and match on both platforms. `camera` is a
+first-class tool rather than a custom one, because a photo you TAKE and a photo
+you PICK are different screens — it emits `MediaRequested` with `kind` of
+`camera`.
+
+`avatar` puts the author's picture beside what they are writing, the way social
+composers arrange it. A url or a local path; it is decoded the same way media
+is, so an app that has not uploaded one yet still shows something.
 
 ## Your own rows in the composer
 

@@ -555,6 +555,49 @@ describe('Backing out', function () {
     });
 });
 
+describe('Host toolbar buttons and avatar', function () {
+    it('has no extra buttons unless the host adds them', function () {
+        expect(editor()->config('')['customTools'])->toBe([])
+            ->and(editor()->config('')['avatar'])->toBe('');
+    });
+
+    it('carries id, icon and label through in order', function () {
+        $config = editor()->config('', ['customTools' => [
+            ['id' => 'gif', 'icon' => 'image', 'label' => 'GIF'],
+            ['id' => 'schedule', 'icon' => 'link'],
+        ]]);
+
+        expect($config['customTools'])->toBe([
+            ['id' => 'gif', 'icon' => 'image', 'label' => 'GIF'],
+            ['id' => 'schedule', 'icon' => 'link'],
+        ]);
+    });
+
+    /**
+     * A button with no id could never report a tap; one with no icon would
+     * draw as a blank gap in the bar.
+     */
+    it('drops buttons that could not work', function (array $tool) {
+        expect(editor()->config('', ['customTools' => [$tool]])['customTools'])->toBe([]);
+    })->with([
+        [['icon' => 'image']],
+        [['id' => 'no-icon']],
+        [['id' => '  ', 'icon' => 'image']],
+    ]);
+
+    it('carries the author picture', function () {
+        expect(editor()->config('', ['avatar' => '/tmp/me.jpg'])['avatar'])->toBe('/tmp/me.jpg');
+    });
+
+    it('offers camera as a distinct insert tool', function () {
+        // A photo you TAKE is not a photo you pick — the host opens a
+        // different screen for each.
+        expect(WysiwygEditor::INSERT_TOOLS)->toContain('camera')
+            ->and(WysiwygEditor::AVAILABLE_TOOLS)->toContain('camera')
+            ->and(WysiwygEditor::TOOL_LABEL_KEYS)->toHaveKey('camera');
+    });
+});
+
 describe('Menu mode', function () {
     it('defaults to the scrolling toolbar', function () {
         expect(editor()->config('')['menu'])->toBe('toolbar');

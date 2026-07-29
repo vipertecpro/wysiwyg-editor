@@ -47,13 +47,13 @@ class WysiwygEditor
         'h1', 'h2', 'h3',
         'bulletList', 'orderedList', 'blockquote',
         'link', 'code', 'textColor', 'highlight',
-        'image', 'video', 'file',
+        'image', 'camera', 'video', 'file',
         'poll', 'divider', 'embed',
         'clearFormat',
     ];
 
     /** Toolbar tools that ask the HOST for media rather than formatting text. */
-    public const INSERT_TOOLS = ['image', 'video', 'file'];
+    public const INSERT_TOOLS = ['image', 'camera', 'video', 'file'];
 
     /**
      * Built-in toolbar presets → ordered tool lists, so common editors are a
@@ -153,6 +153,7 @@ class WysiwygEditor
         'toolOrderedList' => 'Numbered list',
         'toolLink' => 'Link',
         'toolImage' => 'Photo',
+        'toolCamera' => 'Camera',
         'toolVideo' => 'Video',
         'toolFile' => 'File',
         'toolPoll' => 'Poll',
@@ -198,6 +199,21 @@ class WysiwygEditor
      * and what X, Facebook and Instagram all landed on independently.
      */
     public const DEFAULT_MAX_MEDIA = 4;
+
+    /**
+     * Extra toolbar buttons the HOST defines.
+     *
+     * The editor cannot know what a GIF picker, a location tagger or a
+     * scheduler should do — those are the app's features. So it draws the
+     * button and reports the tap through {@see Events\ToolTapped}, exactly as
+     * it does for accessory rows.
+     *
+     * Each takes an `id` reported back on tap, an `icon` naming one of the
+     * editor's glyphs, and an optional `label` for the sheet.
+     *
+     * @var list<string>
+     */
+    public const CUSTOM_TOOL_KEYS = ['id', 'icon', 'label'];
 
     /**
      * Rows the HOST puts in the composer, under the media.
@@ -382,6 +398,7 @@ class WysiwygEditor
         'textColor' => 'toolTextColor',
         'highlight' => 'toolHighlight',
         'image' => 'toolImage',
+        'camera' => 'toolCamera',
         'video' => 'toolVideo',
         'file' => 'toolFile',
         'poll' => 'toolPoll',
@@ -641,6 +658,10 @@ class WysiwygEditor
             'pollMaxOptions' => self::POLL_OPTION_RANGE['max'],
             'pollDurations' => self::POLL_DURATIONS,
             'accessories' => $this->resolveAccessories($options['accessories'] ?? []),
+            'customTools' => $this->resolveCustomTools($options['customTools'] ?? []),
+            // The author's picture, shown beside what they are writing — what
+            // every social composer puts there. A url or a local path.
+            'avatar' => (string) ($options['avatar'] ?? ''),
             // Undo/redo lead the toolbar by default. Composers built for short
             // posts do not show them, and with no other tools enabled they
             // would be the only thing left on the bar.
@@ -724,6 +745,44 @@ class WysiwygEditor
     protected function pick(mixed $value, array $allowed): string
     {
         return in_array($value, $allowed, true) ? $value : $allowed[0];
+    }
+
+    /**
+     * Extra toolbar buttons for the composer.
+     *
+     * A button with no `id` could never report a tap and one with no `icon`
+     * would draw as a blank gap, so both are required.
+     *
+     * @param  array<int, array<string, mixed>>  $tools
+     * @return list<array<string, string>>
+     */
+    protected function resolveCustomTools(array $tools): array
+    {
+        $out = [];
+
+        foreach ($tools as $tool) {
+            if (! is_array($tool)) {
+                continue;
+            }
+
+            $id = trim((string) ($tool['id'] ?? ''));
+            $icon = trim((string) ($tool['icon'] ?? ''));
+
+            if ($id === '' || $icon === '') {
+                continue;
+            }
+
+            $row = ['id' => $id, 'icon' => $icon];
+            $label = trim((string) ($tool['label'] ?? ''));
+
+            if ($label !== '') {
+                $row['label'] = $label;
+            }
+
+            $out[] = $row;
+        }
+
+        return $out;
     }
 
     /**
