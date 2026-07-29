@@ -346,6 +346,30 @@ class WysiwygEditor
     }
 
     /**
+     * Show a media block full-screen.
+     *
+     * The editor already decodes images and plays video for its own cards, so
+     * a host rendering SAVED content should not have to build a second viewer
+     * to do the same thing — especially as the platform offers no video
+     * element to build one out of.
+     *
+     * `$kind` is `image` or `video`; `$source` is the remote url or the local
+     * path, whichever the host has.
+     */
+    public function preview(string $kind, string $source, string $caption = ''): void
+    {
+        if (! function_exists('nativephp_call') || $source === '') {
+            return;
+        }
+
+        nativephp_call('WysiwygEditor.Preview', json_encode([
+            'kind' => in_array($kind, ['image', 'video'], true) ? $kind : 'image',
+            'source' => $source,
+            'caption' => $caption,
+        ]));
+    }
+
+    /**
      * Convert a saved document to Markdown.
      *
      * Takes the `$json` from {@see Events\ContentSaved}, not the HTML — JSON

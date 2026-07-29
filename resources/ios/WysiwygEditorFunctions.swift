@@ -67,6 +67,30 @@ enum WysiwygEditorFunctions {
         }
     }
 
+    /**
+     Show a media block full-screen.
+
+     Lives here rather than in the host app because the platform has no video
+     element to build a viewer out of, and because the editor already decodes
+     images and plays video for its own cards — a host rendering SAVED content
+     should not have to write that twice.
+     */
+    class Preview: BridgeFunction {
+        func execute(parameters: [String: Any]) throws -> [String: Any] {
+            let kind = parameters["kind"] as? String ?? "image"
+            let source = parameters["source"] as? String ?? ""
+            let caption = parameters["caption"] as? String ?? ""
+
+            guard !source.isEmpty else { return [:] }
+
+            DispatchQueue.main.async {
+                WysiwygMediaPreview.present(kind: kind, source: source, caption: caption)
+            }
+
+            return [:]
+        }
+    }
+
     class Open: BridgeFunction {
         func execute(parameters: [String: Any]) throws -> [String: Any] {
             let config = WysiwygConfig(parameters)
@@ -3060,6 +3084,9 @@ private struct EditorScreen: View {
     /// nothing in it would be a regression.
     private var canSave: Bool {
         if overLimit { return false }
+        // "Empty" means no text AND no media. A photo with no caption, or a
+        // poll on its own, is a perfectly good post — requiring words to go
+        // with them would be the editor deciding what a document is.
         if document.blocks().allSatisfy({ $0.isText && $0.isEmpty }) { return false }
         return validateDocument(document.blocks(), document.config.validation,
                                 document.config.strings) == nil
@@ -3971,6 +3998,139 @@ private struct PaletteRow: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(theme.backgroundColor.overlay(theme.textColor.opacity(0.06)))
+    }
+}
+
+// MARK: - Media preview
+
+/**
+ Full-screen viewer for one media block.
+
+ Its own window for the same reason the editor has one: presenting on the
+ host's root controller loses to whatever that controller is already showing,
+ silently. Video goes to AVPlayer, which brings its own chrome and its own
+ full-screen behaviour, so only images need a shell built for them.
+ */
+enum WysiwygMediaPreview {
+    private static var window: UIWindow?
+    private static weak var previousKeyWindow: UIWindow?
+
+    static func present(kind: String, source: String, caption: String) {
+        guard let scene = WysiwygEditorPresenter.activeScene() else { return }
+
+        let url = source.hasPrefix("http") ? URL(string: source)
+                                           : URL(fileURLWithPath: source)
+
+        guard let url else { return }
+
+        if kind == "video" {
+            let player = AVPlayerViewController()
+            player.player = AVPlayer(url: url)
+            show(player, in: scene) { player.player?.play() }
+
+            return
+        }
+
+        let image = decodeMediaImage(source, maxPixels: 2400)
+        show(ImagePreviewController(image: image, caption: caption), in: scene)
+    }
+
+    private static func show(_ controller: UIViewController, in scene: UIWindowScene,
+                             then: (() -> Void)? = nil) {
+        // Only one at a time; a second tap should not stack viewers.
+        dismiss()
+
+        previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+
+        let host = UIWindow(windowScene: scene)
+        host.rootViewController = controller
+        host.windowLevel = .normal + 2
+        host.backgroundColor = .black
+        host.makeKeyAndVisible()
+        window = host
+
+        then?()
+    }
+
+    static func dismiss() {
+        previousKeyWindow?.makeKey()
+        window?.isHidden = true
+        window?.rootViewController = nil
+        window = nil
+    }
+}
+
+/// The image shell: black backdrop, pinch to zoom, a close button, and the
+/// caption if there is one — what every timeline does when you tap a photo.
+private final class ImagePreviewController: UIViewController, UIScrollViewDelegate {
+    private let image: UIImage?
+    private let caption: String
+    private let scrollView = UIScrollView()
+    private let imageView = UIImageView()
+
+    init(image: UIImage?, caption: String) {
+        self.image = image
+        self.caption = caption
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+
+        scrollView.frame = view.bounds
+        scrollView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        scrollView.delegate = self
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 4
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.showsHorizontalScrollIndicator = false
+        view.addSubview(scrollView)
+
+        imageView.image = image
+        imageView.contentMode = .scaleAspectFit
+        imageView.frame = scrollView.bounds
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        scrollView.addSubview(imageView)
+
+        // Double tap to zoom, the gesture every photo viewer has.
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(toggleZoom(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        scrollView.addGestureRecognizer(doubleTap)
+
+        if !caption.isEmpty {
+            let label = UILabel()
+            label.text = caption
+            label.textColor = .white
+            label.font = .systemFont(ofSize: 14)
+            label.numberOfLines = 3
+            label.textAlignment = .center
+            label.frame = CGRect(x: 20, y: view.bounds.height - 90,
+                                 width: view.bounds.width - 40, height: 54)
+            label.autoresizingMask = [.flexibleWidth, .flexibleTopMargin]
+            view.addSubview(label)
+        }
+
+        let close = UIButton(type: .system)
+        close.setTitle("✕", for: .normal)
+        close.titleLabel?.font = .systemFont(ofSize: 24, weight: .medium)
+        close.tintColor = .white
+        close.setTitleColor(.white, for: .normal)
+        close.frame = CGRect(x: 12, y: 52, width: 44, height: 44)
+        close.addTarget(self, action: #selector(close(_:)), for: .touchUpInside)
+        view.addSubview(close)
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+
+    @objc private func toggleZoom(_ sender: UITapGestureRecognizer) {
+        scrollView.setZoomScale(scrollView.zoomScale > 1 ? 1 : 2.5, animated: true)
+    }
+
+    @objc private func close(_ sender: UIButton) {
+        WysiwygMediaPreview.dismiss()
     }
 }
 
