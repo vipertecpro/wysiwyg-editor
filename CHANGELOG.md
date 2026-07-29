@@ -5,6 +5,20 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-07-29
+
+### Changed
+
+- **Requires PHP 8.4+.** 0.1.0 published as `^8.2|^8.3|^8.4`, which disagreed
+  with the documented requirement and meant supporting three PHP versions.
+
+### Documentation
+
+- The events table listed two of six events; `accessories`, `setAccessory`,
+  the media strip and `preview()` were not documented at all.
+- NativePHP Mobile v4 is what the plugin is developed and tested against; v3
+  is supported by the code but not exercised, and now says so.
+
 ## [0.1.0] - 2026-07-29
 
 ### Added
