@@ -86,7 +86,8 @@
         "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved",
         "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled",
         "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested",
-        "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
+        "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged",
+        "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested"
     ],
     "service_provider": "Vipertecpro\\WysiwygEditor\\WysiwygEditorServiceProvider",
     "hooks": {

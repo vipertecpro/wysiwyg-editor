@@ -298,6 +298,28 @@ describe('Composer presentation', function () {
     })->with(['countStyle', 'maxLengthMode', 'saveStyle']);
 });
 
+describe('Media layout and cap', function () {
+    it('keeps media in the document flow by default', function () {
+        expect(editor()->config('')['mediaLayout'])->toBe('blocks');
+    });
+
+    it('accepts the strip used by social composers', function () {
+        expect(editor()->config('', ['mediaLayout' => 'strip'])['mediaLayout'])->toBe('strip');
+    });
+
+    it('caps media at four, which is what the grids are built for', function () {
+        expect(editor()->config('')['maxMedia'])->toBe(4)
+            ->and(WysiwygEditor::DEFAULT_MAX_MEDIA)->toBe(4);
+    });
+
+    it('lets the host raise, lower or lift the cap', function () {
+        expect(editor()->config('', ['maxMedia' => 10])['maxMedia'])->toBe(10)
+            ->and(editor()->config('', ['maxMedia' => 1])['maxMedia'])->toBe(1)
+            ->and(editor()->config('', ['maxMedia' => 0])['maxMedia'])->toBe(0)
+            ->and(editor()->config('', ['maxMedia' => -3])['maxMedia'])->toBe(0);
+    });
+});
+
 describe('Menu mode', function () {
     it('defaults to the scrolling toolbar', function () {
         expect(editor()->config('')['menu'])->toBe('toolbar');

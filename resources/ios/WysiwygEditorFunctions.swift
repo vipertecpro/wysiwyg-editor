@@ -106,6 +106,7 @@ private enum WysiwygEvents {
     static let saved = "Vipertecpro\\WysiwygEditor\\Events\\ContentSaved"
     static let cancelled = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
     static let mediaRequested = "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested"
+    static let mediaEditRequested = "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested"
     static let changed = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
 }
 
@@ -218,6 +219,8 @@ struct WysiwygConfig {
     let countStyle: String
     let maxLengthMode: String
     let saveStyle: String
+    let mediaLayout: String
+    let maxMedia: Int
     let history: Bool
     let typography: WysiwygTypography
     let spacing: WysiwygSpacing
@@ -246,6 +249,8 @@ struct WysiwygConfig {
         countStyle = p["countStyle"] as? String ?? "text"
         maxLengthMode = p["maxLengthMode"] as? String ?? "hard"
         saveStyle = p["saveStyle"] as? String ?? "text"
+        mediaLayout = p["mediaLayout"] as? String ?? "blocks"
+        maxMedia = max(0, (p["maxMedia"] as? NSNumber)?.intValue ?? 4)
         history = (p["history"] as? NSNumber)?.boolValue ?? true
         typography = WysiwygTypography(p["typography"] as? [String: Any])
         spacing = WysiwygSpacing(named: p["spacing"] as? String ?? "comfortable")
@@ -2402,6 +2407,36 @@ final class WysiwygDocumentModel: ObservableObject {
         insertBlock(block)
     }
 
+    /// Media blocks, in insertion order — what the strip lays out.
+    var mediaEntries: [SegmentEntry] {
+        entries.filter { if case .media = $0.segment { return true } else { return false } }
+    }
+
+    /// Whether another attachment is allowed. `maxMedia == 0` means no cap.
+    var canAttachMore: Bool {
+        config.maxMedia == 0 || mediaEntries.count < config.maxMedia
+    }
+
+    /// Drop one attachment. Any empty text segment left stranded beside it
+    /// goes too, so removing the last photo does not leave a blank card.
+    func removeEntry(id: Int) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+
+        entries.remove(at: index)
+        models.removeValue(forKey: id)
+        segmentChanged()
+    }
+
+    /// Set a block's alt text — the description a screen reader reads out.
+    func setAlt(id: Int, text: String) {
+        guard let index = entries.firstIndex(where: { $0.id == id }),
+              case .media(var block) = entries[index].segment else { return }
+
+        block.attrs["alt"] = text
+        entries[index].segment = .media(block)
+        segmentChanged()
+    }
+
     /**
      Insert or replace a poll.
 
@@ -2429,7 +2464,25 @@ final class WysiwygDocumentModel: ObservableObject {
 
     /// Place a composed block after the focused segment, then give the user a
     /// fresh paragraph below so typing can continue.
+    ///
+    /// In `strip` layout the block is appended instead: attachments there
+    /// belong to the post rather than to a position in the prose, and no
+    /// paragraph is needed after them.
     func insertBlock(_ block: WysiwygBlock) {
+        if config.mediaLayout == "strip" {
+            guard canAttachMore else { return }
+
+            entries.append(SegmentEntry(id: nextId, segment: .media(block)))
+            nextId += 1
+            segmentChanged()
+
+            return
+        }
+
+        insertBlockInFlow(block)
+    }
+
+    private func insertBlockInFlow(_ block: WysiwygBlock) {
         let at = entries.firstIndex { models[$0.id] === focused }
         let insertAt = at.map { $0 + 1 } ?? entries.count
 
@@ -2727,6 +2780,8 @@ private struct EditorScreen: View {
     @State private var sheet: SheetKind?
     /// The poll being composed, if any. Non-nil means the composer is open.
     @State private var pollDraft: PollDraft?
+    /// The attachment whose description is being written.
+    @State private var describing: SegmentEntry?
     /// Measured height per TEXT segment — each editor grows to fit.
     @State private var heights: [Int: CGFloat] = [:]
 
@@ -2743,12 +2798,18 @@ private struct EditorScreen: View {
                 topBar
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(document.entries) { entry in
+                        ForEach(flowEntries) { entry in
                             segmentView(entry: entry)
                         }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if document.config.mediaLayout == "strip", !document.mediaEntries.isEmpty {
+                    MediaStrip(document: document, theme: theme,
+                               onEdit: requestMediaEdit,
+                               onDescribe: { describing = $0 })
+                }
 
                 // The ring rides in the toolbar when there IS one; only the
                 // text readout, or a ring with no bar to sit in, takes a row.
@@ -2771,6 +2832,11 @@ private struct EditorScreen: View {
             .padding(.bottom, max(0, keyboard.height - geo.safeAreaInsets.bottom))
             .overlay(sheetOverlay)
             .overlay(pollOverlay)
+            .onChange(of: describing?.id) { _ in
+                guard let entry = describing else { return }
+                describing = nil
+                promptForAlt(entry)
+            }
         }
         .background(theme.backgroundColor.ignoresSafeArea())
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -3056,6 +3122,50 @@ private struct EditorScreen: View {
         .padding(.horizontal, 16)
     }
 
+    /// What the document area draws. In `strip` layout media is pulled out of
+    /// the flow, so only the text is left here.
+    private var flowEntries: [SegmentEntry] {
+        guard document.config.mediaLayout == "strip" else { return document.entries }
+
+        return document.entries.filter {
+            if case .text = $0.segment { return true } else { return false }
+        }
+    }
+
+    /// The editor does not crop or filter — that is the picker's job, and the
+    /// host already chose which one it uses. Say which block, and step back.
+    private func requestMediaEdit(_ block: WysiwygBlock) {
+        var payload: [String: Any] = [
+            "kind": block.type,
+            "uploadId": block.attrs["uploadId"] ?? "",
+            "source": block.attrs["src"]?.isEmpty == false
+                ? block.attrs["src"]!
+                : (block.attrs["localPath"] ?? ""),
+        ]
+        if let id = document.config.id { payload["id"] = id }
+        LaravelBridge.shared.send?(WysiwygEvents.mediaEditRequested, payload)
+    }
+
+    /// Ask for the description a screen reader will read out.
+    private func promptForAlt(_ entry: SegmentEntry) {
+        guard case .media(let block) = entry.segment else { return }
+
+        let strings = document.config.strings
+        let alert = UIAlertController(title: localized(strings, "altTitle", "Description"),
+                                      message: nil, preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = localized(strings, "altPlaceholder",
+                                          "Describe this for people who cannot see it")
+            field.text = block.attrs["alt"]
+        }
+        alert.addAction(UIAlertAction(title: localized(strings, "cancel", "Cancel"), style: .cancel))
+        alert.addAction(UIAlertAction(title: localized(strings, "altSave", "Done"), style: .default) { _ in
+            document.setAlt(id: entry.id, text: alert.textFields?.first?.text ?? "")
+        })
+
+        WysiwygEditorPresenter.topController()?.present(alert, animated: true)
+    }
+
     private var showsToolbar: Bool {
         !(document.config.toolbar.isEmpty && !document.config.history)
     }
@@ -3157,6 +3267,150 @@ private struct EditorScreen: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 4)
         }
+    }
+}
+
+// MARK: - Media strip
+
+/**
+ Attachments as a horizontal row of thumbnails under the text.
+
+ What a social composer does, and for a good reason: a photo attached to a
+ short post belongs to the POST, not to a position in the prose, and a
+ full-width card each would push the writing off the screen before the second
+ one landed.
+
+ Each thumbnail carries its own controls, because that is where the user
+ expects to find them — remove, a description for people who cannot see it,
+ and edit, which hands the job back to the host's own picker.
+ */
+private struct MediaStrip: View {
+    @ObservedObject var document: WysiwygDocumentModel
+    let theme: WysiwygTheme
+    let onEdit: (WysiwygBlock) -> Void
+    let onDescribe: (SegmentEntry) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(document.mediaEntries) { entry in
+                    if case .media(let block) = entry.segment {
+                        thumbnail(entry: entry, block: block)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+    }
+
+    private func thumbnail(entry: SegmentEntry, block: WysiwygBlock) -> some View {
+        ZStack(alignment: .topTrailing) {
+            MediaThumbnail(block: block, theme: theme)
+                .frame(width: 150, height: 150)
+                .clipShape(RoundedCornerRect(radius: 14))
+
+            // Remove, top-right, over a scrim so it reads on any photo.
+            Button {
+                document.removeEntry(id: entry.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Color.black.opacity(0.55)))
+            }
+            .padding(6)
+
+            VStack {
+                Spacer()
+                HStack {
+                    Button {
+                        onDescribe(entry)
+                    } label: {
+                        Text(localized(document.config.strings, "altBadge", "+ALT"))
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 7)
+                            .frame(height: 22)
+                            .background(Capsule().fill(Color.black.opacity(0.55)))
+                    }
+                    Spacer()
+                    Button {
+                        onEdit(block)
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Color.black.opacity(0.55)))
+                    }
+                }
+                .padding(6)
+            }
+            .frame(width: 150, height: 150)
+        }
+    }
+}
+
+/// The picture on a thumbnail: the decoded image, a poster for video, or the
+/// block's own glyph when there is nothing to show yet.
+private struct MediaThumbnail: View {
+    let block: WysiwygBlock
+    let theme: WysiwygTheme
+
+    @State private var image: UIImage?
+
+    private var source: String {
+        if block.type == "video", let poster = block.attrs["poster"], !poster.isEmpty { return poster }
+        if let src = block.attrs["src"], !src.isEmpty { return src }
+        return block.attrs["localPath"] ?? ""
+    }
+
+    var body: some View {
+        ZStack {
+            theme.textColor.opacity(0.08)
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                IconShape(data: toolIcons[cardIconKey(block.type)]?.path ?? "")
+                    .stroke(style: StrokeStyle(lineWidth: 2 * 26 / 24, lineCap: .round, lineJoin: .round))
+                    .foregroundColor(theme.textColor.opacity(0.45))
+                    .frame(width: 26, height: 26)
+            }
+
+            // A poll has no picture at all, so it says what it is.
+            if block.type == "poll" {
+                VStack {
+                    Spacer()
+                    Text(block.attrs["question"] ?? "Poll")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(theme.textColor)
+                        .lineLimit(2)
+                        .padding(8)
+                }
+            }
+        }
+        .task(id: source) {
+            guard !source.isEmpty, block.type == "image" || block.type == "video" else { return }
+            let path = source
+            image = await Task.detached(priority: .userInitiated) {
+                decodeMediaImage(path, maxPixels: 600)
+            }.value
+        }
+    }
+}
+
+/// Rounding all four corners without reaching for `cornerRadius`, which clips
+/// differently across the versions this supports.
+private struct RoundedCornerRect: Shape {
+    let radius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Path(UIBezierPath(roundedRect: rect, cornerRadius: radius).cgPath)
     }
 }
 

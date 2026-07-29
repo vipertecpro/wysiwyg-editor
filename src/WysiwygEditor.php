@@ -158,6 +158,12 @@ class WysiwygEditor
         'toolPoll' => 'Poll',
         'toolDivider' => 'Divider',
         'toolEmbed' => 'Embed',
+        // Media strip
+        'altBadge' => '+ALT',
+        'altTitle' => 'Description',
+        'altPlaceholder' => 'Describe this for people who cannot see it',
+        'altSave' => 'Done',
+        'removeMedia' => 'Remove',
         'embedTitle' => 'Embed a link',
         'embedPlaceholder' => 'https://youtube.com/watch?v=…',
         'embedAdd' => 'Embed',
@@ -170,6 +176,33 @@ class WysiwygEditor
         'pollInsert' => 'Insert poll',
         'pollUpdate' => 'Update poll',
     ];
+
+    /**
+     * How many pieces of media one document may carry, unless the host says
+     * otherwise. `0` means no limit.
+     *
+     * Four is not arbitrary — it is what every grid below is built to lay out,
+     * and what X, Facebook and Instagram all landed on independently.
+     */
+    public const DEFAULT_MAX_MEDIA = 4;
+
+    /**
+     * Where media sits while you are writing.
+     *
+     *  - blocks: each image, video or poll is a card in the document flow, in
+     *            the position it was inserted (the default — right for notes,
+     *            articles and anything long-form)
+     *  - strip:  media is pulled OUT of the flow into one horizontally
+     *            scrolling row of thumbnails under the text, each with its own
+     *            remove, alt-text and edit controls
+     *
+     * Social composers use the strip: attachments there belong to the POST,
+     * not to a position in the prose, and a full-width card per photo pushes
+     * the writing off the screen.
+     *
+     * @var list<string>
+     */
+    public const MEDIA_LAYOUTS = ['blocks', 'strip'];
 
     /**
      * How the live count is drawn.
@@ -487,6 +520,10 @@ class WysiwygEditor
             'countStyle' => $this->pick($options['countStyle'] ?? null, self::COUNT_STYLES),
             'maxLengthMode' => $this->pick($options['maxLengthMode'] ?? null, self::MAX_LENGTH_MODES),
             'saveStyle' => $this->pick($options['saveStyle'] ?? null, self::SAVE_STYLES),
+            'mediaLayout' => $this->pick($options['mediaLayout'] ?? null, self::MEDIA_LAYOUTS),
+            // Four is what social composers settle on: enough to tell a story,
+            // few enough to lay out in a grid the reader can take in at once.
+            'maxMedia' => max(0, (int) ($options['maxMedia'] ?? self::DEFAULT_MAX_MEDIA)),
             // Undo/redo lead the toolbar by default. Composers built for short
             // posts do not show them, and with no other tools enabled they
             // would be the only thing left on the bar.
