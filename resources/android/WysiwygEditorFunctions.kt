@@ -82,6 +82,8 @@ object WysiwygEditorFunctions {
     private const val EVENT_CANCELLED = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
     private const val EVENT_MEDIA = "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested"
     private const val EVENT_CHANGED = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
+    private const val EVENT_MEDIA_EDIT = "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested"
+    private const val EVENT_ACCESSORY = "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
 
     /** The four surfaces the editor colours. */
     val THEME_KEYS = listOf("background", "text", "accent", "highlight")
@@ -99,6 +101,13 @@ object WysiwygEditorFunctions {
 
     /** Toolbar tools that ask the HOST for media rather than formatting text. */
     val INSERT_TOOLS = listOf("image", "video", "file")
+
+    /**
+     * Block types the media strip carries. A poll is content you EDIT and a
+     * divider is punctuation — neither is a file you attached, so neither
+     * belongs in a row of thumbnails.
+     */
+    val STRIPPABLE_TYPES = setOf("image", "video", "file")
 
     /**
      * Host-app theme overrides. Every color is optional: null falls back to the
@@ -459,6 +468,8 @@ object WysiwygEditorFunctions {
                         }
                     },
                     onRequestMedia = { kind -> requestMedia(kind, config.id) },
+                    onMediaEdit = { block -> requestMediaEdit(block, config.id) },
+                    onAccessoryTapped = { accessory -> accessoryTapped(accessory, config.id) },
                 )
             }
 
@@ -479,6 +490,33 @@ object WysiwygEditorFunctions {
                 id?.let { put("id", it) }
             }
             NativeActionCoordinator.dispatchEvent(activity, event, payload.toString())
+        }
+
+        /**
+         * The user tapped edit on an attachment. The editor does not crop or
+         * filter — that is the picker's job, and the host already chose which
+         * one it uses.
+         */
+        private fun requestMediaEdit(block: WysiwygBlock, id: String?) {
+            val payload = JSONObject().apply {
+                put("kind", block.type)
+                put("uploadId", block.attrs["uploadId"].orEmpty())
+                put(
+                    "source",
+                    block.attrs["src"]?.takeIf { it.isNotEmpty() } ?: block.attrs["localPath"].orEmpty(),
+                )
+                id?.let { put("id", it) }
+            }
+            NativeActionCoordinator.dispatchEvent(activity, EVENT_MEDIA_EDIT, payload.toString())
+        }
+
+        /** One of the host's own rows was tapped. */
+        private fun accessoryTapped(accessory: String, id: String?) {
+            val payload = JSONObject().apply {
+                put("accessory", accessory)
+                id?.let { put("id", it) }
+            }
+            NativeActionCoordinator.dispatchEvent(activity, EVENT_ACCESSORY, payload.toString())
         }
 
         /** Ask the HOST to pick media — the editor ships no picker. */
@@ -3193,6 +3231,10 @@ internal fun EditorScreen(
     onCancel: () -> Unit,
     onSave: () -> Unit,
     onRequestMedia: (String) -> Unit,
+    /** The user asked to edit an attachment — hand it back to the host. */
+    onMediaEdit: (WysiwygBlock) -> Unit = {},
+    /** One of the host's own rows was tapped. */
+    onAccessoryTapped: (String) -> Unit = {},
 ) {
     val night = isSystemInDarkTheme()
     val theme = config.theme
@@ -3244,6 +3286,25 @@ internal fun EditorScreen(
          * user a fresh paragraph below so typing can continue.
          */
         fun insertBlock(block: WysiwygBlock) {
+            // In `strip` layout an attachment belongs to the POST rather than
+            // to a position in the prose, so it is appended and needs no
+            // paragraph after it.
+            if (config.mediaLayout == "strip" &&
+                block.type in WysiwygEditorFunctions.STRIPPABLE_TYPES
+            ) {
+                val attached = entries.count {
+                    (it.segment as? Segment.Media)?.block?.type in
+                        WysiwygEditorFunctions.STRIPPABLE_TYPES
+                }
+
+                if (config.maxMedia > 0 && attached >= config.maxMedia) return
+
+                entries.add(SegmentEntry(nextId[0]++, Segment.Media(block)))
+                rebuildDocument()
+
+                return
+            }
+
             val at = entries.indexOfFirst { controllers[it.id] === focused.value }
             val insertAt = if (at >= 0) at + 1 else entries.size
             entries.add(insertAt, SegmentEntry(nextId[0]++, Segment.Media(block)))
@@ -3437,7 +3498,20 @@ internal fun EditorScreen(
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState()),
                 ) {
-                    entries.forEachIndexed { index, entry ->
+                    // In `strip` layout attachments are pulled OUT of the
+                    // flow — without this they render twice, once as a card
+                    // here and once as a thumbnail below.
+                    val flowEntries = if (config.mediaLayout == "strip") {
+                        entries.filter { entry ->
+                            val type = (entry.segment as? Segment.Media)?.block?.type
+
+                            type == null || type !in WysiwygEditorFunctions.STRIPPABLE_TYPES
+                        }
+                    } else {
+                        entries.toList()
+                    }
+
+                    flowEntries.forEachIndexed { index, entry ->
                         when (val segment = entry.segment) {
                             is Segment.Media -> MediaCard(
                             segment.block,
@@ -3541,8 +3615,43 @@ internal fun EditorScreen(
                 }
             }
 
+            // ── Attachments, when they live in a strip ───────────────────────────
+            if (config.mediaLayout == "strip") {
+                val attachments = entries.filter { entry ->
+                    val type = (entry.segment as? Segment.Media)?.block?.type
+
+                    type != null && type in WysiwygEditorFunctions.STRIPPABLE_TYPES
+                }
+
+                if (attachments.isNotEmpty()) {
+                    MediaStrip(
+                        entries = attachments,
+                        foreground = foreground,
+                        strings = config.strings,
+                        onRemove = { id ->
+                            entries.removeAll { it.id == id }
+                            controllers.remove(id)
+                            rebuildDocument()
+                        },
+                        onDescribe = { id -> showAltDialog(activity, entries, id, config.strings) { rebuildDocument() } },
+                        onEdit = onMediaEdit,
+                    )
+                }
+            }
+
+            // ── The host's own rows, under the media ─────────────────────────────
+            if (accessories.isNotEmpty()) {
+                AccessoryRows(accessories, foreground, accent, onAccessoryTapped)
+            }
+
             // ── Counts readout ──────────────────────────────────────────────────
-            val readout = countsReadout(config, length.value, words.value)
+            // The ring already counts toward the cap from inside the bar, so a
+            // text readout beside it would say the same thing twice. It still
+            // takes a row when there is no bar for the ring to sit in.
+            val ringInBar = config.countStyle == "ring" &&
+                config.maxLength > 0 &&
+                !(config.toolbar.isEmpty() && !config.history)
+            val readout = if (ringInBar) "" else countsReadout(config, length.value, words.value)
             if (readout.isNotEmpty()) {
                 val over = config.maxLength > 0 && length.value >= config.maxLength
                 Row(
@@ -4115,7 +4224,7 @@ private fun ToolbarRow(
             // A ring counts toward a limit, so without one there is nothing
             // to fill. It rides at the END of the bar next to the media
             // buttons, which is where every composer that has one puts it.
-            if (config.countStyle == "ring" && config.maxLength > 0) {
+            if (config.countStyle == "ring" && config.maxLength > 0 && config.toolbar.isNotEmpty()) {
                 Box(modifier = Modifier.padding(start = 6.dp, end = 14.dp)) {
                     CountRing(length, config.maxLength, foreground, highlightColor)
                 }
@@ -4313,6 +4422,207 @@ private fun ToolButton(
                     join = StrokeJoin.Round,
                 ),
             )
+        }
+    }
+}
+
+/** The host's rows: an icon, a label, and whatever value the app set. */
+@Composable
+private fun AccessoryRows(
+    accessories: List<WysiwygAccessory>,
+    foreground: Color,
+    accent: Color,
+    onTap: (String) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        accessories.forEach { accessory ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clickable { onTap(accessory.id) }
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
+            ) {
+                val icon = TOOL_ICONS[accessory.icon]
+
+                if (icon != null) {
+                    Canvas(modifier = Modifier.size(18.dp)) {
+                        drawPath(
+                            path = buildIconPath(icon.path, size.width),
+                            color = accent,
+                            style = Stroke(
+                                width = icon.stroke * size.width / 24f,
+                                cap = StrokeCap.Round,
+                                join = StrokeJoin.Round,
+                            ),
+                        )
+                    }
+                }
+
+                BasicText(
+                    text = accessory.label,
+                    style = TextStyle(color = accent, fontSize = 15.sp, fontWeight = FontWeight.Medium),
+                )
+
+                Box(modifier = Modifier.weight(1f))
+
+                if (accessory.value.isNotEmpty()) {
+                    BasicText(
+                        text = accessory.value,
+                        style = TextStyle(color = foreground.copy(alpha = 0.55f), fontSize = 14.sp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Attachments as a horizontal row of thumbnails under the text.
+ *
+ * What a social composer does, and for a good reason: a photo attached to a
+ * short post belongs to the POST, not to a position in the prose, and a
+ * full-width card each would push the writing off the screen before the second
+ * one landed. Mirrors the iOS MediaStrip.
+ */
+@Composable
+private fun MediaStrip(
+    entries: List<SegmentEntry>,
+    foreground: Color,
+    strings: Map<String, String>,
+    onRemove: (Int) -> Unit,
+    onDescribe: (Int) -> Unit,
+    onEdit: (WysiwygBlock) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+    ) {
+        entries.forEach { entry ->
+            val block = (entry.segment as? Segment.Media)?.block ?: return@forEach
+
+            Box(modifier = Modifier.size(150.dp)) {
+                MediaThumbnail(block, foreground)
+
+                // Remove, top-right, over a scrim so it reads on any photo.
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .clickable { onRemove(entry.id) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    BasicText(
+                        text = "\u2715",
+                        style = TextStyle(color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold),
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .clickable { onDescribe(entry.id) }
+                            .padding(horizontal = 7.dp, vertical = 3.dp),
+                    ) {
+                        BasicText(
+                            text = localized(strings, "altBadge", "+ALT"),
+                            style = TextStyle(color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                        )
+                    }
+
+                    Box(modifier = Modifier.weight(1f))
+
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .clickable { onEdit(block) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        BasicText(
+                            text = "\u270E",
+                            style = TextStyle(color = Color.White, fontSize = 12.sp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The picture on a thumbnail: the decoded image, a poster for video, or the
+ * block's own glyph when there is nothing to show yet.
+ */
+@Composable
+private fun MediaThumbnail(block: WysiwygBlock, foreground: Color) {
+    val source = when {
+        block.type == "video" && block.attrs["poster"].orEmpty().isNotEmpty() -> block.attrs["poster"]!!
+        block.attrs["src"].orEmpty().isNotEmpty() -> block.attrs["src"]!!
+        else -> block.attrs["localPath"].orEmpty()
+    }
+
+    val bitmap = androidx.compose.runtime.remember(source) {
+        androidx.compose.runtime.mutableStateOf<android.graphics.Bitmap?>(null)
+    }
+
+    if (source.isNotEmpty() && (block.type == "image" || block.type == "video")) {
+        LaunchedEffect(source) {
+            bitmap.value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                decodeMediaImage(source, 600)
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .size(150.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(foreground.copy(alpha = 0.08f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        val image = bitmap.value
+
+        if (image != null) {
+            Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = block.attrs["alt"].orEmpty(),
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(150.dp),
+            )
+        } else {
+            val icon = TOOL_ICONS[cardIconKey(block.type)]
+
+            if (icon != null) {
+                Canvas(modifier = Modifier.size(26.dp)) {
+                    drawPath(
+                        path = buildIconPath(icon.path, size.width),
+                        color = foreground.copy(alpha = 0.45f),
+                        style = Stroke(
+                            width = icon.stroke * size.width / 24f,
+                            cap = StrokeCap.Round,
+                            join = StrokeJoin.Round,
+                        ),
+                    )
+                }
+            }
         }
     }
 }
@@ -4656,6 +4966,40 @@ private fun PaletteRow(colors: List<String>, foreground: Color, onPick: (String?
  * No preview is fetched — see [embedProvider]. The card names the service and
  * shows a title or thumbnail only if the HOST supplied one.
  */
+/**
+ * Ask for the description a screen reader will read out.
+ */
+private fun showAltDialog(
+    activity: FragmentActivity,
+    entries: MutableList<SegmentEntry>,
+    entryId: Int,
+    strings: Map<String, String>,
+    onDone: () -> Unit,
+) {
+    val index = entries.indexOfFirst { it.id == entryId }
+
+    if (index < 0) return
+
+    val block = (entries[index].segment as? Segment.Media)?.block ?: return
+
+    val input = android.widget.EditText(activity).apply {
+        setText(block.attrs["alt"].orEmpty())
+        hint = localized(strings, "altPlaceholder", "Describe this for people who cannot see it")
+        setSingleLine()
+    }
+
+    android.app.AlertDialog.Builder(activity)
+        .setTitle(localized(strings, "altTitle", "Description"))
+        .setView(input)
+        .setNegativeButton(localized(strings, "cancel", "Cancel"), null)
+        .setPositiveButton(localized(strings, "altSave", "Done")) { _, _ ->
+            block.attrs["alt"] = input.text.toString()
+            entries[index] = SegmentEntry(entries[index].id, Segment.Media(block))
+            onDone()
+        }
+        .show()
+}
+
 private fun showEmbedDialog(
     activity: FragmentActivity,
     strings: Map<String, String>,
