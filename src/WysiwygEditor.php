@@ -172,6 +172,43 @@ class WysiwygEditor
     ];
 
     /**
+     * How the live count is drawn.
+     *
+     *  - text: "180 chars · 32 words" under the document (the default)
+     *  - ring: a filling circle, the way X counts down to its limit. Needs
+     *          `maxLength` — a ring with nothing to fill toward is meaningless,
+     *          so it falls back to text when none is set.
+     *
+     * @var list<string>
+     */
+    public const COUNT_STYLES = ['text', 'ring'];
+
+    /**
+     * What `maxLength` does when the user reaches it.
+     *
+     *  - hard: further typing is rejected (the default)
+     *  - soft: typing continues, the overflow is marked, and SAVE is blocked
+     *
+     * Soft is what social composers do. Refusing the keystroke hides the
+     * problem — the writer cannot see how much they have to cut.
+     *
+     * @var list<string>
+     */
+    public const MAX_LENGTH_MODES = ['hard', 'soft'];
+
+    /**
+     * How the save action is drawn.
+     *
+     *  - text: a plain text button (the default)
+     *  - filled: a filled pill, dimmed until the document may actually be
+     *            saved — the shape every social composer uses for its
+     *            primary action
+     *
+     * @var list<string>
+     */
+    public const SAVE_STYLES = ['text', 'filled'];
+
+    /**
      * Editing density. Values are points on iOS and dp on Android, so the two
      * platforms lay out the same — until now Android used raw pixels here and
      * was measurably tighter than iOS on the same document.
@@ -423,6 +460,13 @@ class WysiwygEditor
             'changeDebounce' => max(0, (int) ($options['changeDebounce'] ?? 0)),
             'haptics' => (bool) ($options['haptics'] ?? true),
             'menu' => $this->resolveMenu($options['menu'] ?? null),
+            'countStyle' => $this->pick($options['countStyle'] ?? null, self::COUNT_STYLES),
+            'maxLengthMode' => $this->pick($options['maxLengthMode'] ?? null, self::MAX_LENGTH_MODES),
+            'saveStyle' => $this->pick($options['saveStyle'] ?? null, self::SAVE_STYLES),
+            // Undo/redo lead the toolbar by default. Composers built for short
+            // posts do not show them, and with no other tools enabled they
+            // would be the only thing left on the bar.
+            'history' => (bool) ($options['history'] ?? true),
             'typography' => $this->resolveTypography($options['typography'] ?? []),
             'spacing' => $this->resolveSpacing($options['spacing'] ?? null),
             // Explicit overrides win; the two scheme maps below are the host
@@ -491,6 +535,17 @@ class WysiwygEditor
     protected function resolveSpacing(mixed $spacing): string
     {
         return isset(self::SPACING_SCALES[$spacing]) ? $spacing : 'comfortable';
+    }
+
+    /**
+     * Choose one of `$allowed`, falling back to the first — which is always
+     * the option's documented default.
+     *
+     * @param  list<string>  $allowed
+     */
+    protected function pick(mixed $value, array $allowed): string
+    {
+        return in_array($value, $allowed, true) ? $value : $allowed[0];
     }
 
     /**
@@ -614,6 +669,13 @@ class WysiwygEditor
      */
     protected function resolveToolbar(array $options): array
     {
+        // An explicit `toolbar => []` means NO toolbar — a plain-text composer
+        // like X's is a real requirement, and it has to be distinguishable
+        // from "you asked for tools I do not have", which still falls back.
+        if (array_key_exists('toolbar', $options) && $options['toolbar'] === []) {
+            return [];
+        }
+
         $requested = $options['toolbar']
             ?? self::TOOLBAR_PRESETS[$options['preset'] ?? '']
             ?? self::TOOLBAR_PRESETS['full'];

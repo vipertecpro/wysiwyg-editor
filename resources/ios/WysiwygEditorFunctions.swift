@@ -191,6 +191,10 @@ struct WysiwygConfig {
     let maxLength: Int
     let counts: [String]
     let menu: String
+    let countStyle: String
+    let maxLengthMode: String
+    let saveStyle: String
+    let history: Bool
     let typography: WysiwygTypography
     let spacing: WysiwygSpacing
     let validation: [String: Any]
@@ -202,13 +206,23 @@ struct WysiwygConfig {
 
     init(_ p: [String: Any]) {
         content = p["content"] as? String ?? ""
-        let requested = (p["toolbar"] as? [String])?.filter { Self.allTools.contains($0) } ?? Self.allTools
-        toolbar = requested.isEmpty ? Self.allTools : requested
+        // An explicit empty list means NO toolbar; a list of names we do not
+        // know falls back, so a typo cannot silently strip the bar.
+        if let asked = p["toolbar"] as? [String] {
+            let known = asked.filter { Self.allTools.contains($0) }
+            toolbar = asked.isEmpty ? [] : (known.isEmpty ? Self.allTools : known)
+        } else {
+            toolbar = Self.allTools
+        }
         title = p["title"] as? String ?? ""
         placeholder = p["placeholder"] as? String ?? ""
         maxLength = max(0, (p["maxLength"] as? NSNumber)?.intValue ?? 0)
         counts = p["counts"] as? [String] ?? []
         menu = p["menu"] as? String ?? "toolbar"
+        countStyle = p["countStyle"] as? String ?? "text"
+        maxLengthMode = p["maxLengthMode"] as? String ?? "hard"
+        saveStyle = p["saveStyle"] as? String ?? "text"
+        history = (p["history"] as? NSNumber)?.boolValue ?? true
         typography = WysiwygTypography(p["typography"] as? [String: Any])
         spacing = WysiwygSpacing(named: p["spacing"] as? String ?? "comfortable")
         validation = p["validation"] as? [String: Any] ?? [:]
@@ -1790,7 +1804,10 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         guard textView != nil else { return true }
 
         // maxLength — counts PLAIN characters (markers & newlines excluded).
-        if config.maxLength > 0, !text.isEmpty {
+        // In `soft` mode the keystroke is allowed through: the overflow is
+        // marked and SAVE is blocked instead. Refusing it hides the problem,
+        // because the writer cannot see how much they have to cut.
+        if config.maxLength > 0, config.maxLengthMode == "hard", !text.isEmpty {
             let inserted = text.reduce(0) { $0 + ($1 == "\n" ? 0 : 1) }
             if inserted > 0 {
                 let deleted = plainCount(in: range)
@@ -2496,6 +2513,16 @@ private struct RichTextView: UIViewRepresentable {
         tv.typingAttributes = model.styler.attributes(block: "p", marks: MarkSet())
         // The outer ScrollView scrolls; each editor sizes to its content.
         tv.isScrollEnabled = false
+        // A non-scrolling UITextView reports an intrinsic width as wide as its
+        // LONGEST LINE. Left alone it hands that width to SwiftUI, which sizes
+        // the whole editor to it — so one long paragraph pushes the top bar
+        // and toolbar off the screen and the text never wraps. Refusing to
+        // resist horizontal compression makes it take the width it is given
+        // and wrap inside it, which is the only thing we ever want here.
+        tv.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        tv.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        tv.textContainer.widthTracksTextView = true
+        tv.textContainer.lineBreakMode = .byWordWrapping
 
         // Placeholder — a plain overlaid label, hidden as soon as there is text.
         let placeholder = UILabel()
@@ -2648,10 +2675,12 @@ private struct EditorScreen: View {
                         palette = nil
                     }
                 }
-                if let focused = document.focused {
+                if let focused = document.focused,
+                   !(document.config.toolbar.isEmpty && !document.config.history) {
                     ToolbarRow(model: focused, palette: $palette, sheet: $sheet)
                 }
             }
+            .frame(maxWidth: .infinity)
             .padding(.bottom, max(0, keyboard.height - geo.safeAreaInsets.bottom))
             .overlay(sheetOverlay)
             .overlay(pollOverlay)
@@ -2909,6 +2938,7 @@ private struct EditorScreen: View {
                     onChange: { document.segmentChanged() },
                     onBackspaceAtStart: { document.handleBackspaceAtStart(entryId: entry.id) }
                 )
+                .frame(maxWidth: .infinity)
                 .frame(height: heights[entry.id] ?? 48)
             }
         }
@@ -2927,20 +2957,7 @@ private struct EditorScreen: View {
                     .font(.system(size: 16))
                     .foregroundColor(theme.textColor)
                 Spacer()
-                Button(localized(document.config.strings, "save", "Save")) {
-                    let blocks = document.blocks()
-                    if let problem = validateDocument(blocks, document.config.validation,
-                                                      document.config.strings) {
-                        // Blocked natively — a failing document never makes the
-                        // round-trip to PHP just to be rejected.
-                        validationMessage = problem
-                        return
-                    }
-                    let out = HtmlCoder.emit(blocks)
-                    onSave(out.html, out.text, JsonCoder.encode(blocks))
-                }
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(theme.accentColor)
+                saveButton
             }
             Text(document.config.title)
                 .font(.system(size: 17, weight: .semibold))
@@ -2952,16 +2969,146 @@ private struct EditorScreen: View {
         .padding(.horizontal, 16)
     }
 
-    private var counter: some View {
-        let over = document.config.maxLength > 0 && document.charCount >= document.config.maxLength
-        return HStack {
-            Spacer()
-            Text(countsReadout(document.config, document.charCount, document.wordCount))
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(over ? .red : theme.textColor.opacity(0.5))
+    /// Over the soft cap, empty, or short of a rule — either way saving is
+    /// refused, so the button should look refused rather than lie and then
+    /// complain.
+    ///
+    /// Empty counts as refused only for the FILLED style: that shape is a
+    /// primary action in a composer, and every composer greys it out until
+    /// there is something to send. The plain text button keeps working on an
+    /// empty document, because an editor that cannot be closed via Save with
+    /// nothing in it would be a regression.
+    private var canSave: Bool {
+        if overLimit { return false }
+        if document.blocks().allSatisfy({ $0.isText && $0.isEmpty }) { return false }
+        return validateDocument(document.blocks(), document.config.validation,
+                                document.config.strings) == nil
+    }
+
+    /// `hard` mode never gets here — the keystroke was rejected — so this is
+    /// only ever true in `soft` mode.
+    private var overLimit: Bool {
+        document.config.maxLength > 0 && document.charCount > document.config.maxLength
+    }
+
+    @ViewBuilder
+    private var saveButton: some View {
+        let label = localized(document.config.strings, "save", "Save")
+        let filled = document.config.saveStyle == "filled"
+
+        Button {
+            let blocks = document.blocks()
+            if let problem = validateDocument(blocks, document.config.validation,
+                                              document.config.strings) {
+                // Blocked natively — a failing document never makes the
+                // round-trip to PHP just to be rejected.
+                validationMessage = problem
+                return
+            }
+            let out = HtmlCoder.emit(blocks)
+            onSave(out.html, out.text, JsonCoder.encode(blocks))
+        } label: {
+            if filled {
+                Text(label)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(theme.backgroundColor)
+                    .padding(.horizontal, 16)
+                    .frame(height: 34)
+                    .background(Capsule().fill(theme.accentColor.opacity(canSave ? 1 : 0.4)))
+            } else {
+                Text(label)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(theme.accentColor)
+            }
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 4)
+        // Only the filled style disables: a plain text button that does
+        // nothing when tapped reads as broken, so there it still explains why.
+        .disabled(filled && !canSave)
+    }
+
+    @ViewBuilder
+    private var counter: some View {
+        // A ring counts toward a limit, so without one there is nothing to
+        // fill and it falls back to the text readout.
+        if document.config.countStyle == "ring", document.config.maxLength > 0 {
+            HStack {
+                Spacer()
+                CountRing(count: document.charCount,
+                          limit: document.config.maxLength,
+                          theme: theme)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 6)
+        } else {
+            let over = document.config.maxLength > 0 && document.charCount >= document.config.maxLength
+            HStack {
+                Spacer()
+                Text(countsReadout(document.config, document.charCount, document.wordCount))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(over ? .red : theme.textColor.opacity(0.5))
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 4)
+        }
+    }
+}
+
+// MARK: - Count ring
+
+/**
+ A filling circle counting toward `limit`, the way social composers do.
+
+ Three states, because a bare percentage does not tell a writer what to do:
+ filling quietly, a warning once the end is in sight, and — past the limit —
+ the ring stops growing and shows how far OVER they are, which is the number
+ they actually need.
+ */
+private struct CountRing: View {
+    let count: Int
+    let limit: Int
+    let theme: WysiwygTheme
+
+    /// The last stretch, where X switches its ring to amber.
+    private static let warnAt = 20
+
+    private var remaining: Int { limit - count }
+    private var over: Bool { remaining < 0 }
+    private var nearingEnd: Bool { remaining <= Self.warnAt && !over }
+
+    private var progress: CGFloat {
+        guard limit > 0 else { return 0 }
+        return min(1, CGFloat(count) / CGFloat(limit))
+    }
+
+    private var tint: Color {
+        if over { return .red }
+        if nearingEnd { return .orange }
+        return theme.accentColor
+    }
+
+    /// Grows once the count matters, so the number is readable exactly when
+    /// the writer starts caring about it.
+    private var diameter: CGFloat { nearingEnd || over ? 30 : 22 }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(theme.textColor.opacity(0.15), lineWidth: 2)
+            Circle()
+                .trim(from: 0, to: over ? 1 : progress)
+                .stroke(tint, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+
+            // Only ever the remaining count — a writer near the cap needs to
+            // know how much is left, not how much they have used.
+            if nearingEnd || over {
+                Text("\(remaining)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(tint)
+            }
+        }
+        .frame(width: diameter, height: diameter)
+        .animation(.easeOut(duration: 0.15), value: diameter)
     }
 }
 
@@ -3323,13 +3470,17 @@ private struct ToolbarRow: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
-                // Undo / redo are always present, ahead of the configured tools.
-                button("undo", active: false, enabled: model.canUndo) { model.undo() }
-                button("redo", active: false, enabled: model.canRedo) { model.redo() }
-                Rectangle()
-                    .fill(theme.textColor.opacity(0.15))
-                    .frame(width: 1, height: 22)
-                    .padding(.horizontal, 6)
+                // Undo / redo lead the configured tools, unless turned off.
+                if model.config.history {
+                    button("undo", active: false, enabled: model.canUndo) { model.undo() }
+                    button("redo", active: false, enabled: model.canRedo) { model.redo() }
+                    if !model.config.toolbar.isEmpty {
+                        Rectangle()
+                            .fill(theme.textColor.opacity(0.15))
+                            .frame(width: 1, height: 22)
+                            .padding(.horizontal, 6)
+                    }
+                }
 
                 if sheetMode {
                     compactTools

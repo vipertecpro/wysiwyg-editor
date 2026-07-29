@@ -258,6 +258,46 @@ describe('Localization', function () {
     });
 });
 
+describe('Composer presentation', function () {
+    it('treats an explicit empty toolbar as none at all', function () {
+        expect(editor()->config('', ['toolbar' => []])['toolbar'])->toBe([]);
+    });
+
+    it('still falls back when every requested tool is unknown', function () {
+        expect(editor()->config('', ['toolbar' => ['nope']])['toolbar'])
+            ->toBe(WysiwygEditor::TOOLBAR_PRESETS['full']);
+    });
+
+    it('defaults each presentation option to its first documented value', function () {
+        $config = editor()->config('');
+
+        expect($config['countStyle'])->toBe('text')
+            ->and($config['maxLengthMode'])->toBe('hard')
+            ->and($config['saveStyle'])->toBe('text');
+    });
+
+    it('accepts the documented values', function () {
+        $config = editor()->config('', [
+            'countStyle' => 'ring',
+            'maxLengthMode' => 'soft',
+            'saveStyle' => 'filled',
+        ]);
+
+        expect($config['countStyle'])->toBe('ring')
+            ->and($config['maxLengthMode'])->toBe('soft')
+            ->and($config['saveStyle'])->toBe('filled');
+    });
+
+    it('shows undo and redo unless asked not to', function () {
+        expect(editor()->config('')['history'])->toBeTrue()
+            ->and(editor()->config('', ['history' => false])['history'])->toBeFalse();
+    });
+
+    it('falls back for anything unrecognised', function (string $key) {
+        expect(editor()->config('', [$key => 'nonsense'])[$key])->toBeIn(['text', 'hard']);
+    })->with(['countStyle', 'maxLengthMode', 'saveStyle']);
+});
+
 describe('Menu mode', function () {
     it('defaults to the scrolling toolbar', function () {
         expect(editor()->config('')['menu'])->toBe('toolbar');
