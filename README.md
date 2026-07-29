@@ -21,13 +21,13 @@ a JavaScript editor in a browser.
 - 🅱️ **Inline marks** — bold, italic, underline, strikethrough, inline code, links, text color, highlight
 - 📑 **Blocks** — H1–H3, bullet / ordered lists, blockquote, dividers
 - 🖼️ **Media** — images, video and attachments, with a pending state while your app uploads
-- 📊 **Polls** — written in the editor, question and options, edit by tapping
+- 📊 **Polls** — written in the editor, with per-answer pictures and a length _(inline editing is iOS-only so far)_
 - 🧰 **Configurable toolbar** — presets (`full`, `basic`, `comment`, `note`) or an explicit ordered tool list
 - 📱 **Bottom-sheet menus** — optional Format / Insert sheets instead of a bar that scrolls off screen
 - ↩️ **Undo / redo**, placeholder text, live character / word / reading-time readouts
 - ✅ **Validation** — `minWords`, `maxWords`, `requiredBlocks`, `maxImages`, checked natively before a save
 - 🔁 **Clean HTML in, clean HTML out** — one documented tag set, byte-identical on both platforms
-- 📤 **Export** — HTML, plain text, JSON (canonical) and Markdown
+- 📤 **Export** — HTML, plain text, JSON (canonical) and Markdown, and `open()` takes HTML **or** JSON back
 - 🌗 **Theme-aware** — light / dark, your app's colours AND its font, adopted automatically
 - 🌍 **Localizable** — every user-visible string, with placeholders your translation controls
 - 💾 **Auto-save seam** — a debounced `ContentChanged` event; the editor stays out of your database
@@ -39,6 +39,41 @@ a JavaScript editor in a browser.
 - PHP 8.4+
 - NativePHP Mobile v3 or v4 (`nativephp/mobile: ^3.0|^4.0`)
 - iOS 15+ / Android API 26+
+
+## Platform support
+
+Both platforms share one PHP API, one document model and one HTML/JSON
+contract, and the parity harness asserts that the coder produces
+byte-identical output on each. Everything in **Core** below is verified on
+both.
+
+Recent work has run ahead on iOS. These are implemented and device-verified on
+iOS, and **not yet on Android** — the option is accepted and simply has no
+effect there:
+
+| Feature | Option | iOS | Android |
+| --- | --- | :-: | :-: |
+| Re-open from saved JSON | `open($json)` | ✅ | ❌ |
+| Media as a thumbnail strip | `mediaLayout` | ✅ | ❌ |
+| Attachment cap | `maxMedia` | ✅ | ❌ |
+| Inline poll card | — | ✅ | ❌ (sheet) |
+| Poll option cap / duration | `pollOptionMaxLength` | ✅ | ❌ |
+| Countdown ring | `countStyle` | ✅ | ❌ |
+| Soft length cap + overflow shading | `maxLengthMode` | ✅ | ❌ |
+| Filled save pill | `saveStyle` | ✅ | ❌ |
+| Hide undo/redo | `history` | ✅ | ❌ |
+| Full-screen media viewer | `preview()` | ✅ | ❌ |
+
+**Core** — verified on both: the text engine and every mark and block, the
+toolbar and its presets, bottom-sheet menus (`menu`), typography and spacing,
+theming, localization, validation, counts, haptics, the auto-save seam,
+embeds with provider detection, dividers, media insertion, and HTML / plain
+text / JSON / Markdown export.
+
+Android parity for the iOS-only list is the next substantial piece of work.
+Until it lands, a document written on iOS still opens correctly on Android —
+the model and the serializer are shared — it just will not offer those
+controls.
 
 ## Installation
 
@@ -117,6 +152,13 @@ All options are optional:
 | `typography` | array | — | `fontFamily`, `fontSize` (base, 10–32), `lineHeight` (1.0–2.0). Headings scale from the base |
 | `spacing` | string | `comfortable` | Editing density: `compact`, `comfortable`, `roomy` |
 | `menu` | string | `toolbar` | `toolbar` = one scrolling bar; `sheet` = compact bar + Format/Insert bottom sheets |
+| `mediaLayout` | string | `blocks` | `blocks` = media sits in the text flow; `strip` = a thumbnail row under it **(iOS only)** |
+| `maxMedia` | int | `4` | Attachments allowed; `0` = no limit **(iOS only)** |
+| `countStyle` | string | `text` | `text` readout, or a `ring` counting down to `maxLength` **(iOS only)** |
+| `maxLengthMode` | string | `hard` | `hard` refuses the keystroke; `soft` allows the overrun, shades it and blocks save **(iOS only)** |
+| `saveStyle` | string | `text` | `text` button, or a `filled` pill that dims until there is something to save **(iOS only)** |
+| `history` | bool | `true` | Show undo / redo ahead of the tools **(iOS only)** |
+| `pollOptionMaxLength` | int | `25` | Longest a single poll answer may be **(iOS only)** |
 | `theme` | array | `[]` | Hex colors: `background`, `text`, `accent` (Save button), `highlight` (active states). Omitted keys fall back to the host app's theme, then to system-adaptive defaults |
 | `id` | string | `null` | Echoed back on the result event, to correlate concurrent editors |
 
