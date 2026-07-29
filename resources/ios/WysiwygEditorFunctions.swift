@@ -222,6 +222,11 @@ struct WysiwygConfig {
     let saveStyle: String
     let mediaLayout: String
     let maxMedia: Int
+    let pollOptionMaxLength: Int
+    let pollMinOptions: Int
+    let pollMaxOptions: Int
+    /// Label key -> minutes. Ordered by the ordering of the keys in PHP.
+    let pollDurations: [(key: String, minutes: Int)]
     let history: Bool
     let typography: WysiwygTypography
     let spacing: WysiwygSpacing
@@ -253,6 +258,17 @@ struct WysiwygConfig {
         saveStyle = p["saveStyle"] as? String ?? "text"
         mediaLayout = p["mediaLayout"] as? String ?? "blocks"
         maxMedia = max(0, (p["maxMedia"] as? NSNumber)?.intValue ?? 4)
+        pollOptionMaxLength = max(1, (p["pollOptionMaxLength"] as? NSNumber)?.intValue ?? 25)
+        pollMinOptions = max(2, (p["pollMinOptions"] as? NSNumber)?.intValue ?? 2)
+        pollMaxOptions = max(2, (p["pollMaxOptions"] as? NSNumber)?.intValue ?? 4)
+        // JSON objects have no order, so the shortest-first ordering the
+        // durations are declared in has to be restored by sorting.
+        let durations = (p["pollDurations"] as? [String: Any]) ?? [:]
+        pollDurations = durations
+            .compactMap { key, value in
+                (value as? NSNumber).map { (key: key, minutes: $0.intValue) }
+            }
+            .sorted { $0.minutes < $1.minutes }
         history = (p["history"] as? NSNumber)?.boolValue ?? true
         typography = WysiwygTypography(p["typography"] as? [String: Any])
         spacing = WysiwygSpacing(named: p["spacing"] as? String ?? "comfortable")
@@ -2414,9 +2430,19 @@ final class WysiwygDocumentModel: ObservableObject {
         insertBlock(block)
     }
 
-    /// Media blocks, in insertion order — what the strip lays out.
+    /// Block types the strip carries. A poll is content you EDIT, and a
+    /// divider is punctuation — neither is a file you attached, so neither
+    /// belongs in a row of thumbnails.
+    static let strippableTypes: Set<String> = ["image", "video", "file"]
+
+    /// Attachments, in insertion order — what the strip lays out.
     var mediaEntries: [SegmentEntry] {
-        entries.filter { if case .media = $0.segment { return true } else { return false } }
+        entries.filter {
+            if case .media(let block) = $0.segment {
+                return Self.strippableTypes.contains(block.type)
+            }
+            return false
+        }
     }
 
     /// Whether another attachment is allowed. `maxMedia == 0` means no cap.
@@ -2434,6 +2460,74 @@ final class WysiwygDocumentModel: ObservableObject {
         segmentChanged()
     }
 
+    /// Insert an empty poll with the fewest answers that make one.
+    func insertPoll() {
+        var block = WysiwygBlock(type: "poll", runs: [])
+        block.attrs["question"] = ""
+        block.attrs["durationMinutes"] = String(config.pollDurations.first?.minutes ?? 1440)
+        block.options = (1...config.pollMinOptions).map { PollOption(id: "o\($0)", label: "") }
+        insertBlock(block)
+    }
+
+    // MARK: poll editing
+
+    /// Edit one answer. The cap is not enforced here: the card SHOWS the
+    /// overrun instead, the same way the character ring does, so the author
+    /// can see what has to go rather than losing the keystroke.
+    func setPollOption(id: Int, option index: Int, label: String) {
+        guard let position = entries.firstIndex(where: { $0.id == id }),
+              case .media(var block) = entries[position].segment,
+              block.options.indices.contains(index) else { return }
+
+        block.options[index].label = label
+        entries[position].segment = .media(block)
+        segmentChanged()
+    }
+
+    func addPollOption(id: Int) {
+        guard let position = entries.firstIndex(where: { $0.id == id }),
+              case .media(var block) = entries[position].segment,
+              block.options.count < config.pollMaxOptions else { return }
+
+        block.options.append(PollOption(id: "o\(block.options.count + 1)", label: ""))
+        entries[position].segment = .media(block)
+        segmentChanged()
+    }
+
+    /// Step to the next offered length. A tap cycling through three choices
+    /// beats a picker for something with three choices.
+    func cyclePollDuration(id: Int) {
+        guard let position = entries.firstIndex(where: { $0.id == id }),
+              case .media(var block) = entries[position].segment,
+              !config.pollDurations.isEmpty else { return }
+
+        let current = Int(block.attrs["durationMinutes"] ?? "") ?? config.pollDurations[0].minutes
+        let index = config.pollDurations.firstIndex { $0.minutes == current } ?? 0
+        let next = config.pollDurations[(index + 1) % config.pollDurations.count]
+
+        block.attrs["durationMinutes"] = String(next.minutes)
+        entries[position].segment = .media(block)
+        segmentChanged()
+    }
+
+    /// A picture for one answer. The editor ships no picker, so this asks the
+    /// host the same way the toolbar does.
+    func requestPollOptionMedia(id: Int, option index: Int) {
+        var payload: [String: Any] = ["kind": "image", "pollEntry": id, "pollOption": index]
+        if let identifier = config.id { payload["id"] = identifier }
+        LaravelBridge.shared.send?(WysiwygEvents.mediaRequested, payload)
+    }
+
+    /// Does this poll have anything worth warning about before it is removed?
+    func pollHasContent(id: Int) -> Bool {
+        guard let position = entries.firstIndex(where: { $0.id == id }),
+              case .media(let block) = entries[position].segment else { return false }
+
+        if !(block.attrs["question"] ?? "").isEmpty { return true }
+
+        return block.options.contains { !$0.label.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
     /// Set a block's alt text — the description a screen reader reads out.
     func setAlt(id: Int, text: String) {
         guard let index = entries.firstIndex(where: { $0.id == id }),
@@ -2444,31 +2538,6 @@ final class WysiwygDocumentModel: ObservableObject {
         segmentChanged()
     }
 
-    /**
-     Insert or replace a poll.
-
-     Unlike image / video / file, a poll needs no host round-trip: there is
-     nothing to pick and nothing to upload, so the editor composes it itself.
-     Passing `replacing` edits the poll in that segment instead of adding one.
-     */
-    func savePoll(question: String, options: [String], replacing entryId: Int?) {
-        var block = WysiwygBlock(type: "poll", runs: [])
-        block.attrs["question"] = question
-        block.options = options.enumerated().compactMap { index, label in
-            let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : PollOption(id: "o\(index + 1)", label: trimmed)
-        }
-
-        if let entryId, let index = entries.firstIndex(where: { $0.id == entryId }) {
-            entries[index].segment = .media(block)
-            segmentChanged()
-
-            return
-        }
-
-        insertBlock(block)
-    }
-
     /// Place a composed block after the focused segment, then give the user a
     /// fresh paragraph below so typing can continue.
     ///
@@ -2476,7 +2545,7 @@ final class WysiwygDocumentModel: ObservableObject {
     /// belong to the post rather than to a position in the prose, and no
     /// paragraph is needed after them.
     func insertBlock(_ block: WysiwygBlock) {
-        if config.mediaLayout == "strip" {
+        if config.mediaLayout == "strip", Self.strippableTypes.contains(block.type) {
             guard canAttachMore else { return }
 
             entries.append(SegmentEntry(id: nextId, segment: .media(block)))
@@ -2785,10 +2854,10 @@ private struct EditorScreen: View {
     @State private var palette: PaletteKind?
     /// Which bottom sheet is open, in `menu: sheet` mode.
     @State private var sheet: SheetKind?
-    /// The poll being composed, if any. Non-nil means the composer is open.
-    @State private var pollDraft: PollDraft?
     /// The attachment whose description is being written.
     @State private var describing: SegmentEntry?
+    /// The poll awaiting a removal confirm.
+    @State private var removingPoll: SegmentEntry?
     /// Measured height per TEXT segment — each editor grows to fit.
     @State private var heights: [Int: CGFloat] = [:]
 
@@ -2831,6 +2900,7 @@ private struct EditorScreen: View {
                 }
                 if let focused = document.focused, showsToolbar {
                     ToolbarRow(model: focused, palette: $palette, sheet: $sheet,
+                               onDocumentTool: { apply($0, focused) },
                                ringCount: ringInBar ? document.charCount : nil,
                                ringLimit: document.config.maxLength)
                 }
@@ -2838,7 +2908,6 @@ private struct EditorScreen: View {
             .frame(maxWidth: .infinity)
             .padding(.bottom, max(0, keyboard.height - geo.safeAreaInsets.bottom))
             .overlay(sheetOverlay)
-            .overlay(pollOverlay)
             .onChange(of: describing?.id) { _ in
                 guard let entry = describing else { return }
                 describing = nil
@@ -2855,6 +2924,22 @@ private struct EditorScreen: View {
             }
         } message: {
             Text(localized(document.config.strings, "discardMessage", "Your edits will be lost."))
+        }
+        .alert(localized(document.config.strings, "pollRemoveTitle", "Are you sure?"),
+               isPresented: Binding(
+            get: { removingPoll != nil },
+            set: { if !$0 { removingPoll = nil } }
+        )) {
+            Button(localized(document.config.strings, "cancel", "Cancel"), role: .cancel) {
+                removingPoll = nil
+            }
+            Button(localized(document.config.strings, "pollRemove", "Remove"), role: .destructive) {
+                if let entry = removingPoll { document.removeEntry(id: entry.id) }
+                removingPoll = nil
+            }
+        } message: {
+            Text(localized(document.config.strings, "pollRemoveMessage",
+                           "Removing the poll will discard what you have typed."))
         }
         .alert(localized(document.config.strings, "cannotSaveTitle", "Cannot save yet"),
                isPresented: Binding(
@@ -2948,31 +3033,6 @@ private struct EditorScreen: View {
         WysiwygEditorPresenter.topController()?.present(alert, animated: true)
     }
 
-    /// The poll composer — a question and its options, nothing else. Editing
-    /// an existing poll opens the same sheet seeded from that block.
-    @ViewBuilder
-    private var pollOverlay: some View {
-        if let draft = pollDraft {
-            WysiwygSheet(
-                theme: theme,
-                title: localized(document.config.strings,
-                                 draft.entryId == nil ? "pollTitle" : "pollEditTitle",
-                                 draft.entryId == nil ? "New poll" : "Edit poll"),
-                onDismiss: { pollDraft = nil }
-            ) {
-                PollComposer(
-                    draft: Binding(get: { pollDraft ?? PollDraft() }, set: { pollDraft = $0 }),
-                    theme: theme,
-                    strings: document.config.strings
-                ) { question, options in
-                    document.savePoll(question: question, options: options,
-                                      replacing: draft.entryId)
-                    pollDraft = nil
-                }
-            }
-        }
-    }
-
     /// Only tools the host actually enabled appear, and a section with nothing
     /// in it is not drawn at all — the sheet reflects the config, not a menu of
     /// everything the plugin could do.
@@ -3020,9 +3080,11 @@ private struct EditorScreen: View {
             LaravelBridge.shared.send?(WysiwygEvents.mediaRequested, payload)
         case "poll":
             // Composed HERE, not by the host: there is nothing to pick and
-            // nothing to upload, so a round-trip would buy nothing.
+            // nothing to upload, so a round-trip would buy nothing. Inserted
+            // blank and edited in place — a poll IS the post as much as the
+            // words are, and writing one behind a sheet hides what it belongs to.
             sheet = nil
-            pollDraft = PollDraft()
+            document.insertPoll()
         case "divider":
             sheet = nil
             document.insertBlock(WysiwygBlock(type: "divider", runs: []))
@@ -3073,21 +3135,21 @@ private struct EditorScreen: View {
     private func segmentView(entry: SegmentEntry) -> some View {
         switch entry.segment {
         case .media(let block):
-            MediaCardView(block: block, theme: theme, strings: document.config.strings)
-                .onTapGesture {
-                    switch block.type {
-                    case "poll":
-                        pollDraft = PollDraft(
-                            entryId: entry.id,
-                            question: block.attrs["question"] ?? "",
-                            options: block.options.map(\.label)
-                        )
-                    case "video":
-                        playVideo(block)
-                    default:
-                        break
+            if block.type == "poll" {
+                PollCard(document: document, entry: entry, block: block, theme: theme) {
+                    // Only warn when there is something to lose.
+                    if document.pollHasContent(id: entry.id) {
+                        removingPoll = entry
+                    } else {
+                        document.removeEntry(id: entry.id)
                     }
                 }
+            } else {
+                MediaCardView(block: block, theme: theme, strings: document.config.strings)
+                    .onTapGesture {
+                        if block.type == "video" { playVideo(block) }
+                    }
+            }
         case .text:
             if let model = document.model(for: entry) {
                 RichTextView(
@@ -3134,8 +3196,11 @@ private struct EditorScreen: View {
     private var flowEntries: [SegmentEntry] {
         guard document.config.mediaLayout == "strip" else { return document.entries }
 
-        return document.entries.filter {
-            if case .text = $0.segment { return true } else { return false }
+        return document.entries.filter { entry in
+            if case .media(let block) = entry.segment {
+                return !WysiwygDocumentModel.strippableTypes.contains(block.type)
+            }
+            return true
         }
     }
 
@@ -3273,6 +3338,137 @@ private struct EditorScreen: View {
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 4)
+        }
+    }
+}
+
+// MARK: - Poll card
+
+/**
+ A poll, edited where it sits.
+
+ Not a modal: a poll IS the post as much as the words are, and writing one
+ behind a sheet means you cannot see what you are attaching it to. Every
+ platform that runs polls edits them inline for that reason.
+
+ The option cap is enforced by SHOWING the overrun rather than refusing the
+ keystroke — the same reasoning as the character ring, and the same red.
+ */
+private struct PollCard: View {
+    @ObservedObject var document: WysiwygDocumentModel
+    let entry: SegmentEntry
+    let block: WysiwygBlock
+    let theme: WysiwygTheme
+    let onRemove: () -> Void
+
+    private var strings: [String: String] { document.config.strings }
+    private var limit: Int { document.config.pollOptionMaxLength }
+
+    private var durationLabel: String {
+        let minutes = Int(block.attrs["durationMinutes"] ?? "") ?? document.config.pollDurations.first?.minutes ?? 1440
+        let match = document.config.pollDurations.first { $0.minutes == minutes }
+
+        return localized(strings, match?.key ?? "pollDay1", "1 day")
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ForEach(Array(block.options.enumerated()), id: \.element.id) { index, option in
+                optionRow(index: index, option: option)
+            }
+
+            if block.options.count < document.config.pollMaxOptions {
+                Button {
+                    document.addPollOption(id: entry.id)
+                } label: {
+                    Text(localized(strings, "pollAddOption", "Add option"))
+                        .font(.system(size: 15))
+                        .foregroundColor(theme.accentColor)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            Divider()
+
+            // How long it runs. The editor records the choice; turning it into
+            // a closing time is the host's job, because the editor owns no clock.
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(localized(strings, "pollLength", "Poll length"))
+                        .font(.system(size: 13))
+                        .foregroundColor(theme.textColor.opacity(0.5))
+                    Text(durationLabel)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(theme.accentColor)
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { document.cyclePollDuration(id: entry.id) }
+        }
+        .padding(14)
+        .overlay(
+            RoundedCornerRect(radius: 14)
+                .stroke(theme.textColor.opacity(0.2), lineWidth: 1)
+        )
+        .overlay(alignment: .topTrailing) {
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(theme.textColor.opacity(0.7))
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(theme.textColor.opacity(0.1)))
+            }
+            .padding(6)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    private func optionRow(index: Int, option: PollOption) -> some View {
+        let remaining = limit - option.label.count
+        let over = remaining < 0
+
+        return HStack(spacing: 10) {
+            // Each answer may carry its own picture, which is what turns a
+            // poll into something you can vote on by sight.
+            Button {
+                document.requestPollOptionMedia(id: entry.id, option: index)
+            } label: {
+                ZStack {
+                    RoundedCornerRect(radius: 10).fill(theme.textColor.opacity(0.07))
+                    IconShape(data: toolIcons["image"]?.path ?? "")
+                        .stroke(style: StrokeStyle(lineWidth: 2 * 18 / 24, lineCap: .round, lineJoin: .round))
+                        .foregroundColor(theme.textColor.opacity(0.45))
+                        .frame(width: 18, height: 18)
+                }
+                .frame(width: 46, height: 46)
+            }
+
+            HStack(spacing: 6) {
+                TextField(
+                    localized(strings, "pollOption", "Option {n}", n: index + 1),
+                    text: Binding(
+                        get: { option.label },
+                        set: { document.setPollOption(id: entry.id, option: index, label: $0) }
+                    )
+                )
+                .font(.system(size: 15))
+                .foregroundColor(theme.textColor)
+
+                // Only once it matters — the same rule as the ring.
+                if remaining <= 5 {
+                    Text("\(remaining)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(over ? .red : theme.textColor.opacity(0.45))
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 46)
+            .overlay(
+                RoundedCornerRect(radius: 12)
+                    .stroke(over ? Color.red : theme.textColor.opacity(0.2), lineWidth: 1)
+            )
         }
     }
 }
@@ -3829,6 +4025,10 @@ private struct ToolbarRow: View {
     @ObservedObject var model: WysiwygEditorModel
     @Binding var palette: PaletteKind?
     @Binding var sheet: SheetKind?
+    /// Tools that act on the whole document rather than on this segment.
+    /// Without this the toolbar silently did nothing for them, because it only
+    /// ever had a reference to one text model.
+    var onDocumentTool: (String) -> Void = { _ in }
     /// Live count, when it is drawn as a ring. A ring is a compact indicator
     /// meant to sit at the end of a bar — which is where every composer that
     /// has one puts it — so it rides along here rather than taking a row.
@@ -3937,6 +4137,10 @@ private struct ToolbarRow: View {
             model.clearFormat()
         case "image", "video", "file":
             requestMedia(tool)
+        case "poll", "divider", "embed":
+            // These change the DOCUMENT, not this segment's text, so the
+            // screen handles them — the toolbar only knows about one editor.
+            onDocumentTool(tool)
         default:
             break
         }
@@ -4134,97 +4338,6 @@ private struct SheetSection: View {
             .padding(.horizontal, 20)
             .padding(.top, 14)
             .padding(.bottom, 4)
-    }
-}
-
-// MARK: - Poll composer
-
-/// A poll being written. Two blank options to start, because a poll with one
-/// is not a poll.
-struct PollDraft {
-    var entryId: Int?
-    var question: String = ""
-    var options: [String] = ["", ""]
-}
-
-/// Question, options, and a button. Deliberately plain — the poll is content,
-/// so the composer should get out of the way rather than be a feature of its own.
-private struct PollComposer: View {
-    @Binding var draft: PollDraft
-    let theme: WysiwygTheme
-    let strings: [String: String]
-    let onSave: (String, [String]) -> Void
-
-    /// A poll needs a question and at least two options to be worth inserting.
-    private var canSave: Bool {
-        !draft.question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && draft.options.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count >= 2
-    }
-
-    var body: some View {
-        VStack(spacing: 10) {
-            field(text: $draft.question,
-                  placeholder: localized(strings, "pollQuestion", "Ask a question"),
-                  weight: .semibold)
-
-            ForEach(draft.options.indices, id: \.self) { index in
-                HStack(spacing: 8) {
-                    field(text: $draft.options[index],
-                          placeholder: localized(strings, "pollOption", "Option {n}", n: index + 1),
-                          weight: .regular)
-
-                    // Below three, removing would leave a poll that cannot be
-                    // voted on, so the control is simply not offered.
-                    if draft.options.count > 2 {
-                        Button {
-                            draft.options.remove(at: index)
-                        } label: {
-                            IconShape(data: toolIcons["clearFormat"]?.path ?? "")
-                                .stroke(style: StrokeStyle(lineWidth: 2 * 18 / 24, lineCap: .round, lineJoin: .round))
-                                .foregroundColor(theme.textColor.opacity(0.4))
-                                .frame(width: 18, height: 18)
-                        }
-                    }
-                }
-            }
-
-            Button {
-                draft.options.append("")
-            } label: {
-                Text(localized(strings, "pollAddOption", "Add option"))
-                    .font(.system(size: 15))
-                    .foregroundColor(theme.accentColor)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            Button {
-                onSave(draft.question, draft.options)
-            } label: {
-                Text(localized(strings,
-                               draft.entryId == nil ? "pollInsert" : "pollUpdate",
-                               draft.entryId == nil ? "Insert poll" : "Update poll"))
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(theme.backgroundColor)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 46)
-                    .background(RoundedRectangle(cornerRadius: 10)
-                        .fill(canSave ? theme.accentColor : theme.textColor.opacity(0.2)))
-            }
-            .disabled(!canSave)
-            .padding(.top, 4)
-        }
-        .padding(.horizontal, 20)
-    }
-
-    private func field(text: Binding<String>, placeholder: String,
-                       weight: Font.Weight) -> some View {
-        TextField(placeholder, text: text)
-            .font(.system(size: 16, weight: weight))
-            .foregroundColor(theme.textColor)
-            .padding(.horizontal, 12)
-            .frame(height: 44)
-            .background(RoundedRectangle(cornerRadius: 10)
-                .fill(theme.textColor.opacity(0.06)))
     }
 }
 

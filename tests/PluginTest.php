@@ -361,6 +361,32 @@ describe('Media layout and cap', function () {
     });
 });
 
+describe('Polls', function () {
+    it('caps an option at a length someone can read at a glance', function () {
+        expect(editor()->config('')['pollOptionMaxLength'])->toBe(25)
+            ->and(editor()->config('', ['pollOptionMaxLength' => 40])['pollOptionMaxLength'])->toBe(40)
+            ->and(editor()->config('', ['pollOptionMaxLength' => 0])['pollOptionMaxLength'])->toBe(1);
+    });
+
+    it('needs at least two answers and stops at a handful', function () {
+        $config = editor()->config('');
+
+        expect($config['pollMinOptions'])->toBe(2)
+            ->and($config['pollMaxOptions'])->toBe(4);
+    });
+
+    it('offers durations in minutes, because the editor owns no clock', function () {
+        $durations = editor()->config('')['pollDurations'];
+
+        expect($durations)->toBe(['pollDay1' => 1440, 'pollDays3' => 4320, 'pollDays7' => 10080]);
+
+        // Every duration must be labelled, or the picker shows a raw key.
+        foreach (array_keys($durations) as $key) {
+            expect(WysiwygEditor::STRINGS)->toHaveKey($key);
+        }
+    });
+});
+
 describe('Menu mode', function () {
     it('defaults to the scrolling toolbar', function () {
         expect(editor()->config('')['menu'])->toBe('toolbar');

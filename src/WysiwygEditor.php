@@ -164,6 +164,14 @@ class WysiwygEditor
         'altPlaceholder' => 'Describe this for people who cannot see it',
         'altSave' => 'Done',
         'removeMedia' => 'Remove',
+        // Poll composer, inline
+        'pollLength' => 'Poll length',
+        'pollDay1' => '1 day',
+        'pollDays3' => '3 days',
+        'pollDays7' => '7 days',
+        'pollRemoveTitle' => 'Are you sure?',
+        'pollRemoveMessage' => 'Removing the poll will discard what you have typed.',
+        'pollRemove' => 'Remove',
         'embedTitle' => 'Embed a link',
         'embedPlaceholder' => 'https://youtube.com/watch?v=…',
         'embedAdd' => 'Embed',
@@ -185,6 +193,32 @@ class WysiwygEditor
      * and what X, Facebook and Instagram all landed on independently.
      */
     public const DEFAULT_MAX_MEDIA = 4;
+
+    /**
+     * How long a poll runs, offered in the composer.
+     *
+     * Labels are localizable like everything else; the VALUE is minutes,
+     * because the editor does not own a clock — it records how long the author
+     * chose and the host turns that into a closing time when it publishes.
+     *
+     * @var array<string, int>  label key => minutes
+     */
+    public const POLL_DURATIONS = [
+        'pollDay1' => 1440,
+        'pollDays3' => 4320,
+        'pollDays7' => 10080,
+    ];
+
+    /**
+     * Longest a single poll option may be.
+     *
+     * Short by design: an option nobody can read at a glance is not an option,
+     * and every platform that runs polls caps them somewhere near here.
+     */
+    public const DEFAULT_POLL_OPTION_LENGTH = 25;
+
+    /** A poll needs at least two answers, and stops being one past a handful. */
+    public const POLL_OPTION_RANGE = ['min' => 2, 'max' => 4];
 
     /**
      * Where media sits while you are writing.
@@ -529,6 +563,13 @@ class WysiwygEditor
             // Four is what social composers settle on: enough to tell a story,
             // few enough to lay out in a grid the reader can take in at once.
             'maxMedia' => max(0, (int) ($options['maxMedia'] ?? self::DEFAULT_MAX_MEDIA)),
+            'pollOptionMaxLength' => max(
+                1,
+                (int) ($options['pollOptionMaxLength'] ?? self::DEFAULT_POLL_OPTION_LENGTH)
+            ),
+            'pollMinOptions' => self::POLL_OPTION_RANGE['min'],
+            'pollMaxOptions' => self::POLL_OPTION_RANGE['max'],
+            'pollDurations' => self::POLL_DURATIONS,
             // Undo/redo lead the toolbar by default. Composers built for short
             // posts do not show them, and with no other tools enabled they
             // would be the only thing left on the bar.
