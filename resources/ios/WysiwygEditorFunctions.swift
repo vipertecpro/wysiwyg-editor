@@ -247,6 +247,9 @@ extension NSAttributedString.Key {
     static let wysiwygBlock = NSAttributedString.Key("wysiwygBlock")
     /// Marks the non-content list-marker prefix ("•\u{00A0}" / "1.\u{00A0}").
     static let wysiwygMarker = NSAttributedString.Key("wysiwygMarker")
+    /// Shading on characters past `maxLength` in soft mode. Ours, not the
+    /// user's highlight mark — clearing it must not clear theirs.
+    static let wysiwygOverflow = NSAttributedString.Key("wysiwygOverflow")
     static let wysiwygBold = NSAttributedString.Key("wysiwygBold")
     static let wysiwygItalic = NSAttributedString.Key("wysiwygItalic")
     static let wysiwygCode = NSAttributedString.Key("wysiwygCode")
@@ -1745,7 +1748,64 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
 
     // MARK: published-state refresh
 
+    /**
+     Shade whatever runs past `maxLength`.
+
+     Soft mode lets the writer overrun deliberately; the ring says by how much,
+     and this says exactly WHICH words have to go. Without it the ring reports
+     a number the writer then has to find by counting.
+
+     Only the characters that COUNT are counted — list markers are chrome, so
+     a bulleted line does not shift the boundary.
+     */
+    private func markOverflow() {
+        guard let st = storage, config.maxLength > 0, config.maxLengthMode == "soft" else { return }
+
+        let whole = NSRange(location: 0, length: st.length)
+        st.removeAttribute(.wysiwygOverflow, range: whole)
+        st.removeAttribute(.backgroundColor, range: whole)
+
+        // Put back the backgrounds that are not ours: a user highlight, and
+        // the tint inline code carries.
+        st.enumerateAttribute(.wysiwygHighlight, in: whole) { value, range, _ in
+            if let hex = value as? String, let color = UIColor(wysiwygHex: hex) {
+                st.addAttribute(.backgroundColor, value: color.withAlphaComponent(0.55), range: range)
+            }
+        }
+        st.enumerateAttribute(.wysiwygCode, in: whole) { value, range, _ in
+            if value != nil {
+                st.addAttribute(.backgroundColor,
+                                value: styler.theme.textUIColor.withAlphaComponent(0.08),
+                                range: range)
+            }
+        }
+
+        var plain = 0
+        var start: Int?
+        st.enumerateAttributes(in: whole) { attrs, range, stop in
+            if attrs[.wysiwygMarker] != nil { return }
+            let text = (st.string as NSString).substring(with: range)
+            for (offset, character) in text.enumerated() where character != "\n" {
+                plain += 1
+                if plain > config.maxLength {
+                    start = range.location + offset
+                    stop.pointee = true
+
+                    return
+                }
+            }
+        }
+
+        guard let start, start < st.length else { return }
+
+        let overflow = NSRange(location: start, length: st.length - start)
+        st.addAttribute(.wysiwygOverflow, value: true, range: overflow)
+        st.addAttribute(.backgroundColor, value: UIColor.systemRed.withAlphaComponent(0.28),
+                        range: overflow)
+    }
+
     func refreshState() {
+        markOverflow()
         guard let tv = textView, let st = storage else { return }
         let sel = tv.selectedRange
         let pr = paragraphRange(at: sel.location)
