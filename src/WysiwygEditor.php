@@ -291,6 +291,18 @@ class WysiwygEditor
     }
 
     /**
+     * Convert a saved document to Markdown.
+     *
+     * Takes the `$json` from {@see Events\ContentSaved}, not the HTML — JSON
+     * is the canonical form, so the export does not inherit a loss that
+     * already happened. See {@see Markdown} for what Markdown cannot carry.
+     */
+    public function toMarkdown(string $json): string
+    {
+        return Markdown::fromJson($json);
+    }
+
+    /**
      * Insert a media block at the caret.
      *
      * Call this after your app has picked (and optionally edited) the media —

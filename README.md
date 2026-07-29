@@ -368,6 +368,35 @@ the user never waits on a network round-trip. Until an upload completes the
 block exports as `<figure data-pending="…">` with **no `src`** — the device
 path is never written into published HTML.
 
+## Exporting
+
+`ContentSaved` hands you the document three ways:
+
+| Format | Payload | Lossless? |
+| --- | --- | --- |
+| HTML | `$html` | Text is exact. Block ids, upload state and poll options have nowhere to live in HTML |
+| Plain text | `$text` | No, by definition — it is the rendition used for counts and previews |
+| JSON | `$json` | **Yes** — this is the canonical form |
+
+Markdown is derived from the JSON, not the HTML, so it never inherits a loss
+that already happened:
+
+```php
+#[On(ContentSaved::class)]
+public function onSaved(string $html, string $text, string $json): void
+{
+    $markdown = WysiwygEditor::toMarkdown($json);
+}
+```
+
+Markdown is a narrower format than the document model, so some things cannot
+survive and are **dropped rather than approximated** — underline, text colour
+and highlight have no Markdown spelling, and emitting raw HTML for them would
+produce a file that is Markdown in name only. Video and file blocks become
+links, an embed becomes its bare URL, and a poll becomes its question plus a
+list: the content crosses over, the interactivity does not. Store the JSON if
+you need everything back.
+
 ## Typography and spacing
 
 The editor takes the host application's **font** the same way it takes its
