@@ -2312,7 +2312,9 @@ private struct RichTextView: UIViewRepresentable {
     /// Segments live in a scroll view, so each editor grows to fit instead of
     /// scrolling internally.
     @Binding var height: CGFloat
-    /// Only the first editor takes the keyboard when the screen opens.
+    /// Only the first editor takes the keyboard when the screen opens, and
+    /// only the first shows the placeholder — otherwise every text segment
+    /// under a media card repeats it.
     var autoFocus: Bool = true
     var onFocus: () -> Void = {}
     var onChange: () -> Void = {}
@@ -2342,7 +2344,7 @@ private struct RichTextView: UIViewRepresentable {
 
         // Placeholder — a plain overlaid label, hidden as soon as there is text.
         let placeholder = UILabel()
-        placeholder.text = model.config.placeholder
+        placeholder.text = autoFocus ? model.config.placeholder : ""
         placeholder.font = UIFont.systemFont(ofSize: 16)
         placeholder.textColor = theme.textUIColor.withAlphaComponent(0.35)
         placeholder.frame = CGRect(x: 17, y: 14, width: UIScreen.main.bounds.width - 60, height: 22)
@@ -2620,6 +2622,19 @@ func decodeMediaImage(_ source: String, maxPixels: Int = 1200) -> UIImage? {
     return UIImage(cgImage: cg)
 }
 
+/// Which toolbar glyph stands in for a block on its card. Normative — the
+/// Android card uses the same mapping, so a document looks the same on both.
+func cardIconKey(_ type: String) -> String {
+    switch type {
+    case "image": return "image"
+    case "video": return "video"
+    case "file": return "file"
+    case "embed": return "link"
+    case "poll": return "orderedList"
+    default: return "bulletList"
+    }
+}
+
 private struct MediaCardView: View {
     let block: WysiwygBlock
     let theme: WysiwygTheme
@@ -2668,7 +2683,7 @@ private struct MediaCardView: View {
                 }
 
                 HStack(spacing: 10) {
-                    IconShape(data: toolIcons[block.type == "poll" ? "orderedList" : "bulletList"]?.path ?? "")
+                    IconShape(data: toolIcons[cardIconKey(block.type)]?.path ?? "")
                         .stroke(style: StrokeStyle(lineWidth: 2 * 20 / 24, lineCap: .round, lineJoin: .round))
                         .foregroundColor(theme.accentColor)
                         .frame(width: 20, height: 20)
@@ -2980,9 +2995,27 @@ private struct PaletteRow: View {
 
 // MARK: - Presenter
 
+/**
+ Presents the editor in its OWN key window rather than as a modal on the host
+ app's root controller.
+
+ This is not a cosmetic choice. Marketplace plugins — the camera/photo picker
+ among them — present their UI on `keyWindow.rootViewController`. If the editor
+ were a modal on that controller, that controller is already presenting, iOS
+ refuses silently, and picking an image from inside the editor does nothing.
+
+ Giving the editor its own key window makes IT the root controller those
+ plugins find, so their existing lookup presents the picker on top of the
+ editor with no change needed on their side. It also mirrors Android, where the
+ editor is an overlay on the activity's content view rather than a second
+ Activity.
+ */
 final class WysiwygEditorPresenter {
     static let shared = WysiwygEditorPresenter()
     private var hosting: UIHostingController<AnyView>?
+    private var window: UIWindow?
+    /// Restored as key when the editor closes, so the host app gets input back.
+    private weak var previousKeyWindow: UIWindow?
     private var finished = false
 
     func present(config: WysiwygConfig) {
@@ -3017,26 +3050,49 @@ final class WysiwygEditorPresenter {
             }
         ))
         hosting = host
-        // Present once the top view controller is idle. When Open is called
-        // right after another modal is dismissed, iOS SILENTLY refuses the
-        // presentation — so we retry until it's ready.
-        presentWhenReady(host, id: config.id, attempts: 0)
-    }
 
-    private func presentWhenReady(_ host: UIViewController, id: String?, attempts: Int) {
-        guard let top = Self.topController(), !top.isBeingDismissed, !top.isBeingPresented else {
-            guard attempts < 25 else { finish(WysiwygEvents.cancelled, ["id": id]); return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-                self?.presentWhenReady(host, id: id, attempts: attempts + 1)
-            }
+        guard let scene = Self.activeScene() else {
+            finish(WysiwygEvents.cancelled, ["id": config.id])
             return
         }
-        top.present(host, animated: true)
+
+        previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+
+        let editorWindow = UIWindow(windowScene: scene)
+        editorWindow.rootViewController = host
+        // Above the app, below system UI such as the status bar and alerts.
+        editorWindow.windowLevel = .normal + 1
+        editorWindow.backgroundColor = config.theme.backgroundUIColor
+        editorWindow.makeKeyAndVisible()
+        window = editorWindow
+
+        // Match the slide-up a full-screen modal would have given us.
+        editorWindow.frame = scene.coordinateSpace.bounds
+        host.view.transform = CGAffineTransform(translationX: 0, y: editorWindow.bounds.height)
+        UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
+            host.view.transform = .identity
+        }
     }
 
     private func dismiss() {
-        hosting?.dismiss(animated: true)
+        guard let editorWindow = window else {
+            hosting = nil
+            return
+        }
         hosting = nil
+        window = nil
+
+        // Hand input back to the app BEFORE the animation, so the keyboard
+        // does not linger over a window that is on its way out.
+        previousKeyWindow?.makeKey()
+
+        UIView.animate(withDuration: 0.25, delay: 0, options: .curveEaseIn) {
+            editorWindow.rootViewController?.view.transform =
+                CGAffineTransform(translationX: 0, y: editorWindow.bounds.height)
+        } completion: { _ in
+            editorWindow.isHidden = true
+            editorWindow.rootViewController = nil
+        }
     }
 
     /// Deliver EXACTLY ONE terminal event for the current editor, then tear it
@@ -3056,10 +3112,15 @@ final class WysiwygEditorPresenter {
         LaravelBridge.shared.send?(event, clean)
     }
 
+    static func activeScene() -> UIWindowScene? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    }
+
+    /// Topmost controller — used for the link dialog. Walks the presentation
+    /// chain so an alert lands above anything already showing.
     static func topController() -> UIViewController? {
-        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }
-        var top = scene?.windows.first { $0.isKeyWindow }?.rootViewController
+        var top = activeScene()?.windows.first { $0.isKeyWindow }?.rootViewController
         while let p = top?.presentedViewController { top = p }
         return top
     }

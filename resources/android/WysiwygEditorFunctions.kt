@@ -3160,6 +3160,19 @@ internal fun decodeMediaImage(source: String, maxPixels: Int = 1200): android.gr
  * block is, its caption, and whether it is still uploading — which is what the
  * shell needs to prove.
  */
+/**
+ * Which toolbar glyph stands in for a block on its card. Normative — the iOS
+ * card uses the same mapping, so a document looks the same on both.
+ */
+internal fun cardIconKey(type: String): String = when (type) {
+    "image" -> "image"
+    "video" -> "video"
+    "file" -> "file"
+    "embed" -> "link"
+    "poll" -> "orderedList"
+    else -> "bulletList"
+}
+
 @Composable
 private fun MediaCard(
     block: WysiwygBlock,
@@ -3230,7 +3243,7 @@ private fun MediaCard(
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Canvas(modifier = Modifier.size(20.dp)) {
-                val icon = TOOL_ICONS[if (block.type == "poll") "orderedList" else "bulletList"]
+                val icon = TOOL_ICONS[cardIconKey(block.type)]
                 if (icon != null) {
                     drawPath(
                         path = buildIconPath(icon.path, size.width),
