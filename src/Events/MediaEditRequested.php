@@ -2,7 +2,8 @@
 
 namespace Vipertecpro\WysiwygEditor\Events;
 
-use Native\Mobile\Events\NativeEvent;
+use Illuminate\Foundation\Events\Dispatchable;
+use Illuminate\Queue\SerializesModels;
 
 /**
  * The user tapped edit on a piece of attached media.
@@ -13,8 +14,10 @@ use Native\Mobile\Events\NativeEvent;
  * {@see \Vipertecpro\WysiwygEditor\WysiwygEditor::insertMedia()} again with the
  * same `uploadId` to replace it.
  */
-class MediaEditRequested extends NativeEvent
+class MediaEditRequested
 {
+    use Dispatchable, SerializesModels;
+
     public function __construct(
         /** `image`, `video` or `file`. */
         public string $kind,

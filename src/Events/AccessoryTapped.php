@@ -2,7 +2,8 @@
 
 namespace Vipertecpro\WysiwygEditor\Events;
 
-use Native\Mobile\Events\NativeEvent;
+use Illuminate\Foundation\Events\Dispatchable;
+use Illuminate\Queue\SerializesModels;
 
 /**
  * The user tapped one of the host's own rows in the composer.
@@ -13,8 +14,10 @@ use Native\Mobile\Events\NativeEvent;
  * {@see \Vipertecpro\WysiwygEditor\WysiwygEditor::setAccessory()} so it shows
  * the choice that was made.
  */
-class AccessoryTapped extends NativeEvent
+class AccessoryTapped
 {
+    use Dispatchable, SerializesModels;
+
     public function __construct(
         /** The `id` the host gave this row. */
         public string $accessory,

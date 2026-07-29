@@ -73,6 +73,34 @@ describe('Plugin Manifest', function () {
         expect(file_exists($this->pluginPath.'/'.$manifest['icon']))->toBeTrue();
     });
 
+    /**
+     * `#[On(SomeEvent::class)]` does NOT autoload the class, so a listener for
+     * an event whose base class does not exist registers happily and then
+     * fails in SILENCE when the event is finally constructed. AccessoryTapped
+     * did exactly that: it extended a base that was never there, so tapping
+     * the row did nothing and nothing was logged.
+     *
+     * This suite has no Laravel to construct against — which is why the gap
+     * existed — so the convention is checked at the source level here, and the
+     * demo app constructs them for real.
+     */
+    it('builds every event the same way as the ones that work', function () {
+        foreach (glob($this->pluginPath.'/src/Events/*.php') as $file) {
+            $source = file_get_contents($file);
+            $name = basename($file, '.php');
+
+            // toContain takes NEEDLES, not a message — passing one as a second
+            // argument silently asserts the message itself is in the file.
+            expect($source)->toContain('use Illuminate\\Foundation\\Events\\Dispatchable;')
+                ->and($source)->toContain('use Illuminate\\Queue\\SerializesModels;')
+                ->and($source)->toContain('use Dispatchable, SerializesModels;');
+
+            // Extending anything is how the broken one broke.
+            expect(preg_match('/class '.$name.'\s+extends/', $source))
+                ->toBe(0, "{$name} extends a base class");
+        }
+    });
+
     it('declares every event class that exists', function () {
         $manifest = json_decode(file_get_contents($this->manifestPath), true);
 
