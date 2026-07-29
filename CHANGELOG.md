@@ -5,7 +5,7 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-07-29
 
 ### Added
 
@@ -45,6 +45,65 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Media cards render REAL images, decoded from a local file or an http(s) URL
   and downsampled, on both platforms. No image library — the plugin stays
   dependency-free.
+
+### Added — since the first cut
+
+- **Bottom-sheet menus** (`menu => 'sheet'`): a compact bar with Format and
+  Insert sheets instead of one bar that scrolls tools off the screen.
+- **Polls**, edited inline: an answer per row with its own picture button, an
+  option cap shown as an overrun, Add option, and how long the poll runs.
+  Durations are recorded in MINUTES — the editor owns no clock.
+- **Embeds** with provider recognised from the URL alone, and dividers.
+- **Typography and spacing**: the host application's font is adopted
+  automatically; `typography` sets the base size and the heading ramp scales
+  from it; `spacing` is stated in points on iOS and dp on Android.
+- **Localization** of every user-visible string, with `{n}` / `{max}` / `{type}`
+  placeholders substituted natively so the translation controls word order.
+- **Validation** (`minWords`, `maxWords`, `requiredBlocks`, `maxImages`),
+  checked natively so a failing document never round-trips to PHP.
+- **Counts** (`characters`, `words`, `readingTime`) and haptics.
+- **Auto-save seam**: a `ContentChanged` event debounced by `changeDebounce`.
+- **Markdown export** (`toMarkdown()`), derived from the canonical JSON rather
+  than the HTML, so it inherits no loss that already happened.
+- **`open()` accepts the document JSON as well as HTML**, so a document
+  re-opens with the local file paths that HTML can never carry.
+- **Host accessory rows** (`accessories`): the application puts its own
+  controls in the composer, gets `AccessoryTapped`, and updates them with
+  `setAccessory()` without closing the editor.
+- **Media strip** (`mediaLayout => 'strip'`) with per-thumbnail remove,
+  description and edit, an attachment cap (`maxMedia`, default 4), and a
+  `MediaEditRequested` event handing editing back to the host's own picker.
+- **Full-screen media viewer** (`preview()`) — zoomable images and video
+  playback, because the platform ships no video element to build one from.
+- Composer controls: `countStyle => 'ring'`, `maxLengthMode => 'soft'` with the
+  overrun shaded, `saveStyle => 'filled'`, `history => false`, and
+  `toolbar => []` meaning no toolbar at all.
+
+### Known limitations
+
+- The list immediately above is **iOS-only** so far. Android accepts the
+  options and ignores them. See the platform table in the README; the shared
+  document model, HTML/JSON contract and parity harness cover both.
+- Inline video autoplay in a host timeline is not possible — NativePHP has no
+  video element.
+- Markdown drops underline, colour and highlight, which it cannot spell.
+
+### Fixed — since the first cut
+
+- **iOS: long lines never wrapped.** A non-scrolling `UITextView` reports an
+  intrinsic width as wide as its longest line, and SwiftUI sized the whole
+  editor to it, pushing the top bar and toolbar off screen. Every test string
+  until then had happened to fit on one line.
+- **`poll`, `divider` and `embed` did nothing from the toolbar** on both
+  platforms: the dispatchers had no branch for them, so the buttons were dead
+  and silent. A test now insists every offered tool is handled.
+- **Two events could never be constructed** — they extended a base class that
+  does not exist. `#[On(Event::class)]` does not autoload, so the listener
+  registered and the failure only surfaced, silently, at dispatch.
+- Backspacing at the start of a text segment now deletes the media card above
+  it and merges the runs either side.
+- Media cards drew a bullet-list glyph whatever they held; text segments below
+  a card repeated the placeholder.
 
 ### Fixed
 
