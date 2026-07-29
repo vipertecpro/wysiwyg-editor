@@ -2666,7 +2666,9 @@ private struct EditorScreen: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                if !countsReadout(document.config, document.charCount, document.wordCount).isEmpty {
+                // The ring rides in the toolbar when there IS one; only the
+                // text readout, or a ring with no bar to sit in, takes a row.
+                if showsCounterRow {
                     counter
                 }
                 if let kind = palette, let focused = document.focused {
@@ -2675,9 +2677,10 @@ private struct EditorScreen: View {
                         palette = nil
                     }
                 }
-                if let focused = document.focused,
-                   !(document.config.toolbar.isEmpty && !document.config.history) {
-                    ToolbarRow(model: focused, palette: $palette, sheet: $sheet)
+                if let focused = document.focused, showsToolbar {
+                    ToolbarRow(model: focused, palette: $palette, sheet: $sheet,
+                               ringCount: ringInBar ? document.charCount : nil,
+                               ringLimit: document.config.maxLength)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -2967,6 +2970,23 @@ private struct EditorScreen: View {
         }
         .frame(height: 52)
         .padding(.horizontal, 16)
+    }
+
+    private var showsToolbar: Bool {
+        !(document.config.toolbar.isEmpty && !document.config.history)
+    }
+
+    /// A ring needs a limit to count toward; without one it falls back to text.
+    private var wantsRing: Bool {
+        document.config.countStyle == "ring" && document.config.maxLength > 0
+    }
+
+    private var ringInBar: Bool { wantsRing && showsToolbar }
+
+    private var showsCounterRow: Bool {
+        if ringInBar { return false }
+        if wantsRing { return true }
+        return !countsReadout(document.config, document.charCount, document.wordCount).isEmpty
     }
 
     /// Over the soft cap, empty, or short of a rule — either way saving is
@@ -3461,6 +3481,11 @@ private struct ToolbarRow: View {
     @ObservedObject var model: WysiwygEditorModel
     @Binding var palette: PaletteKind?
     @Binding var sheet: SheetKind?
+    /// Live count, when it is drawn as a ring. A ring is a compact indicator
+    /// meant to sit at the end of a bar — which is where every composer that
+    /// has one puts it — so it rides along here rather than taking a row.
+    var ringCount: Int?
+    var ringLimit: Int = 0
 
     private var theme: WysiwygTheme { model.config.theme }
 
@@ -3468,6 +3493,19 @@ private struct ToolbarRow: View {
     private var sheetMode: Bool { model.config.menu == "sheet" }
 
     var body: some View {
+        HStack(spacing: 0) {
+            tools
+            if let ringCount {
+                CountRing(count: ringCount, limit: ringLimit, theme: theme)
+                    .padding(.trailing, 14)
+                    .padding(.leading, 6)
+            }
+        }
+        .background(theme.backgroundColor.overlay(theme.textColor.opacity(0.04)))
+        .overlay(Rectangle().fill(theme.textColor.opacity(0.12)).frame(height: 0.5), alignment: .top)
+    }
+
+    private var tools: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
                 // Undo / redo lead the configured tools, unless turned off.
@@ -3493,8 +3531,6 @@ private struct ToolbarRow: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
         }
-        .background(theme.backgroundColor.overlay(theme.textColor.opacity(0.04)))
-        .overlay(Rectangle().fill(theme.textColor.opacity(0.12)).frame(height: 0.5), alignment: .top)
     }
 
     /// Sheet mode: the two or three marks people reach for constantly stay one
