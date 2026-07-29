@@ -19,11 +19,18 @@ a JavaScript editor in a browser.
 
 - ✍️ **True native editing** — the platform text engine, keyboard, autocorrect and selection, not a webview
 - 🅱️ **Inline marks** — bold, italic, underline, strikethrough, inline code, links, text color, highlight
-- 📑 **Blocks** — H1–H3, bullet / ordered lists, blockquote
+- 📑 **Blocks** — H1–H3, bullet / ordered lists, blockquote, dividers
+- 🖼️ **Media** — images, video and attachments, with a pending state while your app uploads
+- 📊 **Polls** — written in the editor, question and options, edit by tapping
 - 🧰 **Configurable toolbar** — presets (`full`, `basic`, `comment`, `note`) or an explicit ordered tool list
-- ↩️ **Undo / redo**, placeholder text, live character counter with `maxLength`
-- 🔁 **Clean HTML in, clean HTML out** — one documented tag set, identical output on both platforms
-- 🌗 **Theme-aware** — follows the system light / dark theme, or recolour it to match your app
+- 📱 **Bottom-sheet menus** — optional Format / Insert sheets instead of a bar that scrolls off screen
+- ↩️ **Undo / redo**, placeholder text, live character / word / reading-time readouts
+- ✅ **Validation** — `minWords`, `maxWords`, `requiredBlocks`, `maxImages`, checked natively before a save
+- 🔁 **Clean HTML in, clean HTML out** — one documented tag set, byte-identical on both platforms
+- 📤 **Export** — HTML, plain text, JSON (canonical) and Markdown
+- 🌗 **Theme-aware** — light / dark, your app's colours AND its font, adopted automatically
+- 🌍 **Localizable** — every user-visible string, with placeholders your translation controls
+- 💾 **Auto-save seam** — a debounced `ContentChanged` event; the editor stays out of your database
 - 📦 **Zero dependencies** — no third-party native libraries, no permissions, no network
 - 🍏 🤖 **iOS + Android** behind one PHP API
 
