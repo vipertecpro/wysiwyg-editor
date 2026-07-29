@@ -278,6 +278,36 @@ do {
     else { failures += 1; print("  ✗ segments flatten back -> \(back.debugDescription)") }
 }
 
+// Backspacing at the start of a text segment deletes the media card above
+// it. Whether the two text runs either side then become ONE editor is decided
+// by re-segmenting, so that is what is asserted here.
+do {
+    let blocks = HtmlCoder.parse("<p>a</p><figure><img src=\"x.jpg\" alt=\"\"></figure><p>b</p>")
+    let before = segmentsOf(blocks).count
+    var without = blocks
+    without.remove(at: 1)
+    let after = segmentsOf(without)
+    var merged = false
+    if after.count == 1, case .text(let b) = after[0], b.count == 2 { merged = true }
+    if before == 3 && merged {
+        print("  \u{2713} deleting a card between two text runs leaves one editor")
+    } else {
+        failures += 1
+        print("  \u{2717} deleting a card between two text runs -> \(after.count) segment(s)")
+    }
+}
+
+do {
+    let blocks = HtmlCoder.parse("<figure><img src=\"x.jpg\" alt=\"\"></figure><p>b</p>")
+    let after = segmentsOf(Array(blocks.dropFirst()))
+    if after.count == 1 {
+        print("  \u{2713} deleting the first card leaves the text below intact")
+    } else {
+        failures += 1
+        print("  \u{2717} deleting the first card -> \(after.count) segment(s)")
+    }
+}
+
 do {
     if case .text(let blocks)? = segmentsOf([]).first, blocks.count == 1, blocks[0].type == "p" {
         print("  ✓ an empty document still offers somewhere to type")

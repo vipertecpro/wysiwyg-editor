@@ -333,6 +333,29 @@ fun main() {
         else { failures++; println("  ✗ segments flatten back -> ${back.show()}") }
     }
 
+    // Backspacing at the start of a text segment deletes the media card above
+    // it. Whether the two text runs either side then become ONE editor is
+    // decided by re-segmenting, so that is what is asserted here.
+    run {
+        val blocks = HtmlCoder.parse("""<p>a</p><figure><img src="x.jpg" alt=""></figure><p>b</p>""")
+        val before = segmentsOf(blocks).size
+        val after = segmentsOf(blocks.filterIndexed { i, _ -> i != 1 })
+        val merged = after.size == 1 && (after[0] as? Segment.Text)?.blocks?.size == 2
+        if (before == 3 && merged) {
+            println("  \u2713 deleting a card between two text runs leaves one editor")
+        } else {
+            failures++
+            println("  \u2717 deleting a card between two text runs -> ${after.size} segment(s)")
+        }
+    }
+
+    run {
+        val blocks = HtmlCoder.parse("""<figure><img src="x.jpg" alt=""></figure><p>b</p>""")
+        val after = segmentsOf(blocks.drop(1))
+        if (after.size == 1) println("  \u2713 deleting the first card leaves the text below intact")
+        else { failures++; println("  \u2717 deleting the first card -> ${after.size} segment(s)") }
+    }
+
     run {
         val first = segmentsOf(emptyList()).first()
         val ok = first is Segment.Text && first.blocks.size == 1 && first.blocks[0].type == "p"

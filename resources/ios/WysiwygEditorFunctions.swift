@@ -2073,6 +2073,27 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
 
     // MARK: undo / redo
 
+    /// Length of this segment's styled text — where a following segment's
+    /// content lands once the two are merged.
+    var styledLength: Int {
+        textView?.textStorage.length ?? initialAttributed.length
+    }
+
+    /// Swap this segment's whole content, putting the caret at `caretAt`.
+    ///
+    /// Used when a media card between two text segments is deleted and the two
+    /// have to become one. Only the surviving segment is rebuilt, so every
+    /// other segment keeps its own undo history.
+    func replaceDocument(_ blocks: [WysiwygBlock], caretAt: Int) {
+        guard let tv = textView else { return }
+        isMutating = true
+        tv.attributedText = styler.attributed(blocks)
+        isMutating = false
+        let safe = min(max(0, caretAt), tv.textStorage.length)
+        tv.selectedRange = NSRange(location: safe, length: 0)
+        didChangeExternally()
+    }
+
     func undo() {
         textView?.undoManager?.undo()
         didChangeExternally()
@@ -2168,6 +2189,39 @@ final class WysiwygDocumentModel: ObservableObject {
         segmentChanged()
     }
 
+    /**
+     Backspace pressed with the caret at the very start of a text segment.
+
+     If a media card sits directly above, it is deleted — matching what Notes
+     and Docs do, where backspacing into an image removes it rather than doing
+     nothing. When that leaves two text segments touching, they merge into one
+     and the caret lands on the join.
+
+     Returns true when the keystroke was consumed.
+     */
+    func handleBackspaceAtStart(entryId: Int) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.id == entryId }), index > 0 else { return false }
+        guard case .media = entries[index - 1].segment else { return false }
+
+        entries.remove(at: index - 1)
+        let position = index - 1
+
+        // Two text segments are now adjacent — fold the lower one into the
+        // upper one so the document keeps ONE editor per run of text.
+        if position > 0, case .text = entries[position - 1].segment,
+           let above = models[entries[position - 1].id], let mine = models[entryId] {
+            let join = above.styledLength + 1
+            above.replaceDocument(above.blocks() + mine.blocks(), caretAt: join)
+            models.removeValue(forKey: entryId)
+            entries.remove(at: position)
+            focused = above
+            DispatchQueue.main.async { above.textView?.becomeFirstResponder() }
+        }
+
+        segmentChanged()
+        return true
+    }
+
     /// Report upload progress / completion / failure for an inserted block.
     func updateUpload(uploadId: String, state: String, src: String, message: String) {
         guard let index = entries.firstIndex(where: { entry in
@@ -2233,6 +2287,26 @@ final class WysiwygDocumentModel: ObservableObject {
 
 // MARK: - UITextView wrapper
 
+/**
+ UITextView that reports a backspace pressed at offset 0.
+
+ UIKit does not route that through `shouldChangeTextIn` — there is nothing to
+ change — so the only place to see it is `deleteBackward()`. It is what lets a
+ media card above be deleted by backspacing into it.
+ */
+private final class BoundaryTextView: UITextView {
+    /// Returning true consumes the keystroke.
+    var onBackspaceAtStart: (() -> Bool)?
+
+    override func deleteBackward() {
+        if selectedRange.location == 0, selectedRange.length == 0,
+           onBackspaceAtStart?() == true {
+            return
+        }
+        super.deleteBackward()
+    }
+}
+
 private struct RichTextView: UIViewRepresentable {
     let model: WysiwygEditorModel
     /// Segments live in a scroll view, so each editor grows to fit instead of
@@ -2242,10 +2316,13 @@ private struct RichTextView: UIViewRepresentable {
     var autoFocus: Bool = true
     var onFocus: () -> Void = {}
     var onChange: () -> Void = {}
+    /// Backspace at offset 0 — returning true consumes it.
+    var onBackspaceAtStart: () -> Bool = { false }
 
     func makeUIView(context: Context) -> UITextView {
         let theme = model.config.theme
-        let tv = UITextView()
+        let tv = BoundaryTextView()
+        tv.onBackspaceAtStart = onBackspaceAtStart
         tv.backgroundColor = .clear
         tv.allowsEditingTextAttributes = false
         tv.delegate = context.coordinator
@@ -2448,7 +2525,8 @@ private struct EditorScreen: View {
                     height: heightBinding(entry.id),
                     autoFocus: entry.id == firstTextId,
                     onFocus: { document.focused = model },
-                    onChange: { document.segmentChanged() }
+                    onChange: { document.segmentChanged() },
+                    onBackspaceAtStart: { document.handleBackspaceAtStart(entryId: entry.id) }
                 )
                 .frame(height: heights[entry.id] ?? 48)
             }

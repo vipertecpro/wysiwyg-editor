@@ -2028,6 +2028,39 @@ internal class EditorController(
     fun document(): List<WysiwygBlock> = Styler.toBlocks(editText.text)
 
     /**
+     * Backspace pressed with the caret at offset 0 — the document decides
+     * whether there is a media card above to delete. Returning true consumes
+     * the keystroke.
+     */
+    var onBackspaceAtStart: (() -> Boolean)? = null
+
+    /**
+     * Length of this segment's styled text — where a following segment's
+     * content lands once the two are merged.
+     */
+    fun styledLength(): Int = editText.text.length
+
+    /**
+     * Swap this segment's whole content, putting the caret at [caretAt].
+     *
+     * Used when a media card between two text segments is deleted and the two
+     * have to become one. Only the surviving segment is rebuilt, so every
+     * other segment keeps its own undo history.
+     */
+    fun replaceDocument(blocks: List<WysiwygBlock>, caretAt: Int) {
+        pushUndoForced()
+        programmatic = true
+        try {
+            editText.setText(Styler.toSpannable(blocks, theme, night))
+        } finally {
+            programmatic = false
+        }
+        editText.setSelection(caretAt.coerceIn(0, editText.text.length))
+        onDocumentChanged(document())
+        onStateChanged()
+    }
+
+    /**
      * Return focus (and the keyboard) to the document after a dialog or a
      * palette tap. Without this the caret is gone when the dialog closes, so
      * anything the tool just armed would be lost the moment the user taps back
@@ -2388,7 +2421,11 @@ internal class EditorController(
     fun handleBackspace(): Boolean {
         val text = editText.text
         val caret = editText.selectionStart
-        if (caret != editText.selectionEnd || caret <= 0) return false
+        if (caret != editText.selectionEnd) return false
+        // At the very start there is nothing here to delete — the document
+        // may still want to remove a media card sitting above this segment.
+        if (caret == 0) return onBackspaceAtStart?.invoke() == true
+        if (caret < 0) return false
 
         val whole = text.toString()
         val lineStart = whole.lastIndexOf('\n', caret - 1).let { if (it < 0) 0 else it + 1 }
@@ -2839,6 +2876,43 @@ internal fun EditorScreen(
             words.value = countWords(out)
         }
 
+        /**
+         * Backspace pressed at the very start of the text segment [entryId].
+         *
+         * If a media card sits directly above, it is deleted — matching what
+         * Notes and Docs do, where backspacing into an image removes it rather
+         * than doing nothing. When that leaves two text segments touching they
+         * merge into one and the caret lands on the join.
+         *
+         * Returns true when the keystroke was consumed.
+         */
+        fun handleBackspaceAtStart(entryId: Int): Boolean {
+            val index = entries.indexOfFirst { it.id == entryId }
+            if (index <= 0) return false
+            if (entries[index - 1].segment !is Segment.Media) return false
+
+            entries.removeAt(index - 1)
+            val position = index - 1
+
+            // Two text segments are now adjacent — fold the lower one into the
+            // upper one so the document keeps ONE editor per run of text.
+            val above = entries.getOrNull(position - 1)
+            val aboveController = above?.let { controllers[it.id] }
+            val mine = controllers[entryId]
+            if (above != null && above.segment is Segment.Text && aboveController != null && mine != null) {
+                val join = aboveController.styledLength() + 1
+                aboveController.replaceDocument(aboveController.document() + mine.document(), join)
+                controllers.remove(entryId)
+                entries.removeAt(position)
+                focused.value = aboveController
+                aboveController.refocus()
+            }
+
+            rebuildDocument()
+            revision.value++
+            return true
+        }
+
         // Expose this editor to the media bridge functions while it is open.
         androidx.compose.runtime.DisposableEffect(Unit) {
             WysiwygEditorFunctions.live = object : WysiwygEditorFunctions.LiveEditor {
@@ -2918,6 +2992,9 @@ internal fun EditorScreen(
                                     if (focused.value == null) focused.value = controller
 
                                     onSelectionMoved = { controller.onCaretMoved(); revision.value++ }
+                                    controller.onBackspaceAtStart = {
+                                        handleBackspaceAtStart(entry.id)
+                                    }
                                     onBackspace = { controller.handleBackspace() }
                                     // The toolbar acts on whichever segment has
                                     // the caret.

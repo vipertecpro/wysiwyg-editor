@@ -87,6 +87,20 @@ Rendered as:      └──── one text editor ────┘  [card]  [ed] 
 Caret transitions are therefore only needed at **text ↔ media** boundaries,
 which are rare and few, instead of at every paragraph break.
 
+### Backspace at a boundary
+
+Backspace with a collapsed caret at offset 0 of a text segment deletes the
+media block directly above it, the way Notes and Docs behave — backspacing into
+an image removes it rather than doing nothing. If that leaves two text
+segments touching they merge into one editor, and the caret lands on the join.
+Only the surviving segment is rebuilt, so every other segment keeps its own
+undo history.
+
+Both platforms have to intercept this specially: neither reports a deletion
+when there is nothing to delete. iOS overrides `deleteBackward()`; Android
+checks offset 0 before its marker handling, on both the DEL key and
+`deleteSurroundingText`.
+
 The trade-off, stated honestly: you can drag-reorder segments, not individual
 paragraphs. Reordering a single paragraph inside a run means editing text, the
 way Apple Notes and Bear work — not dragging a handle, the way Notion works.
