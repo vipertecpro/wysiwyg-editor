@@ -5,6 +5,34 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-29
+
+### Added
+
+- **Android parity.** Everything that was iOS-only in 0.1.x now works on both,
+  device-verified against the iOS screenshots: the media strip with
+  per-thumbnail remove / description / edit, the inline poll card with its
+  option cap and duration, host accessory rows, the countdown ring, the soft
+  length cap with the overrun shaded, the filled save pill, `history => false`,
+  `toolbar => []` meaning no toolbar, re-opening from saved JSON, and the
+  full-screen media viewer.
+
+### Fixed
+
+- **The Android build was broken outright.** Bridge functions are
+  code-generated into each platform's registration file, so declaring
+  `Preview` and `SetAccessory` in the manifest without implementing them in
+  Kotlin stopped the app compiling — and every Android deploy silently kept the
+  previous APK. Compiling the plugin file alone still succeeded, which is what
+  hid it. A test now insists every declared bridge function exists in both
+  native sources.
+- Two events extended a base class that does not exist, so tapping a host
+  accessory row did nothing at all: `#[On(Event::class)]` does not autoload, so
+  the listener registered and the failure only surfaced, silently, at dispatch.
+- Attachments rendered twice in `strip` layout on Android — once as a card in
+  the flow and once as a thumbnail.
+- The text counter drew beside the ring, saying the same thing twice.
+
 ## [0.1.1] - 2026-07-29
 
 ### Changed
