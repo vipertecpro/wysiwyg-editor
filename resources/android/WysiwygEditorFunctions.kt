@@ -93,6 +93,7 @@ object WysiwygEditorFunctions {
         "bulletList", "orderedList", "blockquote",
         "link", "code", "textColor", "highlight",
         "image", "video", "file",
+        "poll", "divider",
         "clearFormat",
     )
 
@@ -1693,6 +1694,8 @@ internal val TOOL_ICONS: Map<String, ToolIcon> = mapOf(
     // Plain body text — offered in the Format sheet as the way BACK from a
     // heading, so it needs a glyph like every other row.
     "p" to ToolIcon("M4 6L20 6M4 12L20 12M4 18L14 18"),
+    "poll" to ToolIcon("M6 19L6 11M12 19L12 5M18 19L18 14"),
+    "divider" to ToolIcon("M4 12L20 12"),
     "link" to ToolIcon(
         "M9.5 12L14.5 12" +
             "M10 8L7.5 8C5.3 8 3.5 9.8 3.5 12C3.5 14.2 5.3 16 7.5 16L10 16" +
@@ -2888,8 +2891,111 @@ internal fun EditorScreen(
     val palette = remember { mutableStateOf<String?>(null) }
     /** Which bottom sheet is open, in `menu: sheet` mode. */
     val sheet = remember { mutableStateOf<String?>(null) }
+    /** The poll being composed, if any. Non-null means the composer is open. */
+    val pollDraft = remember { mutableStateOf<PollDraft?>(null) }
     val length = remember { mutableStateOf(initialBlocks.sumOf { it.plainText.length }) }
     val words = remember { mutableStateOf(countWords(initialBlocks)) }
+
+        // ── Editor: one view per segment ─────────────────────────────────────
+        val nextId = remember { intArrayOf(0) }
+        val entries = remember {
+            androidx.compose.runtime.mutableStateListOf<SegmentEntry>().also { list ->
+                segmentsOf(initialBlocks).forEach { list.add(SegmentEntry(nextId[0]++, it)) }
+            }
+        }
+
+        /** Reassemble the whole document from every segment's live state. */
+        fun rebuildDocument() {
+            val out = mutableListOf<WysiwygBlock>()
+            for (entry in entries) {
+                when (val segment = entry.segment) {
+                    is Segment.Text -> out.addAll(controllers[entry.id]?.document() ?: segment.blocks)
+                    is Segment.Media -> out.add(segment.block)
+                }
+            }
+            onDocumentChanged(out)
+            length.value = out.sumOf { it.plainText.length }
+            words.value = countWords(out)
+        }
+
+        /**
+         * Place a composed block after the focused segment, then give the
+         * user a fresh paragraph below so typing can continue.
+         */
+        fun insertBlock(block: WysiwygBlock) {
+            val at = entries.indexOfFirst { controllers[it.id] === focused.value }
+            val insertAt = if (at >= 0) at + 1 else entries.size
+            entries.add(insertAt, SegmentEntry(nextId[0]++, Segment.Media(block)))
+            entries.add(
+                insertAt + 1,
+                SegmentEntry(nextId[0]++, Segment.Text(mutableListOf(WysiwygBlock("p")))),
+            )
+            rebuildDocument()
+        }
+
+        /**
+         * Insert or replace a poll.
+         *
+         * Unlike image / video / file, a poll needs no host round-trip:
+         * there is nothing to pick and nothing to upload, so the editor
+         * composes it itself. Passing [replacing] edits that segment
+         * instead of adding one.
+         */
+        fun savePoll(question: String, options: List<String>, replacing: Int?) {
+            val block = WysiwygBlock("poll")
+            block.attrs["question"] = question
+            block.options.addAll(
+                options.mapIndexedNotNull { index, label ->
+                    label.trim().takeIf { it.isNotEmpty() }?.let { PollOption("o${index + 1}", it) }
+                },
+            )
+
+            val index = replacing?.let { id -> entries.indexOfFirst { it.id == id } } ?: -1
+            if (index >= 0) {
+                entries[index] = SegmentEntry(entries[index].id, Segment.Media(block))
+                rebuildDocument()
+                return
+            }
+
+            insertBlock(block)
+        }
+
+        /**
+         * Backspace pressed at the very start of the text segment [entryId].
+         *
+         * If a media card sits directly above, it is deleted — matching what
+         * Notes and Docs do, where backspacing into an image removes it rather
+         * than doing nothing. When that leaves two text segments touching they
+         * merge into one and the caret lands on the join.
+         *
+         * Returns true when the keystroke was consumed.
+         */
+        fun handleBackspaceAtStart(entryId: Int): Boolean {
+            val index = entries.indexOfFirst { it.id == entryId }
+            if (index <= 0) return false
+            if (entries[index - 1].segment !is Segment.Media) return false
+
+            entries.removeAt(index - 1)
+            val position = index - 1
+
+            // Two text segments are now adjacent — fold the lower one into the
+            // upper one so the document keeps ONE editor per run of text.
+            val above = entries.getOrNull(position - 1)
+            val aboveController = above?.let { controllers[it.id] }
+            val mine = controllers[entryId]
+            if (above != null && above.segment is Segment.Text && aboveController != null && mine != null) {
+                val join = aboveController.styledLength() + 1
+                aboveController.replaceDocument(aboveController.document() + mine.document(), join)
+                controllers.remove(entryId)
+                entries.removeAt(position)
+                focused.value = aboveController
+                aboveController.refocus()
+            }
+
+            rebuildDocument()
+            revision.value++
+            return true
+        }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -2921,64 +3027,6 @@ internal fun EditorScreen(
                 BarButton(localized(config.strings, "save", "Save"), accent, FontWeight.SemiBold, onSave)
             }
 
-            // ── Editor: one view per segment ─────────────────────────────────────
-            val nextId = remember { intArrayOf(0) }
-            val entries = remember {
-                androidx.compose.runtime.mutableStateListOf<SegmentEntry>().also { list ->
-                    segmentsOf(initialBlocks).forEach { list.add(SegmentEntry(nextId[0]++, it)) }
-                }
-            }
-
-            /** Reassemble the whole document from every segment's live state. */
-            fun rebuildDocument() {
-                val out = mutableListOf<WysiwygBlock>()
-                for (entry in entries) {
-                    when (val segment = entry.segment) {
-                        is Segment.Text -> out.addAll(controllers[entry.id]?.document() ?: segment.blocks)
-                        is Segment.Media -> out.add(segment.block)
-                    }
-                }
-                onDocumentChanged(out)
-                length.value = out.sumOf { it.plainText.length }
-                words.value = countWords(out)
-            }
-
-            /**
-             * Backspace pressed at the very start of the text segment [entryId].
-             *
-             * If a media card sits directly above, it is deleted — matching what
-             * Notes and Docs do, where backspacing into an image removes it rather
-             * than doing nothing. When that leaves two text segments touching they
-             * merge into one and the caret lands on the join.
-             *
-             * Returns true when the keystroke was consumed.
-             */
-            fun handleBackspaceAtStart(entryId: Int): Boolean {
-                val index = entries.indexOfFirst { it.id == entryId }
-                if (index <= 0) return false
-                if (entries[index - 1].segment !is Segment.Media) return false
-
-                entries.removeAt(index - 1)
-                val position = index - 1
-
-                // Two text segments are now adjacent — fold the lower one into the
-                // upper one so the document keeps ONE editor per run of text.
-                val above = entries.getOrNull(position - 1)
-                val aboveController = above?.let { controllers[it.id] }
-                val mine = controllers[entryId]
-                if (above != null && above.segment is Segment.Text && aboveController != null && mine != null) {
-                    val join = aboveController.styledLength() + 1
-                    aboveController.replaceDocument(aboveController.document() + mine.document(), join)
-                    controllers.remove(entryId)
-                    entries.removeAt(position)
-                    focused.value = aboveController
-                    aboveController.refocus()
-                }
-
-                rebuildDocument()
-                revision.value++
-                return true
-            }
 
             // Expose this editor to the media bridge functions while it is open.
             androidx.compose.runtime.DisposableEffect(Unit) {
@@ -3028,7 +3076,21 @@ internal fun EditorScreen(
                 ) {
                     entries.forEachIndexed { index, entry ->
                         when (val segment = entry.segment) {
-                            is Segment.Media -> MediaCard(segment.block, foreground, accent, config.strings)
+                            is Segment.Media -> MediaCard(
+                            segment.block,
+                            foreground,
+                            accent,
+                            config.strings,
+                            onTap = {
+                                if (segment.block.type == "poll") {
+                                    pollDraft.value = PollDraft(
+                                        entryId = entry.id,
+                                        question = segment.block.attrs["question"] ?: "",
+                                        options = segment.block.options.map { it.label },
+                                    )
+                                }
+                            },
+                        )
                             is Segment.Text -> AndroidView(
                                 modifier = Modifier.fillMaxWidth(),
                                 factory = { context ->
@@ -3184,6 +3246,17 @@ internal fun EditorScreen(
                         sheet.value = null
                         runTool(tool, controller, palette, activity, config.strings, onRequestMedia)
                     }
+                    "poll" -> {
+                        // Composed HERE, not by the host: there is nothing to
+                        // pick and nothing to upload, so a round-trip would
+                        // buy nothing.
+                        sheet.value = null
+                        pollDraft.value = PollDraft()
+                    }
+                    "divider" -> {
+                        sheet.value = null
+                        insertBlock(WysiwygBlock("divider"))
+                    }
                     in WysiwygEditorFunctions.INSERT_TOOLS -> {
                         sheet.value = null
                         onRequestMedia(tool)
@@ -3241,6 +3314,31 @@ internal fun EditorScreen(
                     onDismiss = { sheet.value = null },
                 ) {
                     enabled(SHEET_INSERT_TOOLS).forEach { row(it) }
+                }
+            }
+        }
+
+        // ── Poll composer ───────────────────────────────────────────────────
+        pollDraft.value?.let { draft ->
+            WysiwygSheet(
+                title = localized(
+                    config.strings,
+                    if (draft.entryId == null) "pollTitle" else "pollEditTitle",
+                    if (draft.entryId == null) "New poll" else "Edit poll",
+                ),
+                background = background,
+                foreground = foreground,
+                onDismiss = { pollDraft.value = null },
+            ) {
+                PollComposer(
+                    draft = draft,
+                    background = background,
+                    foreground = foreground,
+                    accent = accent,
+                    strings = config.strings,
+                ) { question, options ->
+                    savePoll(question, options, draft.entryId)
+                    pollDraft.value = null
                 }
             }
         }
@@ -3335,7 +3433,7 @@ internal fun cardIconKey(type: String): String = when (type) {
     "video" -> "video"
     "file" -> "file"
     "embed" -> "link"
-    "poll" -> "orderedList"
+    "poll" -> "poll"
     else -> "bulletList"
 }
 
@@ -3345,6 +3443,7 @@ private fun MediaCard(
     foreground: Color,
     accent: Color,
     strings: Map<String, String> = emptyMap(),
+    onTap: () -> Unit = {},
 ) {
     if (block.type == "divider") {
         Box(
@@ -3393,6 +3492,7 @@ private fun MediaCard(
             .padding(horizontal = 16.dp, vertical = 8.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(foreground.copy(alpha = 0.06f))
+            .clickable { onTap() }
             .padding(horizontal = 14.dp, vertical = 14.dp),
     ) {
         bitmap.value?.let { image ->
@@ -3492,6 +3592,8 @@ internal val TOOL_LABEL_KEYS = mapOf(
     "image" to "toolImage",
     "video" to "toolVideo",
     "file" to "toolFile",
+    "poll" to "toolPoll",
+    "divider" to "toolDivider",
     "clearFormat" to "toolClearFormat",
 )
 
@@ -3500,7 +3602,7 @@ internal val SHEET_TEXT_STYLE_TOOLS = listOf("h1", "h2", "h3", "blockquote")
 internal val SHEET_LIST_TOOLS = listOf("bulletList", "orderedList")
 internal val SHEET_FORMAT_TOOLS =
     listOf("bold", "italic", "underline", "strikethrough", "code", "textColor", "highlight", "clearFormat")
-internal val SHEET_INSERT_TOOLS = listOf("image", "video", "file", "link")
+internal val SHEET_INSERT_TOOLS = listOf("image", "video", "file", "poll", "divider", "link")
 
 /**
  * The tick drawn beside an active row. Same 24x24 grid as the tool glyphs,
@@ -3887,6 +3989,155 @@ private fun SheetSection(title: String, foreground: Color) {
         ),
         modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp),
     )
+}
+
+/**
+ * A poll being written. Two blank options to start, because a poll with one is
+ * not a poll.
+ */
+class PollDraft(
+    val entryId: Int? = null,
+    val question: String = "",
+    val options: List<String> = listOf("", ""),
+)
+
+/**
+ * Question, options, and a button. Deliberately plain — the poll is content,
+ * so the composer should get out of the way rather than be a feature of its own.
+ */
+@Composable
+private fun PollComposer(
+    draft: PollDraft,
+    background: Color,
+    foreground: Color,
+    accent: Color,
+    strings: Map<String, String>,
+    onSave: (String, List<String>) -> Unit,
+) {
+    val question = remember(draft) { androidx.compose.runtime.mutableStateOf(draft.question) }
+    val options = remember(draft) {
+        androidx.compose.runtime.mutableStateListOf<String>().also { it.addAll(draft.options) }
+    }
+
+    // A poll needs a question and at least two options to be worth inserting.
+    val canSave = question.value.trim().isNotEmpty() && options.count { it.trim().isNotEmpty() } >= 2
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+    ) {
+        PollField(
+            value = question.value,
+            placeholder = localized(strings, "pollQuestion", "Ask a question"),
+            foreground = foreground,
+            accent = accent,
+            bold = true,
+            onChange = { question.value = it },
+        )
+
+        options.forEachIndexed { index, value ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+            ) {
+                Box(modifier = Modifier.weight(1f)) {
+                    PollField(
+                        value = value,
+                        placeholder = localized(strings, "pollOption", "Option {n}", n = index + 1),
+                        foreground = foreground,
+                        accent = accent,
+                        bold = false,
+                        onChange = { options[index] = it },
+                    )
+                }
+                // Below three, removing would leave a poll that cannot be voted
+                // on, so the control is simply not offered.
+                if (options.size > 2) {
+                    val icon = TOOL_ICONS["clearFormat"]
+                    Canvas(
+                        modifier = Modifier.size(18.dp).clickable { options.removeAt(index) },
+                    ) {
+                        if (icon != null) {
+                            drawPath(
+                                path = buildIconPath(icon.path, size.width),
+                                color = foreground.copy(alpha = 0.4f),
+                                style = Stroke(
+                                    width = 2f * size.width / 24f,
+                                    cap = StrokeCap.Round,
+                                    join = StrokeJoin.Round,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        BasicText(
+            text = localized(strings, "pollAddOption", "Add option"),
+            style = TextStyle(color = accent, fontSize = 15.sp),
+            modifier = Modifier.clickable { options.add("") },
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(46.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (canSave) accent else foreground.copy(alpha = 0.2f))
+                .clickable(enabled = canSave) { onSave(question.value, options.toList()) },
+            contentAlignment = Alignment.Center,
+        ) {
+            BasicText(
+                text = localized(
+                    strings,
+                    if (draft.entryId == null) "pollInsert" else "pollUpdate",
+                    if (draft.entryId == null) "Insert poll" else "Update poll",
+                ),
+                style = TextStyle(color = background, fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
+            )
+        }
+    }
+}
+
+@Composable
+private fun PollField(
+    value: String,
+    placeholder: String,
+    foreground: Color,
+    accent: Color,
+    bold: Boolean,
+    onChange: (String) -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(foreground.copy(alpha = 0.06f))
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        if (value.isEmpty()) {
+            BasicText(
+                text = placeholder,
+                style = TextStyle(color = foreground.copy(alpha = 0.38f), fontSize = 16.sp),
+            )
+        }
+        androidx.compose.foundation.text.BasicTextField(
+            value = value,
+            onValueChange = onChange,
+            singleLine = true,
+            textStyle = TextStyle(
+                color = foreground,
+                fontSize = 16.sp,
+                fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal,
+            ),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(accent),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 @Composable

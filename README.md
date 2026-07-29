@@ -116,8 +116,8 @@ All options are optional:
 Available tools for `toolbar` (this order is the `full` preset):
 `bold`, `italic`, `underline`, `strikethrough`, `h1`, `h2`, `h3`,
 `bulletList`, `orderedList`, `blockquote`, `link`, `code`, `textColor`,
-`highlight`, `image`, `video`, `file`, `clearFormat`. Undo/redo are always
-present and are not toolbar keys.
+`highlight`, `image`, `video`, `file`, `poll`, `divider`, `clearFormat`.
+Undo/redo are always present and are not toolbar keys.
 
 Toolbar presets:
 
@@ -367,6 +367,17 @@ The block appears the moment it is inserted, rendering from `localPath`, so
 the user never waits on a network round-trip. Until an upload completes the
 block exports as `<figure data-pending="…">` with **no `src`** — the device
 path is never written into published HTML.
+
+## Polls
+
+`poll` inserts a poll the user writes in the editor — a question and its
+options — with no host round-trip, because there is nothing to pick and
+nothing to upload. Tapping an existing poll re-opens the composer to edit it.
+
+The editor **authors** polls; it does not run them. Voting belongs to whatever
+renders your saved content, which is also where the votes have to be stored.
+The block round-trips through HTML as `<figure data-poll="…">` and through
+JSON with its option ids intact, so your renderer has everything it needs.
 
 ## Exporting
 

@@ -48,6 +48,7 @@ class WysiwygEditor
         'bulletList', 'orderedList', 'blockquote',
         'link', 'code', 'textColor', 'highlight',
         'image', 'video', 'file',
+        'poll', 'divider',
         'clearFormat',
     ];
 
@@ -154,6 +155,16 @@ class WysiwygEditor
         'toolImage' => 'Photo',
         'toolVideo' => 'Video',
         'toolFile' => 'File',
+        'toolPoll' => 'Poll',
+        'toolDivider' => 'Divider',
+        // Poll composer
+        'pollTitle' => 'New poll',
+        'pollEditTitle' => 'Edit poll',
+        'pollQuestion' => 'Ask a question',
+        'pollOption' => 'Option {n}',
+        'pollAddOption' => 'Add option',
+        'pollInsert' => 'Insert poll',
+        'pollUpdate' => 'Update poll',
     ];
 
     /**
@@ -217,6 +228,8 @@ class WysiwygEditor
         'image' => 'toolImage',
         'video' => 'toolVideo',
         'file' => 'toolFile',
+        'poll' => 'toolPoll',
+        'divider' => 'toolDivider',
         'clearFormat' => 'toolClearFormat',
     ];
 

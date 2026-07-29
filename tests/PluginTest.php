@@ -83,6 +83,54 @@ describe('Plugin Manifest', function () {
     });
 });
 
+describe('Native parity', function () {
+    /**
+     * Both native files keep their OWN allow-list of tool names, because the
+     * config arrives as untrusted JSON and has to be filtered somewhere. That
+     * means three copies of the same list — and when `poll` and `divider` were
+     * added to PHP alone, they silently vanished from both editors with no
+     * error anywhere. These read the native sources and fail loudly instead.
+     */
+    it('lists the same tools natively as PHP does', function (string $file, string $pattern) {
+        $source = file_get_contents($this->pluginPath.$file);
+
+        expect(preg_match($pattern, $source, $m))->toBe(1);
+
+        preg_match_all('/"([a-zA-Z0-9]+)"/', $m[1], $found);
+
+        expect($found[1])->toBe(WysiwygEditor::AVAILABLE_TOOLS);
+    })->with([
+        ['/resources/ios/WysiwygEditorFunctions.swift', '/static let allTools = \[(.*?)\]/s'],
+        ['/resources/android/WysiwygEditorFunctions.kt', '/val AVAILABLE_TOOLS = listOf\((.*?)\)/s'],
+    ]);
+
+    it('ships the same insert tools natively as PHP does', function (string $file, string $pattern) {
+        $source = file_get_contents($this->pluginPath.$file);
+
+        expect(preg_match($pattern, $source, $m))->toBe(1);
+
+        preg_match_all('/"([a-zA-Z0-9]+)"/', $m[1], $found);
+
+        expect($found[1])->toBe(WysiwygEditor::INSERT_TOOLS);
+    })->with([
+        ['/resources/ios/WysiwygEditorFunctions.swift', '/static let insertTools = \[(.*?)\]/s'],
+        ['/resources/android/WysiwygEditorFunctions.kt', '/val INSERT_TOOLS = listOf\((.*?)\)/s'],
+    ]);
+
+    it('labels tools with keys both platforms agree on', function (string $file, string $pattern) {
+        $source = file_get_contents($this->pluginPath.$file);
+
+        expect(preg_match($pattern, $source, $m))->toBe(1);
+
+        preg_match_all('/"([a-zA-Z0-9]+)"\s*(?::|to)\s*"([a-zA-Z0-9]+)"/', $m[1], $found);
+
+        expect(array_combine($found[1], $found[2]))->toBe(WysiwygEditor::TOOL_LABEL_KEYS);
+    })->with([
+        ['/resources/ios/WysiwygEditorFunctions.swift', '/let toolLabelKeys: \[String: String\] = \[(.*?)\n\]/s'],
+        ['/resources/android/WysiwygEditorFunctions.kt', '/val TOOL_LABEL_KEYS = mapOf\((.*?)\n\)/s'],
+    ]);
+});
+
 describe('Toolbar resolution', function () {
     it('defaults to the full toolbar', function () {
         $config = editor()->config('');
