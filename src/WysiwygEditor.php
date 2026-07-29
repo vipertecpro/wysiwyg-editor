@@ -503,8 +503,13 @@ class WysiwygEditor
      */
     protected function resolveConfig(string $html, array $options): array
     {
+        $document = $this->documentJson($html);
+
         return [
-            'content' => $html,
+            // Empty when the caller handed us JSON — the native side prefers
+            // `contentJson` and only parses HTML when there is none.
+            'content' => $document === null ? $html : '',
+            'contentJson' => $document ?? '',
             'toolbar' => $this->resolveToolbar($options),
             'title' => (string) ($options['title'] ?? ''),
             'placeholder' => (string) ($options['placeholder'] ?? ''),
@@ -607,6 +612,32 @@ class WysiwygEditor
     protected function pick(mixed $value, array $allowed): string
     {
         return in_array($value, $allowed, true) ? $value : $allowed[0];
+    }
+
+    /**
+     * Is this content our document JSON rather than HTML?
+     *
+     * `open()` has always taken HTML, but HTML deliberately cannot carry a
+     * local file path — a device path must not leak into published markup —
+     * so re-opening a post from its HTML silently loses every image whose
+     * upload had not finished. JSON is the canonical form; if you saved it,
+     * you can hand it straight back.
+     *
+     * Returns the JSON when it is one of our documents, or null to treat the
+     * input as HTML. Anything ambiguous is HTML, which is the safe default:
+     * misreading HTML as JSON would empty the editor.
+     */
+    protected function documentJson(string $content): ?string
+    {
+        $trimmed = ltrim($content);
+
+        if ($trimmed === '' || $trimmed[0] !== '{') {
+            return null;
+        }
+
+        $decoded = json_decode($content, true);
+
+        return is_array($decoded) && is_array($decoded['blocks'] ?? null) ? $content : null;
     }
 
     /**

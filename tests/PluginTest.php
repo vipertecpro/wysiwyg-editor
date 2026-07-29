@@ -214,6 +214,47 @@ describe('Config resolution', function () {
     });
 });
 
+describe('Reopening a saved document', function () {
+    it('passes HTML through as content', function () {
+        $config = editor()->config('<p>Hi</p>');
+
+        expect($config['content'])->toBe('<p>Hi</p>')
+            ->and($config['contentJson'])->toBe('');
+    });
+
+    it('recognises our own JSON and hands it over intact', function () {
+        $json = '{"version":2,"blocks":[{"id":"b1","type":"p","runs":[]}]}';
+        $config = editor()->config($json);
+
+        expect($config['contentJson'])->toBe($json)
+            ->and($config['content'])->toBe('');
+    });
+
+    /**
+     * The point of the whole feature: HTML cannot carry a device path, so a
+     * post whose upload never finished loses its pictures on re-open unless
+     * the JSON goes back in.
+     */
+    it('keeps a local path that HTML could never have carried', function () {
+        $json = '{"version":2,"blocks":[{"id":"b1","type":"image","localPath":"/tmp/a.jpg"}]}';
+
+        expect(editor()->config($json)['contentJson'])->toContain('/tmp/a.jpg');
+    });
+
+    it('treats anything that is not one of our documents as HTML', function (string $input) {
+        $config = editor()->config($input);
+
+        expect($config['content'])->toBe($input)
+            ->and($config['contentJson'])->toBe('');
+    })->with([
+        '<p>{not json}</p>',
+        '{"nope":1}',
+        '{ broken',
+        '',
+        '   <p>leading space</p>',
+    ]);
+});
+
 describe('Counts', function () {
     it('is off by default', function () {
         expect(editor()->config('')['counts'])->toBe([]);

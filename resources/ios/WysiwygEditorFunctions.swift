@@ -210,6 +210,7 @@ struct WysiwygConfig {
     ]
 
     let content: String
+    let contentJson: String
     let toolbar: [String]
     let title: String
     let placeholder: String
@@ -233,6 +234,7 @@ struct WysiwygConfig {
 
     init(_ p: [String: Any]) {
         content = p["content"] as? String ?? ""
+        contentJson = p["contentJson"] as? String ?? ""
         // An explicit empty list means NO toolbar; a list of names we do not
         // know falls back, so a typo cannot silently strip the bar.
         if let asked = p["toolbar"] as? [String] {
@@ -2368,7 +2370,12 @@ final class WysiwygDocumentModel: ObservableObject {
 
     init(config: WysiwygConfig) {
         self.config = config
-        let parsed = HtmlCoder.parse(config.content)
+        // JSON first: it is the canonical form, and HTML deliberately cannot
+        // carry a device path, so a document re-opened from HTML would lose
+        // every image whose upload had not finished.
+        let parsed = config.contentJson.isEmpty
+            ? HtmlCoder.parse(config.content)
+            : JsonCoder.decode(config.contentJson)
         self.initialNormalizedHtml = HtmlCoder.emit(parsed).html
 
         for segment in segmentsOf(parsed) {
