@@ -107,14 +107,15 @@ All options are optional:
 | `strings` | array | English | Translations for every user-visible string — see Localization |
 | `changeDebounce` | int | `0` | Emit `ContentChanged` this many ms after typing stops; `0` = off |
 | `haptics` | bool | `true` | Light haptic tap on toolbar buttons |
+| `menu` | string | `toolbar` | `toolbar` = one scrolling bar; `sheet` = compact bar + Format/Insert bottom sheets |
 | `theme` | array | `[]` | Hex colors: `background`, `text`, `accent` (Save button), `highlight` (active states). Omitted keys fall back to the host app's theme, then to system-adaptive defaults |
 | `id` | string | `null` | Echoed back on the result event, to correlate concurrent editors |
 
 Available tools for `toolbar` (this order is the `full` preset):
 `bold`, `italic`, `underline`, `strikethrough`, `h1`, `h2`, `h3`,
 `bulletList`, `orderedList`, `blockquote`, `link`, `code`, `textColor`,
-`highlight`, `clearFormat`. Undo/redo are always present and are not toolbar
-keys.
+`highlight`, `image`, `video`, `file`, `clearFormat`. Undo/redo are always
+present and are not toolbar keys.
 
 Toolbar presets:
 
@@ -364,6 +365,31 @@ The block appears the moment it is inserted, rendering from `localPath`, so
 the user never waits on a network round-trip. Until an upload completes the
 block exports as `<figure data-pending="…">` with **no `src`** — the device
 path is never written into published HTML.
+
+## Toolbar or bottom sheets
+
+`menu` decides how the tools are reached:
+
+```php
+WysiwygEditor::open($html, ['menu' => 'sheet']);
+```
+
+- **`toolbar`** (default) puts every enabled tool in one horizontally
+  scrolling bar. Right for a short toolbar — the `comment` preset has four
+  tools and they all fit.
+- **`sheet`** keeps undo/redo and bold/italic on the bar and moves the rest
+  behind **Format** and **Insert** bottom sheets. Right for the full toolbar,
+  where a scrolling bar hides most tools off the right edge and nobody
+  scrolls it.
+
+The sheets are built from the SAME `toolbar` list, so they stay modular: a
+tool you did not enable does not appear, and a section with nothing in it is
+not drawn. Every row is localizable through `strings` like everything else —
+see `WysiwygEditor::TOOL_LABEL_KEYS` for which key labels which tool.
+
+`Body` is always offered in the Format sheet even though it is not a tool,
+because without it there is no way back to plain text once a heading has been
+applied.
 
 ## Developing on a device
 

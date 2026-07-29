@@ -129,7 +129,76 @@ class WysiwygEditor
         'ruleMaxWords' => 'At most {max} words allowed — you have {n}.',
         'ruleMaxImages' => 'At most {max} image(s) allowed — you have {n}.',
         'ruleRequiredBlock' => 'This needs at least one {type}.',
+        // Bottom sheets
+        'menuFormat' => 'Format',
+        'menuInsert' => 'Insert',
+        'sectionTextStyle' => 'Text style',
+        'sectionLists' => 'Lists',
+        'sectionFormat' => 'Formatting',
+        'styleBody' => 'Body',
+        'styleH1' => 'Heading 1',
+        'styleH2' => 'Heading 2',
+        'styleH3' => 'Heading 3',
+        'styleQuote' => 'Quote',
+        'toolBold' => 'Bold',
+        'toolItalic' => 'Italic',
+        'toolUnderline' => 'Underline',
+        'toolStrikethrough' => 'Strikethrough',
+        'toolCode' => 'Code',
+        'toolTextColor' => 'Text color',
+        'toolHighlight' => 'Highlight',
+        'toolClearFormat' => 'Clear formatting',
+        'toolBulletList' => 'Bulleted list',
+        'toolOrderedList' => 'Numbered list',
+        'toolLink' => 'Link',
+        'toolImage' => 'Photo',
+        'toolVideo' => 'Video',
+        'toolFile' => 'File',
     ];
+
+    /**
+     * Which string key labels each tool in a bottom sheet.
+     *
+     * Headings and quote read as text STYLES rather than as tools, so they use
+     * the `style*` keys and sit in their own section. Declared here rather than
+     * as a switch inside each native file, so the two platforms cannot drift.
+     *
+     * @var array<string, string>
+     */
+    public const TOOL_LABEL_KEYS = [
+        'bold' => 'toolBold',
+        'italic' => 'toolItalic',
+        'underline' => 'toolUnderline',
+        'strikethrough' => 'toolStrikethrough',
+        'h1' => 'styleH1',
+        'h2' => 'styleH2',
+        'h3' => 'styleH3',
+        'bulletList' => 'toolBulletList',
+        'orderedList' => 'toolOrderedList',
+        'blockquote' => 'styleQuote',
+        'link' => 'toolLink',
+        'code' => 'toolCode',
+        'textColor' => 'toolTextColor',
+        'highlight' => 'toolHighlight',
+        'image' => 'toolImage',
+        'video' => 'toolVideo',
+        'file' => 'toolFile',
+        'clearFormat' => 'toolClearFormat',
+    ];
+
+    /**
+     * How the tools are presented.
+     *
+     *  - toolbar: every tool in one horizontally scrolling bar (the default,
+     *             and the right choice for a small toolbar like `comment`)
+     *  - sheet:   a compact bar — undo/redo, bold/italic, then Format and
+     *             Insert buttons that open bottom sheets holding the rest.
+     *             Fewer taps to reach a tool that is not the first four, and
+     *             nothing hides off the edge of the screen.
+     *
+     * @var list<string>
+     */
+    public const MENU_MODES = ['toolbar', 'sheet'];
 
     /**
      * How the host application's NativeUI theme tokens map onto the editor's
@@ -289,6 +358,7 @@ class WysiwygEditor
             // milliseconds after the user stops typing — the auto-save seam.
             'changeDebounce' => max(0, (int) ($options['changeDebounce'] ?? 0)),
             'haptics' => (bool) ($options['haptics'] ?? true),
+            'menu' => $this->resolveMenu($options['menu'] ?? null),
             // Explicit overrides win; the two scheme maps below are the host
             // app's own theme, so an unconfigured editor still looks native.
             'theme' => $this->resolveTheme($options['theme'] ?? []),
@@ -296,6 +366,15 @@ class WysiwygEditor
             'themeDark' => $this->hostTheme('dark'),
             'id' => $options['id'] ?? null,
         ];
+    }
+
+    /**
+     * Presentation mode for the tools. Anything unrecognised falls back to the
+     * scrolling toolbar, which can show every tool whatever the config says.
+     */
+    protected function resolveMenu(mixed $menu): string
+    {
+        return in_array($menu, self::MENU_MODES, true) ? $menu : 'toolbar';
     }
 
     /**

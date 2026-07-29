@@ -210,6 +210,32 @@ describe('Localization', function () {
     });
 });
 
+describe('Menu mode', function () {
+    it('defaults to the scrolling toolbar', function () {
+        expect(editor()->config('')['menu'])->toBe('toolbar');
+    });
+
+    it('accepts the documented modes', function (string $mode) {
+        expect(editor()->config('', ['menu' => $mode])['menu'])->toBe($mode);
+    })->with(WysiwygEditor::MENU_MODES);
+
+    it('falls back to the toolbar for anything unrecognised', function () {
+        expect(editor()->config('', ['menu' => 'popover'])['menu'])->toBe('toolbar');
+    });
+
+    it('labels every tool a sheet can show, with a string that exists', function () {
+        foreach (WysiwygEditor::AVAILABLE_TOOLS as $tool) {
+            expect(WysiwygEditor::TOOL_LABEL_KEYS)->toHaveKey($tool);
+            expect(WysiwygEditor::STRINGS)->toHaveKey(WysiwygEditor::TOOL_LABEL_KEYS[$tool]);
+        }
+    });
+
+    it('does not label tools that do not exist', function () {
+        expect(array_diff(array_keys(WysiwygEditor::TOOL_LABEL_KEYS), WysiwygEditor::AVAILABLE_TOOLS))
+            ->toBe([]);
+    });
+});
+
 describe('Validation rules', function () {
     it('is empty by default', function () {
         expect(editor()->config('')['validation'])->toBe([]);

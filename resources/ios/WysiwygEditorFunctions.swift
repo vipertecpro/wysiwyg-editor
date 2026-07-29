@@ -188,6 +188,7 @@ struct WysiwygConfig {
     let placeholder: String
     let maxLength: Int
     let counts: [String]
+    let menu: String
     let validation: [String: Any]
     let strings: [String: String]
     let changeDebounce: Int
@@ -203,6 +204,7 @@ struct WysiwygConfig {
         placeholder = p["placeholder"] as? String ?? ""
         maxLength = max(0, (p["maxLength"] as? NSNumber)?.intValue ?? 0)
         counts = p["counts"] as? [String] ?? []
+        menu = p["menu"] as? String ?? "toolbar"
         validation = p["validation"] as? [String: Any] ?? [:]
         strings = p["strings"] as? [String: String] ?? [:]
         changeDebounce = max(0, (p["changeDebounce"] as? NSNumber)?.intValue ?? 0)
@@ -2453,6 +2455,8 @@ private struct EditorScreen: View {
     @State private var showDiscard = false
     @State private var validationMessage: String?
     @State private var palette: PaletteKind?
+    /// Which bottom sheet is open, in `menu: sheet` mode.
+    @State private var sheet: SheetKind?
     /// Measured height per TEXT segment — each editor grows to fit.
     @State private var heights: [Int: CGFloat] = [:]
 
@@ -2486,10 +2490,11 @@ private struct EditorScreen: View {
                     }
                 }
                 if let focused = document.focused {
-                    ToolbarRow(model: focused, palette: $palette)
+                    ToolbarRow(model: focused, palette: $palette, sheet: $sheet)
                 }
             }
             .padding(.bottom, max(0, keyboard.height - geo.safeAreaInsets.bottom))
+            .overlay(sheetOverlay)
         }
         .background(theme.backgroundColor.ignoresSafeArea())
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -2512,6 +2517,112 @@ private struct EditorScreen: View {
             }
         } message: {
             Text(validationMessage ?? "")
+        }
+    }
+
+    /// The open sheet, over everything including the toolbar.
+    @ViewBuilder
+    private var sheetOverlay: some View {
+        if let kind = sheet, let focused = document.focused {
+            switch kind {
+            case .format:
+                WysiwygSheet(theme: theme,
+                             title: localized(document.config.strings, "menuFormat", "Format"),
+                             onDismiss: { sheet = nil }) {
+                    formatSheetBody(focused)
+                }
+            case .insert:
+                WysiwygSheet(theme: theme,
+                             title: localized(document.config.strings, "menuInsert", "Insert"),
+                             onDismiss: { sheet = nil }) {
+                    insertSheetBody(focused)
+                }
+            }
+        }
+    }
+
+    /// Only tools the host actually enabled appear, and a section with nothing
+    /// in it is not drawn at all — the sheet reflects the config, not a menu of
+    /// everything the plugin could do.
+    private func enabled(_ tools: [String]) -> [String] {
+        tools.filter { document.config.toolbar.contains($0) }
+    }
+
+    private func row(_ tool: String, _ model: WysiwygEditorModel,
+                     label: String? = nil) -> some View {
+        let key = toolLabelKeys[tool] ?? tool
+        return SheetRow(tool: tool,
+                        label: label ?? localized(document.config.strings, key, tool),
+                        active: isActive(tool, model: model, palette: palette),
+                        theme: theme) {
+            if document.config.haptics {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
+            apply(tool, model)
+        }
+    }
+
+    /// Colour tools open the palette, so the sheet gets out of the way. Every
+    /// other tool leaves it open, which makes bold-then-italic two taps.
+    private func apply(_ tool: String, _ model: WysiwygEditorModel) {
+        switch tool {
+        case "bold", "italic", "underline", "strikethrough", "code":
+            model.toggleInline(tool)
+        case "p", "h1", "h2", "h3", "bulletList", "orderedList", "blockquote":
+            model.applyBlock(tool)
+        case "clearFormat":
+            model.clearFormat()
+        case "textColor":
+            palette = .text
+            sheet = nil
+        case "highlight":
+            palette = .highlight
+            sheet = nil
+        case "link":
+            sheet = nil
+            model.linkTapped()
+        case "image", "video", "file":
+            sheet = nil
+            var payload: [String: Any] = ["kind": tool]
+            if let id = document.config.id { payload["id"] = id }
+            LaravelBridge.shared.send?(WysiwygEvents.mediaRequested, payload)
+        default:
+            break
+        }
+    }
+
+    @ViewBuilder
+    private func formatSheetBody(_ model: WysiwygEditorModel) -> some View {
+        let styles = enabled(sheetTextStyleTools)
+        let lists = enabled(sheetListTools)
+        let marks = enabled(sheetFormatTools)
+
+        VStack(spacing: 0) {
+            // Body is always offered: without it there is no way back to plain
+            // text once a heading has been applied.
+            SheetSection(title: localized(document.config.strings, "sectionTextStyle", "Text style"),
+                         theme: theme)
+            row("p", model, label: localized(document.config.strings, "styleBody", "Body"))
+            ForEach(styles, id: \.self) { row($0, model) }
+
+            if !lists.isEmpty {
+                SheetSection(title: localized(document.config.strings, "sectionLists", "Lists"),
+                             theme: theme)
+                ForEach(lists, id: \.self) { row($0, model) }
+            }
+
+            if !marks.isEmpty {
+                SheetSection(title: localized(document.config.strings, "sectionFormat", "Formatting"),
+                             theme: theme)
+                ForEach(marks, id: \.self) { row($0, model) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func insertSheetBody(_ model: WysiwygEditorModel) -> some View {
+        VStack(spacing: 0) {
+            ForEach(enabled(sheetInsertTools), id: \.self) { row($0, model) }
         }
     }
 
@@ -2762,6 +2873,9 @@ private let toolIcons: [String: ToolIcon] = [
         + "M3.3 15.9L5.9 15.9L4.5 17.7C5.3 17.7 6 18.3 6 19.1C6 19.9 5.4 20.5 4.6 20.5C4 20.5 3.6 20.3 3.3 20"
         + "M9 6.5L20 6.5M9 12.2L20 12.2M9 18L20 18", stroke: 1.5),
     "blockquote": ToolIcon(path: "M4 5L4 19M9 8L20 8M9 12L20 12M9 16L17 16"),
+    // Plain body text — offered in the Format sheet as the way BACK from a
+    // heading, so it needs a glyph like every other row.
+    "p": ToolIcon(path: "M4 6L20 6M4 12L20 12M4 18L14 18"),
     "link": ToolIcon(path: "M9.5 12L14.5 12"
         + "M10 8L7.5 8C5.3 8 3.5 9.8 3.5 12C3.5 14.2 5.3 16 7.5 16L10 16"
         + "M14 8L16.5 8C18.7 8 20.5 9.8 20.5 12C20.5 14.2 18.7 16 16.5 16L14 16"),
@@ -2844,13 +2958,80 @@ private struct IconShape: Shape {
     }
 }
 
+// MARK: - Tool metadata
+
+/**
+ Which string key labels each tool in a bottom sheet.
+
+ Mirrors `WysiwygEditor::TOOL_LABEL_KEYS` in PHP and the Kotlin table of the
+ same name — headings and quote read as text STYLES, so they take the `style*`
+ keys and sit in their own section.
+ */
+let toolLabelKeys: [String: String] = [
+    "bold": "toolBold",
+    "italic": "toolItalic",
+    "underline": "toolUnderline",
+    "strikethrough": "toolStrikethrough",
+    "h1": "styleH1",
+    "h2": "styleH2",
+    "h3": "styleH3",
+    "bulletList": "toolBulletList",
+    "orderedList": "toolOrderedList",
+    "blockquote": "styleQuote",
+    "link": "toolLink",
+    "code": "toolCode",
+    "textColor": "toolTextColor",
+    "highlight": "toolHighlight",
+    "image": "toolImage",
+    "video": "toolVideo",
+    "file": "toolFile",
+    "clearFormat": "toolClearFormat",
+]
+
+/// Sheet sections, in display order. Normative — Kotlin uses the same lists.
+let sheetTextStyleTools = ["h1", "h2", "h3", "blockquote"]
+let sheetListTools = ["bulletList", "orderedList"]
+let sheetFormatTools = ["bold", "italic", "underline", "strikethrough",
+                        "code", "textColor", "highlight", "clearFormat"]
+let sheetInsertTools = ["image", "video", "file", "link"]
+
+/// Which sheet, if any, is open.
+enum SheetKind: Identifiable {
+    case format, insert
+    var id: Int { self == .format ? 0 : 1 }
+}
+
+/// Whether `tool` is currently in effect. Shared by the toolbar and the
+/// sheets, so a tool cannot look active in one and inactive in the other.
+private func isActive(_ tool: String, model: WysiwygEditorModel, palette: PaletteKind?) -> Bool {
+    switch tool {
+    case "bold": return model.activeMarks.bold
+    case "italic": return model.activeMarks.italic
+    case "underline": return model.activeMarks.underline
+    case "strikethrough": return model.activeMarks.strike
+    case "code": return model.activeMarks.code
+    case "link": return model.activeMarks.link != nil
+    case "textColor": return model.activeMarks.color != nil || palette == .text
+    case "highlight": return model.activeMarks.highlight != nil || palette == .highlight
+    case "h1", "h2", "h3", "blockquote": return model.activeBlock == tool
+    case "bulletList": return model.activeBlock == "ul"
+    case "orderedList": return model.activeBlock == "ol"
+    case "p": return !["h1", "h2", "h3", "ul", "ol", "blockquote"].contains(model.activeBlock)
+    default: return false
+    }
+}
+
 // MARK: - Formatting toolbar
 
 private struct ToolbarRow: View {
     @ObservedObject var model: WysiwygEditorModel
     @Binding var palette: PaletteKind?
+    @Binding var sheet: SheetKind?
 
     private var theme: WysiwygTheme { model.config.theme }
+
+    /// Compact bar + sheets, or one scrolling bar with everything on it.
+    private var sheetMode: Bool { model.config.menu == "sheet" }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -2862,8 +3043,13 @@ private struct ToolbarRow: View {
                     .fill(theme.textColor.opacity(0.15))
                     .frame(width: 1, height: 22)
                     .padding(.horizontal, 6)
-                ForEach(model.config.toolbar, id: \.self) { tool in
-                    toolButton(tool)
+
+                if sheetMode {
+                    compactTools
+                } else {
+                    ForEach(model.config.toolbar, id: \.self) { tool in
+                        toolButton(tool)
+                    }
                 }
             }
             .padding(.horizontal, 10)
@@ -2873,49 +3059,64 @@ private struct ToolbarRow: View {
         .overlay(Rectangle().fill(theme.textColor.opacity(0.12)).frame(height: 0.5), alignment: .top)
     }
 
+    /// Sheet mode: the two or three marks people reach for constantly stay one
+    /// tap away; everything else is behind Format / Insert rather than off the
+    /// right edge of a scrolling bar.
+    @ViewBuilder
+    private var compactTools: some View {
+        ForEach(model.config.toolbar.filter { ["bold", "italic"].contains($0) }, id: \.self) { tool in
+            toolButton(tool)
+        }
+
+        if model.config.toolbar.contains(where: { formatSheetTools.contains($0) }) {
+            labelledButton("textColor", localized(model.config.strings, "menuFormat", "Format"),
+                           active: sheet == .format) {
+                sheet = sheet == .format ? nil : .format
+            }
+        }
+        if model.config.toolbar.contains(where: { sheetInsertTools.contains($0) }) {
+            labelledButton("image", localized(model.config.strings, "menuInsert", "Insert"),
+                           active: sheet == .insert) {
+                sheet = sheet == .insert ? nil : .insert
+            }
+        }
+    }
+
+    /// Every tool the Format sheet can offer, in section order.
+    private var formatSheetTools: [String] {
+        sheetTextStyleTools + sheetListTools + sheetFormatTools
+    }
+
     @ViewBuilder
     private func toolButton(_ tool: String) -> some View {
+        button(tool, active: isActive(tool, model: model, palette: palette),
+               enabled: true) {
+            perform(tool)
+        }
+    }
+
+    /// Run a tool. Shared by the toolbar and both sheets so a tool cannot
+    /// behave differently depending on where it was tapped from.
+    private func perform(_ tool: String) {
         switch tool {
-        case "bold":
-            button("bold", active: model.activeMarks.bold) { model.toggleInline("bold") }
-        case "italic":
-            button("italic", active: model.activeMarks.italic) { model.toggleInline("italic") }
-        case "underline":
-            button("underline", active: model.activeMarks.underline) { model.toggleInline("underline") }
-        case "strikethrough":
-            button("strikethrough", active: model.activeMarks.strike) { model.toggleInline("strikethrough") }
-        case "h1":
-            button("h1", active: model.activeBlock == "h1") { model.applyBlock("h1") }
-        case "h2":
-            button("h2", active: model.activeBlock == "h2") { model.applyBlock("h2") }
-        case "h3":
-            button("h3", active: model.activeBlock == "h3") { model.applyBlock("h3") }
-        case "bulletList":
-            button("bulletList", active: model.activeBlock == "ul") { model.applyBlock("bulletList") }
-        case "orderedList":
-            button("orderedList", active: model.activeBlock == "ol") { model.applyBlock("orderedList") }
-        case "blockquote":
-            button("blockquote", active: model.activeBlock == "blockquote") { model.applyBlock("blockquote") }
+        case "bold", "italic", "underline", "strikethrough", "code":
+            model.toggleInline(tool)
+        case "h1", "h2", "h3", "bulletList", "orderedList", "blockquote":
+            model.applyBlock(tool)
+        case "p":
+            model.applyBlock("p")
         case "link":
-            button("link", active: model.activeMarks.link != nil) { model.linkTapped() }
-        case "code":
-            button("code", active: model.activeMarks.code) {
-                model.toggleInline("code")
-            }
+            model.linkTapped()
         case "textColor":
-            button("textColor", active: model.activeMarks.color != nil || palette == .text) {
-                palette = palette == .text ? nil : .text
-            }
+            palette = palette == .text ? nil : .text
         case "highlight":
-            button("highlight", active: model.activeMarks.highlight != nil || palette == .highlight) {
-                palette = palette == .highlight ? nil : .highlight
-            }
+            palette = palette == .highlight ? nil : .highlight
         case "clearFormat":
-            button("clearFormat", active: false) { model.clearFormat() }
+            model.clearFormat()
         case "image", "video", "file":
-            button(tool, active: false) { requestMedia(tool) }
+            requestMedia(tool)
         default:
-            EmptyView()
+            break
         }
     }
 
@@ -2939,6 +3140,25 @@ private struct ToolbarRow: View {
         }
     }
 
+    /// A wider button carrying a glyph AND a word — used for Format / Insert,
+    /// where an icon alone would not say which sheet opens.
+    private func labelledButton(_ icon: String, _ label: String, active: Bool,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: tap(action)) {
+            HStack(spacing: 6) {
+                IconShape(data: toolIcons[icon]?.path ?? "")
+                    .stroke(style: StrokeStyle(lineWidth: 2 * 18 / 24, lineCap: .round, lineJoin: .round))
+                    .frame(width: 18, height: 18)
+                Text(label).font(.system(size: 15, weight: .medium))
+            }
+            .foregroundColor(active ? theme.highlightColor : theme.textColor.opacity(0.78))
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(RoundedRectangle(cornerRadius: 8)
+                .fill(active ? theme.highlightColor.opacity(0.16) : Color.clear))
+        }
+    }
+
     private func button(_ tool: String, active: Bool, enabled: Bool = true,
                         action: @escaping () -> Void) -> some View {
         let icon = toolIcons[tool] ?? ToolIcon(path: "")
@@ -2956,6 +3176,142 @@ private struct ToolbarRow: View {
                     .fill(active ? theme.highlightColor.opacity(0.16) : Color.clear))
         }
         .disabled(!enabled)
+    }
+}
+
+// MARK: - Bottom sheets
+
+/// The tick drawn beside an active row. Same 24x24 grid as the tool glyphs,
+/// and the same path string on Android.
+let checkIconPath = "M5 13L9 17L19 7"
+
+/**
+ A hand-rolled bottom sheet: scrim plus a panel anchored to the bottom.
+
+ Deliberately not SwiftUI's `.sheet` + `presentationDetents`, which is iOS 16+
+ and would put this feature behind a version nothing else here needs. Hand
+ rolling also means the panel is directly comparable with Android's, which is
+ the whole point.
+ */
+private struct WysiwygSheet<Content: View>: View {
+    let theme: WysiwygTheme
+    let title: String
+    let onDismiss: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    /// A ScrollView takes every point it is offered, so a four-row Insert
+    /// sheet would stand as tall as a sixteen-row Format one. Measure the
+    /// content and ask for exactly that, capped. Android's Column already
+    /// sizes to content, so this is what keeps the two the same shape.
+    @State private var contentHeight: CGFloat = 0
+
+    private var maxSheetHeight: CGFloat { UIScreen.main.bounds.height * 0.6 }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onDismiss)
+
+            VStack(spacing: 0) {
+                Capsule()
+                    .fill(theme.textColor.opacity(0.25))
+                    .frame(width: 36, height: 4)
+                    .padding(.top, 10)
+                    .padding(.bottom, 8)
+
+                Text(title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(theme.textColor)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 6)
+
+                ScrollView {
+                    content()
+                        .padding(.bottom, 24)
+                        .background(GeometryReader { proxy in
+                            Color.clear.preference(key: SheetContentHeightKey.self,
+                                                   value: proxy.size.height)
+                        })
+                }
+                .frame(height: contentHeight == 0 ? maxSheetHeight
+                                                  : min(contentHeight, maxSheetHeight))
+                .onPreferenceChange(SheetContentHeightKey.self) { contentHeight = $0 }
+            }
+            .background(theme.backgroundColor)
+            .clipShape(TopRoundedCorners(radius: 18))
+            .shadow(color: .black.opacity(0.2), radius: 20, y: -4)
+        }
+    }
+}
+
+/// Carries the measured height of a sheet's content up to the panel.
+private struct SheetContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// Rounding only the TOP corners — `cornerRadius` would round all four.
+private struct TopRoundedCorners: Shape {
+    let radius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Path(UIBezierPath(roundedRect: rect,
+                          byRoundingCorners: [.topLeft, .topRight],
+                          cornerRadii: CGSize(width: radius, height: radius)).cgPath)
+    }
+}
+
+/// A full-width row: glyph, label, and a tick when the tool is in effect.
+private struct SheetRow: View {
+    let tool: String
+    let label: String
+    let active: Bool
+    let theme: WysiwygTheme
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                IconShape(data: toolIcons[tool]?.path ?? "")
+                    .stroke(style: StrokeStyle(lineWidth: 2 * 20 / 24, lineCap: .round, lineJoin: .round))
+                    .foregroundColor(active ? theme.highlightColor : theme.textColor.opacity(0.75))
+                    .frame(width: 20, height: 20)
+                Text(label)
+                    .font(.system(size: 16))
+                    .foregroundColor(theme.textColor)
+                Spacer()
+                if active {
+                    IconShape(data: checkIconPath)
+                        .stroke(style: StrokeStyle(lineWidth: 2 * 18 / 24, lineCap: .round, lineJoin: .round))
+                        .foregroundColor(theme.highlightColor)
+                        .frame(width: 18, height: 18)
+                }
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 48)
+            .contentShape(Rectangle())
+            .background(active ? theme.highlightColor.opacity(0.10) : Color.clear)
+        }
+    }
+}
+
+/// Section heading inside a sheet.
+private struct SheetSection: View {
+    let title: String
+    let theme: WysiwygTheme
+
+    var body: some View {
+        Text(title.uppercased())
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(theme.textColor.opacity(0.45))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
     }
 }
 

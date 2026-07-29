@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -141,6 +142,7 @@ object WysiwygEditorFunctions {
         val placeholder: String,
         val maxLength: Int,
         val counts: List<String>,
+        val menu: String,
         val validation: Map<String, Any>,
         val strings: Map<String, String>,
         val changeDebounce: Int,
@@ -210,6 +212,7 @@ object WysiwygEditorFunctions {
                 placeholder = parameters["placeholder"] as? String ?: "",
                 maxLength = ((parameters["maxLength"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
                 counts = parseStringList(parameters["counts"]),
+                menu = (parameters["menu"] as? String) ?: "toolbar",
                 validation = parseValidation(parameters["validation"]),
                 strings = parseStringMap(parameters["strings"]),
                 changeDebounce = ((parameters["changeDebounce"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
@@ -1628,6 +1631,9 @@ internal val TOOL_ICONS: Map<String, ToolIcon> = mapOf(
         stroke = 1.5f,
     ),
     "blockquote" to ToolIcon("M4 5L4 19M9 8L20 8M9 12L20 12M9 16L17 16"),
+    // Plain body text — offered in the Format sheet as the way BACK from a
+    // heading, so it needs a glyph like every other row.
+    "p" to ToolIcon("M4 6L20 6M4 12L20 12M4 18L14 18"),
     "link" to ToolIcon(
         "M9.5 12L14.5 12" +
             "M10 8L7.5 8C5.3 8 3.5 9.8 3.5 12C3.5 14.2 5.3 16 7.5 16L10 16" +
@@ -2822,262 +2828,347 @@ internal fun EditorScreen(
     // Bumped on every edit / caret move so the toolbar re-reads active state.
     val revision = remember { mutableStateOf(0) }
     val palette = remember { mutableStateOf<String?>(null) }
+    /** Which bottom sheet is open, in `menu: sheet` mode. */
+    val sheet = remember { mutableStateOf<String?>(null) }
     val length = remember { mutableStateOf(initialBlocks.sumOf { it.plainText.length }) }
     val words = remember { mutableStateOf(countWords(initialBlocks)) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(background)
-            .systemBarsPadding()
-            .imePadding(),
-    ) {
-        // ── Top bar ─────────────────────────────────────────────────────────
-        Row(
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .fillMaxSize()
+                .background(background)
+                .systemBarsPadding()
+                .imePadding(),
         ) {
-            BarButton(
-                localized(config.strings, "cancel", "Cancel"),
-                foreground.copy(alpha = 0.8f), FontWeight.Normal, onCancel,
-            )
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                if (config.title.isNotEmpty()) {
-                    BasicText(
-                        text = config.title,
-                        style = TextStyle(color = foreground, fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
-                    )
-                }
-            }
-            BarButton(localized(config.strings, "save", "Save"), accent, FontWeight.SemiBold, onSave)
-        }
-
-        // ── Editor: one view per segment ─────────────────────────────────────
-        val nextId = remember { intArrayOf(0) }
-        val entries = remember {
-            androidx.compose.runtime.mutableStateListOf<SegmentEntry>().also { list ->
-                segmentsOf(initialBlocks).forEach { list.add(SegmentEntry(nextId[0]++, it)) }
-            }
-        }
-
-        /** Reassemble the whole document from every segment's live state. */
-        fun rebuildDocument() {
-            val out = mutableListOf<WysiwygBlock>()
-            for (entry in entries) {
-                when (val segment = entry.segment) {
-                    is Segment.Text -> out.addAll(controllers[entry.id]?.document() ?: segment.blocks)
-                    is Segment.Media -> out.add(segment.block)
-                }
-            }
-            onDocumentChanged(out)
-            length.value = out.sumOf { it.plainText.length }
-            words.value = countWords(out)
-        }
-
-        /**
-         * Backspace pressed at the very start of the text segment [entryId].
-         *
-         * If a media card sits directly above, it is deleted — matching what
-         * Notes and Docs do, where backspacing into an image removes it rather
-         * than doing nothing. When that leaves two text segments touching they
-         * merge into one and the caret lands on the join.
-         *
-         * Returns true when the keystroke was consumed.
-         */
-        fun handleBackspaceAtStart(entryId: Int): Boolean {
-            val index = entries.indexOfFirst { it.id == entryId }
-            if (index <= 0) return false
-            if (entries[index - 1].segment !is Segment.Media) return false
-
-            entries.removeAt(index - 1)
-            val position = index - 1
-
-            // Two text segments are now adjacent — fold the lower one into the
-            // upper one so the document keeps ONE editor per run of text.
-            val above = entries.getOrNull(position - 1)
-            val aboveController = above?.let { controllers[it.id] }
-            val mine = controllers[entryId]
-            if (above != null && above.segment is Segment.Text && aboveController != null && mine != null) {
-                val join = aboveController.styledLength() + 1
-                aboveController.replaceDocument(aboveController.document() + mine.document(), join)
-                controllers.remove(entryId)
-                entries.removeAt(position)
-                focused.value = aboveController
-                aboveController.refocus()
-            }
-
-            rebuildDocument()
-            revision.value++
-            return true
-        }
-
-        // Expose this editor to the media bridge functions while it is open.
-        androidx.compose.runtime.DisposableEffect(Unit) {
-            WysiwygEditorFunctions.live = object : WysiwygEditorFunctions.LiveEditor {
-                override fun insertMedia(kind: String, attrs: Map<String, String>) {
-                    val block = WysiwygBlock(kind)
-                    attrs.forEach { (key, value) -> block.attrs[key] = value }
-                    // Place it after the focused segment, then give the user a
-                    // fresh paragraph below so typing can continue.
-                    val at = entries.indexOfFirst { controllers[it.id] === focused.value }
-                    val insertAt = if (at >= 0) at + 1 else entries.size
-                    entries.add(insertAt, SegmentEntry(nextId[0]++, Segment.Media(block)))
-                    entries.add(
-                        insertAt + 1,
-                        SegmentEntry(nextId[0]++, Segment.Text(mutableListOf(WysiwygBlock("p")))),
-                    )
-                    rebuildDocument()
-                }
-
-                override fun updateUpload(uploadId: String, state: String, src: String, message: String) {
-                    val index = entries.indexOfFirst { entry ->
-                        (entry.segment as? Segment.Media)?.block?.attrs?.get("uploadId") == uploadId
-                    }
-                    if (index < 0) return
-                    val block = (entries[index].segment as Segment.Media).block
-                    when (state) {
-                        "completed" -> {
-                            if (src.isNotEmpty()) block.attrs["src"] = src
-                            block.attrs.remove("uploadId")
-                        }
-                        "failed" -> block.attrs["uploadError"] = message.ifEmpty { "Upload failed" }
-                        else -> block.attrs["uploadProgress"] = src
-                    }
-                    // Swap the entry so Compose sees a change.
-                    entries[index] = SegmentEntry(entries[index].id, Segment.Media(block))
-                    rebuildDocument()
-                }
-            }
-            onDispose { WysiwygEditorFunctions.live = null }
-        }
-
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            Column(
+            // ── Top bar ─────────────────────────────────────────────────────────
+            Row(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState()),
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                entries.forEachIndexed { index, entry ->
-                    when (val segment = entry.segment) {
-                        is Segment.Media -> MediaCard(segment.block, foreground, accent, config.strings)
-                        is Segment.Text -> AndroidView(
-                            modifier = Modifier.fillMaxWidth(),
-                            factory = { context ->
-                                WysiwygEditText(context).apply {
-                                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                                    gravity = Gravity.TOP or Gravity.START
-                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                                    setTextColor(foreground.toArgb())
-                                    setHintTextColor(foreground.copy(alpha = 0.38f).toArgb())
-                                    setLineSpacing(0f, 1.15f)
-                                    // Only the first segment shows the placeholder.
-                                    if (index == 0) hint = config.placeholder
-                                    setPadding(56, 24, 56, 24)
-                                    inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                                        android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                                        android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-                                    setText(Styler.toSpannable(segment.blocks, theme, night))
-
-                                    val controller = EditorController(
-                                        editText = this,
-                                        config = config,
-                                        night = night,
-                                        onDocumentChanged = { rebuildDocument() },
-                                        onStateChanged = { revision.value++ },
-                                    )
-                                    controller.attachWatcher()
-                                    controllers[entry.id] = controller
-                                    if (focused.value == null) focused.value = controller
-
-                                    onSelectionMoved = { controller.onCaretMoved(); revision.value++ }
-                                    controller.onBackspaceAtStart = {
-                                        handleBackspaceAtStart(entry.id)
-                                    }
-                                    onBackspace = { controller.handleBackspace() }
-                                    // The toolbar acts on whichever segment has
-                                    // the caret.
-                                    setOnFocusChangeListener { _, hasFocus ->
-                                        if (hasFocus) {
-                                            focused.value = controller
-                                            revision.value++
-                                        }
-                                    }
-
-                                    isFocusable = true
-                                    isFocusableInTouchMode = true
-
-                                    if (index == 0) {
-                                        requestFocus()
-                                        // Deferred: at factory time the view is
-                                        // not attached yet, so requestFocus
-                                        // alone does not raise the IME.
-                                        postDelayed({
-                                            requestFocus()
-                                            val imm = context.getSystemService(
-                                                android.content.Context.INPUT_METHOD_SERVICE,
-                                            ) as? android.view.inputmethod.InputMethodManager
-                                            imm?.showSoftInput(
-                                                this,
-                                                android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT,
-                                            )
-                                        }, 250)
-                                    }
-                                }
-                            },
+                BarButton(
+                    localized(config.strings, "cancel", "Cancel"),
+                    foreground.copy(alpha = 0.8f), FontWeight.Normal, onCancel,
+                )
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    if (config.title.isNotEmpty()) {
+                        BasicText(
+                            text = config.title,
+                            style = TextStyle(color = foreground, fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
                         )
                     }
                 }
+                BarButton(localized(config.strings, "save", "Save"), accent, FontWeight.SemiBold, onSave)
             }
-        }
 
-        // ── Counts readout ──────────────────────────────────────────────────
-        val readout = countsReadout(config, length.value, words.value)
-        if (readout.isNotEmpty()) {
-            val over = config.maxLength > 0 && length.value >= config.maxLength
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
-            ) {
-                BasicText(
-                    text = readout,
-                    style = TextStyle(
-                        color = if (over) Color(0xFFEF4444) else foreground.copy(alpha = 0.45f),
-                        fontSize = 12.sp,
-                    ),
+            // ── Editor: one view per segment ─────────────────────────────────────
+            val nextId = remember { intArrayOf(0) }
+            val entries = remember {
+                androidx.compose.runtime.mutableStateListOf<SegmentEntry>().also { list ->
+                    segmentsOf(initialBlocks).forEach { list.add(SegmentEntry(nextId[0]++, it)) }
+                }
+            }
+
+            /** Reassemble the whole document from every segment's live state. */
+            fun rebuildDocument() {
+                val out = mutableListOf<WysiwygBlock>()
+                for (entry in entries) {
+                    when (val segment = entry.segment) {
+                        is Segment.Text -> out.addAll(controllers[entry.id]?.document() ?: segment.blocks)
+                        is Segment.Media -> out.add(segment.block)
+                    }
+                }
+                onDocumentChanged(out)
+                length.value = out.sumOf { it.plainText.length }
+                words.value = countWords(out)
+            }
+
+            /**
+             * Backspace pressed at the very start of the text segment [entryId].
+             *
+             * If a media card sits directly above, it is deleted — matching what
+             * Notes and Docs do, where backspacing into an image removes it rather
+             * than doing nothing. When that leaves two text segments touching they
+             * merge into one and the caret lands on the join.
+             *
+             * Returns true when the keystroke was consumed.
+             */
+            fun handleBackspaceAtStart(entryId: Int): Boolean {
+                val index = entries.indexOfFirst { it.id == entryId }
+                if (index <= 0) return false
+                if (entries[index - 1].segment !is Segment.Media) return false
+
+                entries.removeAt(index - 1)
+                val position = index - 1
+
+                // Two text segments are now adjacent — fold the lower one into the
+                // upper one so the document keeps ONE editor per run of text.
+                val above = entries.getOrNull(position - 1)
+                val aboveController = above?.let { controllers[it.id] }
+                val mine = controllers[entryId]
+                if (above != null && above.segment is Segment.Text && aboveController != null && mine != null) {
+                    val join = aboveController.styledLength() + 1
+                    aboveController.replaceDocument(aboveController.document() + mine.document(), join)
+                    controllers.remove(entryId)
+                    entries.removeAt(position)
+                    focused.value = aboveController
+                    aboveController.refocus()
+                }
+
+                rebuildDocument()
+                revision.value++
+                return true
+            }
+
+            // Expose this editor to the media bridge functions while it is open.
+            androidx.compose.runtime.DisposableEffect(Unit) {
+                WysiwygEditorFunctions.live = object : WysiwygEditorFunctions.LiveEditor {
+                    override fun insertMedia(kind: String, attrs: Map<String, String>) {
+                        val block = WysiwygBlock(kind)
+                        attrs.forEach { (key, value) -> block.attrs[key] = value }
+                        // Place it after the focused segment, then give the user a
+                        // fresh paragraph below so typing can continue.
+                        val at = entries.indexOfFirst { controllers[it.id] === focused.value }
+                        val insertAt = if (at >= 0) at + 1 else entries.size
+                        entries.add(insertAt, SegmentEntry(nextId[0]++, Segment.Media(block)))
+                        entries.add(
+                            insertAt + 1,
+                            SegmentEntry(nextId[0]++, Segment.Text(mutableListOf(WysiwygBlock("p")))),
+                        )
+                        rebuildDocument()
+                    }
+
+                    override fun updateUpload(uploadId: String, state: String, src: String, message: String) {
+                        val index = entries.indexOfFirst { entry ->
+                            (entry.segment as? Segment.Media)?.block?.attrs?.get("uploadId") == uploadId
+                        }
+                        if (index < 0) return
+                        val block = (entries[index].segment as Segment.Media).block
+                        when (state) {
+                            "completed" -> {
+                                if (src.isNotEmpty()) block.attrs["src"] = src
+                                block.attrs.remove("uploadId")
+                            }
+                            "failed" -> block.attrs["uploadError"] = message.ifEmpty { "Upload failed" }
+                            else -> block.attrs["uploadProgress"] = src
+                        }
+                        // Swap the entry so Compose sees a change.
+                        entries[index] = SegmentEntry(entries[index].id, Segment.Media(block))
+                        rebuildDocument()
+                    }
+                }
+                onDispose { WysiwygEditorFunctions.live = null }
+            }
+
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    entries.forEachIndexed { index, entry ->
+                        when (val segment = entry.segment) {
+                            is Segment.Media -> MediaCard(segment.block, foreground, accent, config.strings)
+                            is Segment.Text -> AndroidView(
+                                modifier = Modifier.fillMaxWidth(),
+                                factory = { context ->
+                                    WysiwygEditText(context).apply {
+                                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                        gravity = Gravity.TOP or Gravity.START
+                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                                        setTextColor(foreground.toArgb())
+                                        setHintTextColor(foreground.copy(alpha = 0.38f).toArgb())
+                                        setLineSpacing(0f, 1.15f)
+                                        // Only the first segment shows the placeholder.
+                                        if (index == 0) hint = config.placeholder
+                                        setPadding(56, 24, 56, 24)
+                                        inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                                            android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                                            android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                                        setText(Styler.toSpannable(segment.blocks, theme, night))
+
+                                        val controller = EditorController(
+                                            editText = this,
+                                            config = config,
+                                            night = night,
+                                            onDocumentChanged = { rebuildDocument() },
+                                            onStateChanged = { revision.value++ },
+                                        )
+                                        controller.attachWatcher()
+                                        controllers[entry.id] = controller
+                                        if (focused.value == null) focused.value = controller
+
+                                        onSelectionMoved = { controller.onCaretMoved(); revision.value++ }
+                                        controller.onBackspaceAtStart = {
+                                            handleBackspaceAtStart(entry.id)
+                                        }
+                                        onBackspace = { controller.handleBackspace() }
+                                        // The toolbar acts on whichever segment has
+                                        // the caret.
+                                        setOnFocusChangeListener { _, hasFocus ->
+                                            if (hasFocus) {
+                                                focused.value = controller
+                                                revision.value++
+                                            }
+                                        }
+
+                                        isFocusable = true
+                                        isFocusableInTouchMode = true
+
+                                        if (index == 0) {
+                                            requestFocus()
+                                            // Deferred: at factory time the view is
+                                            // not attached yet, so requestFocus
+                                            // alone does not raise the IME.
+                                            postDelayed({
+                                                requestFocus()
+                                                val imm = context.getSystemService(
+                                                    android.content.Context.INPUT_METHOD_SERVICE,
+                                                ) as? android.view.inputmethod.InputMethodManager
+                                                imm?.showSoftInput(
+                                                    this,
+                                                    android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT,
+                                                )
+                                            }, 250)
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ── Counts readout ──────────────────────────────────────────────────
+            val readout = countsReadout(config, length.value, words.value)
+            if (readout.isNotEmpty()) {
+                val over = config.maxLength > 0 && length.value >= config.maxLength
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
+                ) {
+                    BasicText(
+                        text = readout,
+                        style = TextStyle(
+                            color = if (over) Color(0xFFEF4444) else foreground.copy(alpha = 0.45f),
+                            fontSize = 12.sp,
+                        ),
+                    )
+                }
+            }
+
+            // ── Colour palette (shown while a colour tool is armed) ─────────────
+            palette.value?.let { kind ->
+                PaletteRow(
+                    colors = if (kind == "textColor") TEXT_COLORS else HIGHLIGHT_COLORS,
+                    foreground = foreground,
+                    onPick = { hex ->
+                        val c = focused.value
+                        if (kind == "textColor") c?.setColor(hex) else c?.setHighlight(hex)
+                        palette.value = null
+                        c?.refocus()
+                    },
                 )
             }
-        }
 
-        // ── Colour palette (shown while a colour tool is armed) ─────────────
-        palette.value?.let { kind ->
-            PaletteRow(
-                colors = if (kind == "textColor") TEXT_COLORS else HIGHLIGHT_COLORS,
+            // ── Formatting toolbar ──────────────────────────────────────────────
+            ToolbarRow(
+                activity = activity,
+                config = config,
+                controllerState = focused,
+                revision = revision.value,
+                palette = palette,
                 foreground = foreground,
-                onPick = { hex ->
-                    val c = focused.value
-                    if (kind == "textColor") c?.setColor(hex) else c?.setHighlight(hex)
-                    palette.value = null
-                    c?.refocus()
-                },
+                background = background,
+                highlightColor = theme.highlightColor(night),
+                strings = config.strings,
+                haptics = config.haptics,
+                onRequestMedia = onRequestMedia,
+                sheet = sheet,
             )
         }
 
-        // ── Formatting toolbar ──────────────────────────────────────────────
-        ToolbarRow(
-            activity = activity,
-            config = config,
-            controllerState = focused,
-            revision = revision.value,
-            palette = palette,
-            foreground = foreground,
-            background = background,
-            highlightColor = theme.highlightColor(night),
-            strings = config.strings,
-            haptics = config.haptics,
-            onRequestMedia = onRequestMedia,
-        )
+        // ── Bottom sheets (menu: sheet) ─────────────────────────────────────
+        // Drawn OVER the toolbar, so the sheet is not clipped by the column
+        // and the scrim covers the whole screen.
+        sheet.value?.let { kind ->
+            val controller = focused.value
+            val marks = controller?.activeMarks() ?: MarkSet()
+            val activeBlock = controller?.activeBlock() ?: "p"
+            @Suppress("UNUSED_EXPRESSION") revision.value
+
+            fun run(tool: String) {
+                when (tool) {
+                    "textColor", "highlight" -> {
+                        palette.value = tool
+                        sheet.value = null
+                    }
+                    "link" -> {
+                        sheet.value = null
+                        runTool(tool, controller, palette, activity, config.strings, onRequestMedia)
+                    }
+                    in WysiwygEditorFunctions.INSERT_TOOLS -> {
+                        sheet.value = null
+                        onRequestMedia(tool)
+                    }
+                    else -> runTool(tool, controller, palette, activity, config.strings, onRequestMedia)
+                }
+            }
+
+            @Composable
+            fun row(tool: String, label: String? = null) {
+                SheetRow(
+                    tool = tool,
+                    label = label ?: localized(config.strings, TOOL_LABEL_KEYS[tool] ?: tool, tool),
+                    active = isToolActive(tool, marks, activeBlock, palette.value),
+                    foreground = foreground,
+                    highlight = theme.highlightColor(night),
+                    haptics = config.haptics,
+                ) { run(tool) }
+            }
+
+            // Only tools the host enabled appear, and an empty section is not
+            // drawn — the sheet reflects the config, not everything we can do.
+            fun enabled(tools: List<String>) = tools.filter { it in config.toolbar }
+
+            if (kind == "format") {
+                WysiwygSheet(
+                    title = localized(config.strings, "menuFormat", "Format"),
+                    background = background,
+                    foreground = foreground,
+                    onDismiss = { sheet.value = null },
+                ) {
+                    SheetSection(localized(config.strings, "sectionTextStyle", "Text style"), foreground)
+                    // Body is always offered: without it there is no way back
+                    // to plain text once a heading has been applied.
+                    row("p", localized(config.strings, "styleBody", "Body"))
+                    enabled(SHEET_TEXT_STYLE_TOOLS).forEach { row(it) }
+
+                    val lists = enabled(SHEET_LIST_TOOLS)
+                    if (lists.isNotEmpty()) {
+                        SheetSection(localized(config.strings, "sectionLists", "Lists"), foreground)
+                        lists.forEach { row(it) }
+                    }
+
+                    val marksTools = enabled(SHEET_FORMAT_TOOLS)
+                    if (marksTools.isNotEmpty()) {
+                        SheetSection(localized(config.strings, "sectionFormat", "Formatting"), foreground)
+                        marksTools.forEach { row(it) }
+                    }
+                }
+            } else {
+                WysiwygSheet(
+                    title = localized(config.strings, "menuInsert", "Insert"),
+                    background = background,
+                    foreground = foreground,
+                    onDismiss = { sheet.value = null },
+                ) {
+                    enabled(SHEET_INSERT_TOOLS).forEach { row(it) }
+                }
+            }
+        }
     }
 }
 
@@ -3301,6 +3392,68 @@ private fun BarButton(label: String, color: Color, weight: FontWeight, onClick: 
 
 // ── Toolbar ─────────────────────────────────────────────────────────────────
 
+/**
+ * Which string key labels each tool in a bottom sheet.
+ *
+ * Mirrors `WysiwygEditor::TOOL_LABEL_KEYS` in PHP and `toolLabelKeys` in
+ * Swift — headings and quote read as text STYLES, so they take the `style*`
+ * keys and sit in their own section.
+ */
+internal val TOOL_LABEL_KEYS = mapOf(
+    "bold" to "toolBold",
+    "italic" to "toolItalic",
+    "underline" to "toolUnderline",
+    "strikethrough" to "toolStrikethrough",
+    "h1" to "styleH1",
+    "h2" to "styleH2",
+    "h3" to "styleH3",
+    "bulletList" to "toolBulletList",
+    "orderedList" to "toolOrderedList",
+    "blockquote" to "styleQuote",
+    "link" to "toolLink",
+    "code" to "toolCode",
+    "textColor" to "toolTextColor",
+    "highlight" to "toolHighlight",
+    "image" to "toolImage",
+    "video" to "toolVideo",
+    "file" to "toolFile",
+    "clearFormat" to "toolClearFormat",
+)
+
+/** Sheet sections, in display order. Normative — Swift uses the same lists. */
+internal val SHEET_TEXT_STYLE_TOOLS = listOf("h1", "h2", "h3", "blockquote")
+internal val SHEET_LIST_TOOLS = listOf("bulletList", "orderedList")
+internal val SHEET_FORMAT_TOOLS =
+    listOf("bold", "italic", "underline", "strikethrough", "code", "textColor", "highlight", "clearFormat")
+internal val SHEET_INSERT_TOOLS = listOf("image", "video", "file", "link")
+
+/**
+ * The tick drawn beside an active row. Same 24x24 grid as the tool glyphs,
+ * and the same path string on iOS.
+ */
+internal const val CHECK_ICON_PATH = "M5 13L9 17L19 7"
+
+/**
+ * Whether [tool] is currently in effect. Shared by the toolbar and the sheets,
+ * so a tool cannot look active in one and inactive in the other.
+ */
+internal fun isToolActive(tool: String, marks: MarkSet, block: String, palette: String?): Boolean =
+    when (tool) {
+        "bold" -> marks.bold
+        "italic" -> marks.italic
+        "underline" -> marks.underline
+        "strikethrough" -> marks.strike
+        "code" -> marks.code
+        "link" -> marks.link != null
+        "textColor" -> marks.color != null || palette == "textColor"
+        "highlight" -> marks.highlight != null || palette == "highlight"
+        "h1", "h2", "h3", "blockquote" -> block == tool
+        "bulletList" -> block == "ul"
+        "orderedList" -> block == "ol"
+        "p" -> block !in listOf("h1", "h2", "h3", "ul", "ol", "blockquote")
+        else -> false
+    }
+
 @Composable
 private fun ToolbarRow(
     activity: FragmentActivity,
@@ -3314,6 +3467,8 @@ private fun ToolbarRow(
     strings: Map<String, String>,
     haptics: Boolean,
     onRequestMedia: (String) -> Unit,
+    sheet: androidx.compose.runtime.MutableState<String?> =
+        androidx.compose.runtime.mutableStateOf(null),
 ) {
     val controller = controllerState.value
     // Reading `revision` here is what makes the bar recompose on caret moves.
@@ -3346,44 +3501,132 @@ private fun ToolbarRow(
                     .background(foreground.copy(alpha = 0.15f)),
             )
 
-            for (tool in config.toolbar) {
-                val active = when (tool) {
-                    "bold" -> marks.bold
-                    "italic" -> marks.italic
-                    "underline" -> marks.underline
-                    "strikethrough" -> marks.strike
-                    "code" -> marks.code
-                    "link" -> marks.link != null
-                    "textColor" -> marks.color != null || palette.value == "textColor"
-                    "highlight" -> marks.highlight != null || palette.value == "highlight"
-                    "h1" -> block == "h1"
-                    "h2" -> block == "h2"
-                    "h3" -> block == "h3"
-                    "bulletList" -> block == "ul"
-                    "orderedList" -> block == "ol"
-                    "blockquote" -> block == "blockquote"
-                    else -> false
-                }
+            // Sheet mode keeps the marks people reach for constantly one tap
+            // away and puts the rest behind Format / Insert, rather than off
+            // the right edge of a bar nobody scrolls.
+            val shown = if (config.menu == "sheet") {
+                config.toolbar.filter { it == "bold" || it == "italic" }
+            } else {
+                config.toolbar
+            }
 
-                ToolButton(tool, active, true, foreground, highlightColor, haptics) {
-                    when (tool) {
-                        "bold", "italic", "underline", "strikethrough", "code" ->
-                            controller?.toggleInline(tool)
-                        "h1", "h2", "h3", "bulletList", "orderedList", "blockquote" ->
-                            controller?.applyBlock(tool)
-                        "clearFormat" -> controller?.clearFormat()
-                        in WysiwygEditorFunctions.INSERT_TOOLS -> onRequestMedia(tool)
-                        "textColor" -> palette.value = if (palette.value == "textColor") null else "textColor"
-                        "highlight" -> palette.value = if (palette.value == "highlight") null else "highlight"
-                        "link" -> controller?.let { c ->
-                            showLinkDialog(activity, c.currentLink(), strings, onDismiss = { c.refocus() }) { url ->
-                                c.setLink(url)
-                            }
-                        }
-                    }
+            for (tool in shown) {
+                ToolButton(
+                    tool,
+                    isToolActive(tool, marks, block, palette.value),
+                    true,
+                    foreground,
+                    highlightColor,
+                    haptics,
+                ) {
+                    runTool(tool, controller, palette, activity, strings, onRequestMedia)
+                }
+            }
+
+            if (config.menu == "sheet") {
+                val formatTools = SHEET_TEXT_STYLE_TOOLS + SHEET_LIST_TOOLS + SHEET_FORMAT_TOOLS
+                if (config.toolbar.any { it in formatTools }) {
+                    LabelledToolButton(
+                        "textColor",
+                        localized(strings, "menuFormat", "Format"),
+                        sheet.value == "format",
+                        foreground,
+                        highlightColor,
+                        haptics,
+                    ) { sheet.value = if (sheet.value == "format") null else "format" }
+                }
+                if (config.toolbar.any { it in SHEET_INSERT_TOOLS }) {
+                    LabelledToolButton(
+                        "image",
+                        localized(strings, "menuInsert", "Insert"),
+                        sheet.value == "insert",
+                        foreground,
+                        highlightColor,
+                        haptics,
+                    ) { sheet.value = if (sheet.value == "insert") null else "insert" }
                 }
             }
         }
+    }
+}
+
+/**
+ * Run a tool. Shared by the toolbar and both sheets so a tool cannot behave
+ * differently depending on where it was tapped from.
+ */
+private fun runTool(
+    tool: String,
+    controller: EditorController?,
+    palette: androidx.compose.runtime.MutableState<String?>,
+    activity: FragmentActivity,
+    strings: Map<String, String>,
+    onRequestMedia: (String) -> Unit,
+) {
+    when (tool) {
+        "bold", "italic", "underline", "strikethrough", "code" -> controller?.toggleInline(tool)
+        "p", "h1", "h2", "h3", "bulletList", "orderedList", "blockquote" -> controller?.applyBlock(tool)
+        "clearFormat" -> controller?.clearFormat()
+        in WysiwygEditorFunctions.INSERT_TOOLS -> onRequestMedia(tool)
+        "textColor" -> palette.value = if (palette.value == "textColor") null else "textColor"
+        "highlight" -> palette.value = if (palette.value == "highlight") null else "highlight"
+        "link" -> controller?.let { c ->
+            showLinkDialog(activity, c.currentLink(), strings, onDismiss = { c.refocus() }) { url ->
+                c.setLink(url)
+            }
+        }
+    }
+}
+
+/**
+ * A wider button carrying a glyph AND a word — used for Format / Insert, where
+ * an icon alone would not say which sheet opens.
+ */
+@Composable
+private fun LabelledToolButton(
+    icon: String,
+    label: String,
+    active: Boolean,
+    foreground: Color,
+    highlight: Color,
+    haptics: Boolean,
+    onClick: () -> Unit,
+) {
+    val view = androidx.compose.ui.platform.LocalView.current
+    val tint = if (active) highlight else foreground.copy(alpha = 0.78f)
+    val path = TOOL_ICONS[icon]
+
+    Row(
+        modifier = Modifier
+            .height(34.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (active) highlight.copy(alpha = 0.16f) else Color.Transparent)
+            .clickable {
+                if (haptics) {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                }
+                onClick()
+            }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+    ) {
+        if (path != null) {
+            Canvas(modifier = Modifier.size(18.dp)) {
+                drawPath(
+                    path = buildIconPath(path.path, size.width),
+                    color = tint,
+                    style = Stroke(
+                        width = path.stroke * size.width / 24f,
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round,
+                    ),
+                )
+            }
+        }
+        BasicText(
+            text = label,
+            style = TextStyle(color = tint, fontSize = 15.sp, fontWeight = FontWeight.Medium),
+        )
     }
 }
 
@@ -3432,6 +3675,143 @@ private fun ToolButton(
             )
         }
     }
+}
+
+/**
+ * A hand-rolled bottom sheet: scrim plus a panel anchored to the bottom.
+ *
+ * Deliberately not `ModalBottomSheet`, so the panel is directly comparable
+ * with the iOS one — same corner radius, same grabber, same row metrics.
+ */
+@Composable
+private fun WysiwygSheet(
+    title: String,
+    background: Color,
+    foreground: Color,
+    onDismiss: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.35f))
+            .clickable(
+                indication = null,
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+            ) { onDismiss() },
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                // A bottom sheet that grows to the full screen is just a page.
+                .heightIn(max = screenHeight * 0.6f)
+                .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
+                .background(background)
+                // Swallow taps on the panel itself, so only the scrim closes it.
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                ) {}
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 24.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 10.dp, bottom = 8.dp)
+                    .align(Alignment.CenterHorizontally)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(foreground.copy(alpha = 0.25f))
+                    .width(36.dp)
+                    .height(4.dp),
+            )
+            BasicText(
+                text = title,
+                style = TextStyle(color = foreground, fontSize = 17.sp, fontWeight = FontWeight.SemiBold),
+                modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 6.dp),
+            )
+            content()
+        }
+    }
+}
+
+/** A full-width row: glyph, label, and a tick when the tool is in effect. */
+@Composable
+private fun SheetRow(
+    tool: String,
+    label: String,
+    active: Boolean,
+    foreground: Color,
+    highlight: Color,
+    haptics: Boolean,
+    onClick: () -> Unit,
+) {
+    val view = androidx.compose.ui.platform.LocalView.current
+    val icon = TOOL_ICONS[tool]
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .background(if (active) highlight.copy(alpha = 0.10f) else Color.Transparent)
+            .clickable {
+                if (haptics) {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                }
+                onClick()
+            }
+            .padding(horizontal = 20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(14.dp),
+    ) {
+        if (icon != null) {
+            Canvas(modifier = Modifier.size(20.dp)) {
+                drawPath(
+                    path = buildIconPath(icon.path, size.width),
+                    color = if (active) highlight else foreground.copy(alpha = 0.75f),
+                    style = Stroke(
+                        width = icon.stroke * size.width / 24f,
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round,
+                    ),
+                )
+            }
+        }
+        BasicText(
+            text = label,
+            style = TextStyle(color = foreground, fontSize = 16.sp),
+            modifier = Modifier.weight(1f),
+        )
+        if (active) {
+            Canvas(modifier = Modifier.size(18.dp)) {
+                drawPath(
+                    path = buildIconPath(CHECK_ICON_PATH, size.width),
+                    color = highlight,
+                    style = Stroke(
+                        width = 2f * size.width / 24f,
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round,
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/** Section heading inside a sheet. */
+@Composable
+private fun SheetSection(title: String, foreground: Color) {
+    BasicText(
+        text = title.uppercase(),
+        style = TextStyle(
+            color = foreground.copy(alpha = 0.45f),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        ),
+        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp),
+    )
 }
 
 @Composable
