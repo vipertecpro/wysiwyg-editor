@@ -157,6 +157,40 @@ class WysiwygEditor
     ];
 
     /**
+     * Editing density. Values are points on iOS and dp on Android, so the two
+     * platforms lay out the same — until now Android used raw pixels here and
+     * was measurably tighter than iOS on the same document.
+     *
+     * `comfortable` reproduces what the editor looked like before the option
+     * existed, so nothing shifts for an app that does not set it.
+     *
+     * @var array<string, array{horizontal: int, vertical: int, paragraph: int}>
+     */
+    public const SPACING_SCALES = [
+        'compact' => ['horizontal' => 12, 'vertical' => 8, 'paragraph' => 4],
+        'comfortable' => ['horizontal' => 16, 'vertical' => 12, 'paragraph' => 6],
+        'roomy' => ['horizontal' => 20, 'vertical' => 18, 'paragraph' => 10],
+    ];
+
+    /**
+     * Typography defaults. The heading ramp is DERIVED from `fontSize` natively
+     * using fixed multipliers (1.75 / 1.375 / 1.125), so a host that wants
+     * bigger text sets one number instead of four — and the default 16 gives
+     * back exactly the 28 / 22 / 18 ramp the editor already used.
+     *
+     * `fontFamily` is empty by default, meaning the platform's system font. It
+     * is filled in from the host application's own theme when that theme names
+     * a font, so the editor matches the app without being told to.
+     *
+     * @var array{fontFamily: string, fontSize: int, lineHeight: float}
+     */
+    public const TYPOGRAPHY = [
+        'fontFamily' => '',
+        'fontSize' => 16,
+        'lineHeight' => 1.15,
+    ];
+
+    /**
      * Which string key labels each tool in a bottom sheet.
      *
      * Headings and quote read as text STYLES rather than as tools, so they use
@@ -359,6 +393,8 @@ class WysiwygEditor
             'changeDebounce' => max(0, (int) ($options['changeDebounce'] ?? 0)),
             'haptics' => (bool) ($options['haptics'] ?? true),
             'menu' => $this->resolveMenu($options['menu'] ?? null),
+            'typography' => $this->resolveTypography($options['typography'] ?? []),
+            'spacing' => $this->resolveSpacing($options['spacing'] ?? null),
             // Explicit overrides win; the two scheme maps below are the host
             // app's own theme, so an unconfigured editor still looks native.
             'theme' => $this->resolveTheme($options['theme'] ?? []),
@@ -366,6 +402,65 @@ class WysiwygEditor
             'themeDark' => $this->hostTheme('dark'),
             'id' => $options['id'] ?? null,
         ];
+    }
+
+    /**
+     * Type settings, with the host application's font adopted when the caller
+     * does not name one.
+     *
+     * @param  array<string, mixed>  $typography
+     * @return array{fontFamily: string, fontSize: int, lineHeight: float}
+     */
+    protected function resolveTypography(array $typography): array
+    {
+        $family = (string) ($typography['fontFamily'] ?? '');
+
+        if ($family === '') {
+            $family = $this->hostFontFamily();
+        }
+
+        $size = (int) ($typography['fontSize'] ?? self::TYPOGRAPHY['fontSize']);
+        $lineHeight = (float) ($typography['lineHeight'] ?? self::TYPOGRAPHY['lineHeight']);
+
+        return [
+            'fontFamily' => $family,
+            // Clamped to a range a text engine can actually lay out. Outside
+            // it the heading ramp stops being readable rather than becoming
+            // dramatic, so silently accepting 200 would help nobody.
+            'fontSize' => max(10, min(32, $size)),
+            'lineHeight' => max(1.0, min(2.0, $lineHeight)),
+        ];
+    }
+
+    /**
+     * The host application's font, if its theme names one. NativeUI carries
+     * `fonts.default` (preferred) and a literal `font-family` token.
+     */
+    protected function hostFontFamily(): string
+    {
+        if (! class_exists(\Nativephp\NativeUi\Theme::class)) {
+            return '';
+        }
+
+        $tokens = \Nativephp\NativeUi\Theme::all();
+
+        foreach ([$tokens['fonts']['default'] ?? null, $tokens['font-family'] ?? null] as $candidate) {
+            if (is_string($candidate) && trim($candidate) !== '') {
+                return trim($candidate);
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Editing density. NativeUI has no spacing token to read, so unlike
+     * colours and the font this is a choice the host makes rather than
+     * something adopted — stated plainly rather than guessed at.
+     */
+    protected function resolveSpacing(mixed $spacing): string
+    {
+        return isset(self::SPACING_SCALES[$spacing]) ? $spacing : 'comfortable';
     }
 
     /**

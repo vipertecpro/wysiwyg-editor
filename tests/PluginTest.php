@@ -236,6 +236,71 @@ describe('Menu mode', function () {
     });
 });
 
+describe('Typography', function () {
+    it('defaults to the system font and the existing ramp base', function () {
+        $t = editor()->config('')['typography'];
+
+        expect($t['fontFamily'])->toBe('')
+            ->and($t['fontSize'])->toBe(16)
+            ->and($t['lineHeight'])->toBe(1.15);
+    });
+
+    it('carries an explicit family, size and line height', function () {
+        $t = editor()->config('', ['typography' => [
+            'fontFamily' => 'Inter',
+            'fontSize' => 18,
+            'lineHeight' => 1.4,
+        ]])['typography'];
+
+        expect($t['fontFamily'])->toBe('Inter')
+            ->and($t['fontSize'])->toBe(18)
+            ->and($t['lineHeight'])->toBe(1.4);
+    });
+
+    it('clamps sizes a text engine cannot lay out sensibly', function () {
+        expect(editor()->config('', ['typography' => ['fontSize' => 200]])['typography']['fontSize'])->toBe(32)
+            ->and(editor()->config('', ['typography' => ['fontSize' => 2]])['typography']['fontSize'])->toBe(10)
+            ->and(editor()->config('', ['typography' => ['lineHeight' => 9]])['typography']['lineHeight'])->toBe(2.0);
+    });
+
+    it('adopts the host application font when the caller names none', function () {
+        \Nativephp\NativeUi\Theme::load(['fonts' => ['default' => 'Sora']]);
+
+        expect(editor()->config('')['typography']['fontFamily'])->toBe('Sora');
+
+        \Nativephp\NativeUi\Theme::reset();
+    });
+
+    it('lets an explicit family win over the host font', function () {
+        \Nativephp\NativeUi\Theme::load(['fonts' => ['default' => 'Sora']]);
+
+        expect(editor()->config('', ['typography' => ['fontFamily' => 'Inter']])['typography']['fontFamily'])
+            ->toBe('Inter');
+
+        \Nativephp\NativeUi\Theme::reset();
+    });
+});
+
+describe('Spacing', function () {
+    it('defaults to the density the editor already had', function () {
+        expect(editor()->config('')['spacing'])->toBe('comfortable');
+    });
+
+    it('accepts the documented scales', function (string $scale) {
+        expect(editor()->config('', ['spacing' => $scale])['spacing'])->toBe($scale);
+    })->with(array_keys(WysiwygEditor::SPACING_SCALES));
+
+    it('falls back for anything unrecognised', function () {
+        expect(editor()->config('', ['spacing' => 'airy'])['spacing'])->toBe('comfortable');
+    });
+
+    it('describes every scale with the same three measurements', function () {
+        foreach (WysiwygEditor::SPACING_SCALES as $scale) {
+            expect(array_keys($scale))->toBe(['horizontal', 'vertical', 'paragraph']);
+        }
+    });
+});
+
 describe('Validation rules', function () {
     it('is empty by default', function () {
         expect(editor()->config('')['validation'])->toBe([]);

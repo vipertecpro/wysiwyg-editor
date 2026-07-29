@@ -107,6 +107,8 @@ All options are optional:
 | `strings` | array | English | Translations for every user-visible string — see Localization |
 | `changeDebounce` | int | `0` | Emit `ContentChanged` this many ms after typing stops; `0` = off |
 | `haptics` | bool | `true` | Light haptic tap on toolbar buttons |
+| `typography` | array | — | `fontFamily`, `fontSize` (base, 10–32), `lineHeight` (1.0–2.0). Headings scale from the base |
+| `spacing` | string | `comfortable` | Editing density: `compact`, `comfortable`, `roomy` |
 | `menu` | string | `toolbar` | `toolbar` = one scrolling bar; `sheet` = compact bar + Format/Insert bottom sheets |
 | `theme` | array | `[]` | Hex colors: `background`, `text`, `accent` (Save button), `highlight` (active states). Omitted keys fall back to the host app's theme, then to system-adaptive defaults |
 | `id` | string | `null` | Echoed back on the result event, to correlate concurrent editors |
@@ -365,6 +367,38 @@ The block appears the moment it is inserted, rendering from `localPath`, so
 the user never waits on a network round-trip. Until an upload completes the
 block exports as `<figure data-pending="…">` with **no `src`** — the device
 path is never written into published HTML.
+
+## Typography and spacing
+
+The editor takes the host application's **font** the same way it takes its
+colours — if the NativeUI theme names one (`fonts.default` or `font-family`),
+the editor uses it with no configuration. A font the app never bundled falls
+back to the system face rather than rendering nothing.
+
+Size and density are set explicitly:
+
+```php
+WysiwygEditor::open($html, [
+    'typography' => ['fontSize' => 18, 'lineHeight' => 1.3],
+    'spacing' => 'roomy',
+]);
+```
+
+The **heading ramp is derived** from `fontSize` with fixed multipliers
+(1.75 / 1.375 / 1.125), so one number moves the whole scale and the
+proportions hold. The default base of 16 gives exactly the 28 / 22 / 18 ramp
+the editor has always used, so nothing shifts unless you ask it to.
+
+`spacing` values are points on iOS and **dp** on Android, so both platforms
+lay out the same. Unlike colours and the font this is a choice you make rather
+than something adopted — NativeUI has no spacing token to read, and guessing
+one would be inventing a schema.
+
+| Scale | Horizontal | Vertical | Paragraph |
+| --- | --- | --- | --- |
+| `compact` | 12 | 8 | 4 |
+| `comfortable` | 16 | 12 | 6 |
+| `roomy` | 20 | 18 | 10 |
 
 ## Toolbar or bottom sheets
 

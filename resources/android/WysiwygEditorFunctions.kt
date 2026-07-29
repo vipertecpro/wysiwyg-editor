@@ -143,6 +143,8 @@ object WysiwygEditorFunctions {
         val maxLength: Int,
         val counts: List<String>,
         val menu: String,
+        val typography: WysiwygTypography,
+        val spacing: WysiwygSpacing,
         val validation: Map<String, Any>,
         val strings: Map<String, String>,
         val changeDebounce: Int,
@@ -213,6 +215,8 @@ object WysiwygEditorFunctions {
                 maxLength = ((parameters["maxLength"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
                 counts = parseStringList(parameters["counts"]),
                 menu = (parameters["menu"] as? String) ?: "toolbar",
+                typography = parseTypography(parameters["typography"]),
+                spacing = WysiwygSpacing.named((parameters["spacing"] as? String) ?: "comfortable"),
                 validation = parseValidation(parameters["validation"]),
                 strings = parseStringMap(parameters["strings"]),
                 changeDebounce = ((parameters["changeDebounce"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
@@ -411,6 +415,61 @@ private fun parseStringList(any: Any?): List<String> = when (any) {
     is List<*> -> any.mapNotNull { it as? String }
     is JSONArray -> (0 until any.length()).mapNotNull { i -> any.optString(i).takeIf { it.isNotEmpty() } }
     else -> emptyList()
+}
+
+/**
+ * Type settings.
+ *
+ * The heading ramp is DERIVED from the body size with fixed multipliers rather
+ * than configured separately, so a host that wants larger text sets one number
+ * and the proportions hold. The multipliers are normative — Swift uses the
+ * same three — and the default base of 16 reproduces the 28 / 22 / 18 ramp the
+ * editor used before the option existed.
+ */
+class WysiwygTypography(
+    val fontFamily: String = "",
+    val base: Int = 16,
+    val lineHeight: Float = 1.15f,
+) {
+    fun size(type: String): Int = when (type) {
+        "h1" -> Math.round(base * 1.75f)
+        "h2" -> Math.round(base * 1.375f)
+        "h3" -> Math.round(base * 1.125f)
+        else -> base
+    }
+
+    /**
+     * The host app's font, or null for the platform default. A theme naming a
+     * font the app never bundled must not leave the editor with no text, and
+     * Typeface.create falls back to the default on its own.
+     */
+    fun typeface(): android.graphics.Typeface? =
+        if (fontFamily.isEmpty()) {
+            null
+        } else {
+            android.graphics.Typeface.create(fontFamily, android.graphics.Typeface.NORMAL)
+        }
+}
+
+/** Editing density. dp here, points on iOS — the same numbers either way. */
+class WysiwygSpacing(val horizontal: Int, val vertical: Int, val paragraph: Int) {
+    companion object {
+        fun named(name: String): WysiwygSpacing = when (name) {
+            "compact" -> WysiwygSpacing(12, 8, 4)
+            "roomy" -> WysiwygSpacing(20, 18, 10)
+            else -> WysiwygSpacing(16, 12, 6)
+        }
+    }
+}
+
+private fun parseTypography(any: Any?): WysiwygTypography {
+    val map = parseValidation(any)
+
+    return WysiwygTypography(
+        fontFamily = (map["fontFamily"] as? String) ?: "",
+        base = (map["fontSize"] as? Number)?.toInt() ?: 16,
+        lineHeight = (map["lineHeight"] as? Number)?.toFloat() ?: 1.15f,
+    )
 }
 
 private fun parseStringMap(any: Any?): Map<String, String> = when (any) {
@@ -1785,6 +1844,7 @@ internal object Styler {
         blocks: List<WysiwygBlock>,
         theme: WysiwygEditorFunctions.EditorTheme,
         night: Boolean,
+        typography: WysiwygTypography = WysiwygTypography(),
     ): android.text.SpannableStringBuilder {
         val out = android.text.SpannableStringBuilder()
         val source = if (blocks.isEmpty()) listOf(WysiwygBlock("p")) else blocks
@@ -1817,7 +1877,7 @@ internal object Styler {
                 applyMarks(out, runStart, out.length, run.marks, theme, night)
             }
 
-            applyBlockStyle(out, start, out.length, block.type, theme, night)
+            applyBlockStyle(out, start, out.length, block.type, theme, night, typography)
         }
 
         return out
@@ -1862,6 +1922,7 @@ internal object Styler {
         type: String,
         theme: WysiwygEditorFunctions.EditorTheme,
         night: Boolean,
+        typography: WysiwygTypography = WysiwygTypography(),
     ) {
         // Android only honours SPAN_PARAGRAPH when the span ends AFTER a
         // newline (charAt(end - 1) == '\n') or at the very end of the buffer.
@@ -1883,16 +1944,11 @@ internal object Styler {
         val paragraph = android.text.Spanned.SPAN_PARAGRAPH
 
         when (type) {
-            "h1" -> {
-                out.setSpan(android.text.style.AbsoluteSizeSpan(28, true), start, end, inclusive)
-                out.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, end, inclusive)
-            }
-            "h2" -> {
-                out.setSpan(android.text.style.AbsoluteSizeSpan(22, true), start, end, inclusive)
-                out.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, end, inclusive)
-            }
-            "h3" -> {
-                out.setSpan(android.text.style.AbsoluteSizeSpan(18, true), start, end, inclusive)
+            "h1", "h2", "h3" -> {
+                out.setSpan(
+                    android.text.style.AbsoluteSizeSpan(typography.size(type), true),
+                    start, end, inclusive,
+                )
                 out.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, end, inclusive)
             }
             "blockquote" -> {
@@ -2057,7 +2113,7 @@ internal class EditorController(
         pushUndoForced()
         programmatic = true
         try {
-            editText.setText(Styler.toSpannable(blocks, theme, night))
+            editText.setText(Styler.toSpannable(blocks, theme, night, config.typography))
         } finally {
             programmatic = false
         }
@@ -2187,7 +2243,7 @@ internal class EditorController(
 
             if (type != null && end > lineStart) {
                 stripDisplaySpans(s, lineStart, end)
-                Styler.applyBlockStyle(s, lineStart, end, type, theme, night)
+                Styler.applyBlockStyle(s, lineStart, end, type, theme, night, config.typography)
             }
 
             if (end >= whole.length) break
@@ -2679,7 +2735,9 @@ internal class EditorController(
             contentEnd = safeEnd + marker.length
         }
 
-        Styler.applyBlockStyle(text, start, contentEnd.coerceAtMost(text.length), type, theme, night)
+        Styler.applyBlockStyle(
+            text, start, contentEnd.coerceAtMost(text.length), type, theme, night, config.typography,
+        )
     }
 
     /**
@@ -2977,17 +3035,34 @@ internal fun EditorScreen(
                                     WysiwygEditText(context).apply {
                                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
                                         gravity = Gravity.TOP or Gravity.START
-                                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                                        setTextSize(
+                                            TypedValue.COMPLEX_UNIT_SP,
+                                            config.typography.base.toFloat(),
+                                        )
+                                        config.typography.typeface()?.let { typeface = it }
                                         setTextColor(foreground.toArgb())
                                         setHintTextColor(foreground.copy(alpha = 0.38f).toArgb())
-                                        setLineSpacing(0f, 1.15f)
+                                        setLineSpacing(0f, config.typography.lineHeight)
                                         // Only the first segment shows the placeholder.
                                         if (index == 0) hint = config.placeholder
-                                        setPadding(56, 24, 56, 24)
+                                        // dp, not raw px — until now this was
+                                        // pixels, which made Android visibly
+                                        // tighter than iOS on the same document.
+                                        val dp = resources.displayMetrics.density
+                                        setPadding(
+                                            (config.spacing.horizontal * dp).toInt(),
+                                            (config.spacing.vertical * dp).toInt(),
+                                            (config.spacing.horizontal * dp).toInt(),
+                                            (config.spacing.vertical * dp).toInt(),
+                                        )
                                         inputType = android.text.InputType.TYPE_CLASS_TEXT or
                                             android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                                             android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-                                        setText(Styler.toSpannable(segment.blocks, theme, night))
+                                        setText(
+                                            Styler.toSpannable(
+                                                segment.blocks, theme, night, config.typography,
+                                            ),
+                                        )
 
                                         val controller = EditorController(
                                             editText = this,

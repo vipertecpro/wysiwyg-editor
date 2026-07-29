@@ -189,6 +189,8 @@ struct WysiwygConfig {
     let maxLength: Int
     let counts: [String]
     let menu: String
+    let typography: WysiwygTypography
+    let spacing: WysiwygSpacing
     let validation: [String: Any]
     let strings: [String: String]
     let changeDebounce: Int
@@ -205,6 +207,8 @@ struct WysiwygConfig {
         maxLength = max(0, (p["maxLength"] as? NSNumber)?.intValue ?? 0)
         counts = p["counts"] as? [String] ?? []
         menu = p["menu"] as? String ?? "toolbar"
+        typography = WysiwygTypography(p["typography"] as? [String: Any])
+        spacing = WysiwygSpacing(named: p["spacing"] as? String ?? "comfortable")
         validation = p["validation"] as? [String: Any] ?? [:]
         strings = p["strings"] as? [String: String] ?? [:]
         changeDebounce = max(0, (p["changeDebounce"] as? NSNumber)?.intValue ?? 0)
@@ -1284,6 +1288,66 @@ struct JsonScanner {
     }
 }
 
+// MARK: - Typography & spacing
+
+/**
+ Type settings.
+
+ The heading ramp is DERIVED from the body size with fixed multipliers rather
+ than configured separately, so a host that wants larger text sets one number
+ and the proportions hold. The multipliers are normative — Kotlin uses the
+ same three — and the default base of 16 reproduces the 28 / 22 / 18 ramp the
+ editor used before the option existed.
+ */
+struct WysiwygTypography {
+    let fontFamily: String
+    let base: CGFloat
+    let lineHeight: CGFloat
+
+    init(_ p: [String: Any]?) {
+        fontFamily = (p?["fontFamily"] as? String) ?? ""
+        base = CGFloat((p?["fontSize"] as? NSNumber)?.doubleValue ?? 16)
+        lineHeight = CGFloat((p?["lineHeight"] as? NSNumber)?.doubleValue ?? 1.15)
+    }
+
+    func size(for block: String) -> CGFloat {
+        switch block {
+        case "h1": return (base * 1.75).rounded()
+        case "h2": return (base * 1.375).rounded()
+        case "h3": return (base * 1.125).rounded()
+        default: return base
+        }
+    }
+
+    /// The host app's font at `size`, falling back to the system font when the
+    /// name does not resolve — a theme naming a font the app never bundled
+    /// should not leave the editor with no text.
+    func font(size: CGFloat, weight: UIFont.Weight) -> UIFont {
+        if !fontFamily.isEmpty, let named = UIFont(name: fontFamily, size: size) {
+            let descriptor = named.fontDescriptor.addingAttributes([
+                .traits: [UIFontDescriptor.TraitKey.weight: weight],
+            ])
+            return UIFont(descriptor: descriptor, size: size)
+        }
+        return UIFont.systemFont(ofSize: size, weight: weight)
+    }
+}
+
+/// Editing density. Points here, dp on Android — the same numbers either way.
+struct WysiwygSpacing {
+    let horizontal: CGFloat
+    let vertical: CGFloat
+    let paragraph: CGFloat
+
+    init(named: String) {
+        switch named {
+        case "compact": (horizontal, vertical, paragraph) = (12, 8, 4)
+        case "roomy": (horizontal, vertical, paragraph) = (20, 18, 10)
+        default: (horizontal, vertical, paragraph) = (16, 12, 6)
+        }
+    }
+}
+
 // MARK: - Styler
 
 /// Maps the abstract document model to themed NSAttributedString display
@@ -1291,24 +1355,21 @@ struct JsonScanner {
 /// custom keys — never the reverse — so serialization is exact.
 struct WysiwygStyler {
     let theme: WysiwygTheme
+    var typography = WysiwygTypography(nil)
+    var spacing = WysiwygSpacing(named: "comfortable")
 
     static let ulMarker = "\u{2022}\u{00A0}"                       // "•<nbsp>"
     static func olMarker(_ n: Int) -> String { "\(n).\u{00A0}" }   // "1.<nbsp>"
 
     // MARK: fonts & paragraph styles
 
-    /// Typography: body 16 · h1 28 bold · h2 22 bold · h3 18 semibold.
-    func fontSize(for block: String) -> CGFloat {
-        switch block {
-        case "h1": return 28
-        case "h2": return 22
-        case "h3": return 18
-        default: return 16
-        }
-    }
+    /// Derived from the configured body size — see WysiwygTypography.
+    func fontSize(for block: String) -> CGFloat { typography.size(for: block) }
 
     func font(block: String, marks: MarkSet) -> UIFont {
         let size = fontSize(for: block)
+        // Code stays monospaced whatever the host font is: a proportional
+        // face defeats the point of marking something as code.
         if marks.code {
             return UIFont.monospacedSystemFont(ofSize: size - 1, weight: .regular)
         }
@@ -1318,7 +1379,7 @@ struct WysiwygStyler {
         case "h3": weight = marks.bold ? .bold : .semibold
         default: weight = marks.bold ? .bold : .regular
         }
-        var font = UIFont.systemFont(ofSize: size, weight: weight)
+        var font = typography.font(size: size, weight: weight)
         if marks.italic || block == "blockquote" {
             let traits = font.fontDescriptor.symbolicTraits.union(.traitItalic)
             if let descriptor = font.fontDescriptor.withSymbolicTraits(traits) {
@@ -1330,7 +1391,8 @@ struct WysiwygStyler {
 
     func paragraphStyle(for block: String) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
-        style.paragraphSpacing = 6
+        style.paragraphSpacing = spacing.paragraph
+        style.lineHeightMultiple = typography.lineHeight
         switch block {
         case "ul", "ol":
             style.headIndent = 22 // wrapped lines align past the marker
@@ -1532,7 +1594,9 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
     /// Seed from a specific run of blocks — one model per TEXT segment.
     init(config: WysiwygConfig, blocks: [WysiwygBlock]) {
         self.config = config
-        self.styler = WysiwygStyler(theme: config.theme)
+        self.styler = WysiwygStyler(theme: config.theme,
+                                    typography: config.typography,
+                                    spacing: config.spacing)
         self.initialAttributed = styler.attributed(blocks)
         self.initialNormalizedHtml = HtmlCoder.emit(blocks).html
         super.init()
@@ -2330,10 +2394,12 @@ private struct RichTextView: UIViewRepresentable {
         tv.backgroundColor = .clear
         tv.allowsEditingTextAttributes = false
         tv.delegate = context.coordinator
-        tv.font = UIFont.systemFont(ofSize: 16)
+        tv.font = model.config.typography.font(size: model.config.typography.base, weight: .regular)
         tv.textColor = theme.textUIColor
         tv.tintColor = theme.accentUIColor
-        tv.textContainerInset = UIEdgeInsets(top: 14, left: 12, bottom: 14, right: 12)
+        let inset = model.config.spacing
+        tv.textContainerInset = UIEdgeInsets(top: inset.vertical, left: inset.horizontal,
+                                             bottom: inset.vertical, right: inset.horizontal)
         tv.keyboardDismissMode = .interactive
         tv.linkTextAttributes = [
             .foregroundColor: theme.accentUIColor,
@@ -2347,9 +2413,13 @@ private struct RichTextView: UIViewRepresentable {
         // Placeholder — a plain overlaid label, hidden as soon as there is text.
         let placeholder = UILabel()
         placeholder.text = autoFocus ? model.config.placeholder : ""
-        placeholder.font = UIFont.systemFont(ofSize: 16)
+        placeholder.font = model.config.typography.font(size: model.config.typography.base,
+                                                        weight: .regular)
         placeholder.textColor = theme.textUIColor.withAlphaComponent(0.35)
-        placeholder.frame = CGRect(x: 17, y: 14, width: UIScreen.main.bounds.width - 60, height: 22)
+        // Sits exactly where the first character will, so it does not jump.
+        placeholder.frame = CGRect(x: inset.horizontal + 5, y: inset.vertical,
+                                   width: UIScreen.main.bounds.width - inset.horizontal * 2 - 10,
+                                   height: model.config.typography.base * 1.4)
         placeholder.isHidden = !model.initialAttributed.string.isEmpty
         tv.addSubview(placeholder)
 
