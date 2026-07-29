@@ -117,6 +117,52 @@ describe('Native parity', function () {
         ['/resources/android/WysiwygEditorFunctions.kt', '/val INSERT_TOOLS = listOf\((.*?)\)/s'],
     ]);
 
+    /**
+     * A tool can be declared everywhere, labelled everywhere, pass every
+     * parity check above — and still do NOTHING, because no dispatcher has a
+     * case for it. That is exactly what happened to `poll`, `divider` and
+     * `embed`: they worked from the Insert sheet and fell through the toolbar's
+     * switch in silence. Nothing failed; the button just did not work.
+     *
+     * This reads the dispatchers and insists every tool is named in one.
+     */
+    it('handles every tool it offers, in a dispatcher that can act on it', function (string $file, array $functions) {
+        $source = file_get_contents($this->pluginPath.$file);
+
+        $handled = '';
+
+        foreach ($functions as $pattern) {
+            expect(preg_match($pattern, $source, $m))->toBe(1, "no dispatcher matched {$pattern}");
+            $handled .= $m[1];
+        }
+
+        preg_match_all('/"([a-zA-Z0-9]+)"/', $handled, $found);
+
+        $covered = $found[1];
+
+        // A dispatcher may match against the shared insert list rather than
+        // naming each one — that handles them just as well.
+        if (str_contains($handled, 'INSERT_TOOLS') || str_contains($handled, 'insertTools')) {
+            $covered = array_merge($covered, WysiwygEditor::INSERT_TOOLS);
+        }
+
+        $missing = array_values(array_diff(WysiwygEditor::AVAILABLE_TOOLS, $covered));
+
+        expect($missing)->toBe([], 'tools with no handler: '.implode(', ', $missing));
+    })->with([
+        [
+            '/resources/ios/WysiwygEditorFunctions.swift',
+            [
+                '/private func perform\(_ tool: String\) \{(.*?)\n    \}/s',
+                '/private func apply\(_ tool: String, _ model: WysiwygEditorModel\) \{(.*?)\n    \}/s',
+            ],
+        ],
+        [
+            '/resources/android/WysiwygEditorFunctions.kt',
+            ['/^private fun runTool\((.*?)\n\}/ms'],
+        ],
+    ]);
+
     it('labels tools with keys both platforms agree on', function (string $file, string $pattern) {
         $source = file_get_contents($this->pluginPath.$file);
 

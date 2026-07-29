@@ -3265,6 +3265,19 @@ internal fun EditorScreen(
                 strings = config.strings,
                 haptics = config.haptics,
                 onRequestMedia = onRequestMedia,
+                onDocumentTool = { tool ->
+                    when (tool) {
+                        "poll" -> pollDraft.value = PollDraft()
+                        "divider" -> insertBlock(WysiwygBlock("divider"))
+                        "embed" -> showEmbedDialog(activity, config.strings) { url ->
+                            val block = WysiwygBlock("embed")
+                            block.attrs["url"] = url
+                            val provider = embedProvider(url)
+                            if (provider.isNotEmpty()) block.attrs["provider"] = provider
+                            insertBlock(block)
+                        }
+                    }
+                },
                 sheet = sheet,
             )
         }
@@ -3687,6 +3700,7 @@ private fun ToolbarRow(
     strings: Map<String, String>,
     haptics: Boolean,
     onRequestMedia: (String) -> Unit,
+    onDocumentTool: (String) -> Unit = {},
     sheet: androidx.compose.runtime.MutableState<String?> =
         androidx.compose.runtime.mutableStateOf(null),
 ) {
@@ -3739,7 +3753,7 @@ private fun ToolbarRow(
                     highlightColor,
                     haptics,
                 ) {
-                    runTool(tool, controller, palette, activity, strings, onRequestMedia)
+                    runTool(tool, controller, palette, activity, strings, onRequestMedia, onDocumentTool)
                 }
             }
 
@@ -3781,6 +3795,7 @@ private fun runTool(
     activity: FragmentActivity,
     strings: Map<String, String>,
     onRequestMedia: (String) -> Unit,
+    onDocumentTool: (String) -> Unit = {},
 ) {
     when (tool) {
         "bold", "italic", "underline", "strikethrough", "code" -> controller?.toggleInline(tool)
@@ -3794,6 +3809,10 @@ private fun runTool(
                 c.setLink(url)
             }
         }
+        // These change the DOCUMENT, not this segment's text, so the screen
+        // handles them — a dispatcher holding one controller cannot. Without
+        // this they fell through the `when` and did nothing, silently.
+        "poll", "divider", "embed" -> onDocumentTool(tool)
     }
 }
 
@@ -4230,6 +4249,35 @@ private fun PaletteRow(colors: List<String>, foreground: Color, onPick: (String?
  * becomes a mailto:. Anything else is rejected by the serializer's scheme
  * allow-list, so no javascript: URL can reach the document.
  */
+/**
+ * Ask for a URL to embed.
+ *
+ * No preview is fetched — see [embedProvider]. The card names the service and
+ * shows a title or thumbnail only if the HOST supplied one.
+ */
+private fun showEmbedDialog(
+    activity: FragmentActivity,
+    strings: Map<String, String>,
+    onApply: (String) -> Unit,
+) {
+    val input = android.widget.EditText(activity).apply {
+        hint = localized(strings, "embedPlaceholder", "https://youtube.com/watch?v=…")
+        setSingleLine()
+        inputType = android.text.InputType.TYPE_CLASS_TEXT or
+            android.text.InputType.TYPE_TEXT_VARIATION_URI
+    }
+
+    android.app.AlertDialog.Builder(activity)
+        .setTitle(localized(strings, "embedTitle", "Embed a link"))
+        .setView(input)
+        .setNegativeButton(localized(strings, "cancel", "Cancel"), null)
+        .setPositiveButton(localized(strings, "embedAdd", "Embed")) { _, _ ->
+            val url = input.text.toString().trim()
+            if (url.isNotEmpty()) onApply(url)
+        }
+        .show()
+}
+
 private fun showLinkDialog(
     activity: FragmentActivity,
     current: String?,
