@@ -37,7 +37,9 @@ a JavaScript editor in a browser.
 ## Requirements
 
 - PHP 8.4+
-- NativePHP Mobile v3 or v4 (`nativephp/mobile: ^3.0|^4.0`)
+- NativePHP Mobile v3 or v4 (`nativephp/mobile: ^3.0|^4.0`) — **developed and
+  tested against v4**; the v3 path is supported by the code but not exercised
+  in CI, so treat it as best-effort
 - iOS 15+ / Android API 26+
 
 ## Platform support
@@ -213,8 +215,14 @@ WysiwygEditor::open($html, [
 
 | Event | Payload | When |
 | --- | --- | --- |
-| `Vipertecpro\WysiwygEditor\Events\ContentSaved` | `string $html`, `string $text`, `string $json`, `?string $id` | User taps **Save** |
-| `Vipertecpro\WysiwygEditor\Events\EditCancelled` | `?string $id` | User cancels / backs out (a discard confirm guards unsaved changes) |
+| `…\Events\ContentSaved` | `string $html`, `string $text`, `string $json`, `?string $id` | User taps **Save** |
+| `…\Events\EditCancelled` | `?string $id` | User cancels / backs out (a discard confirm guards unsaved changes) |
+| `…\Events\ContentChanged` | `string $html`, `string $text`, `string $json`, `?string $id` | Typing settled, when `changeDebounce` is set — the auto-save seam |
+| `…\Events\MediaRequested` | `string $kind`, `?string $id` | User tapped image / video / file. Answer with `insertMedia()` |
+| `…\Events\MediaEditRequested` | `string $kind`, `string $uploadId`, `string $source`, `?string $id` | User tapped edit on an attachment. Re-open your own picker |
+| `…\Events\AccessoryTapped` | `string $accessory`, `?string $id` | User tapped one of your own rows. Answer with `setAccessory()` |
+
+All events live under `Vipertecpro\WysiwygEditor\Events\`.
 
 `$html` is the document in the normalised form below; `$text` is the same
 content as plain text — marks stripped, one line per block — handy for
@@ -416,6 +424,68 @@ The block appears the moment it is inserted, rendering from `localPath`, so
 the user never waits on a network round-trip. Until an upload completes the
 block exports as `<figure data-pending="…">` with **no `src`** — the device
 path is never written into published HTML.
+
+### Where attachments sit
+
+`mediaLayout` decides whether media lives in the text or beside it:
+
+- **`blocks`** (default) — each image, video or poll is a card at the point it
+  was inserted. Right for notes, articles and documentation, where a picture
+  belongs at a particular place in the prose.
+- **`strip`** — media is pulled out of the flow into a horizontally scrolling
+  row of thumbnails under the text, each with its own remove, description and
+  edit controls. Right for social composers, where an attachment belongs to the
+  POST rather than to a position in it, and a full-width card each would push
+  the writing off the screen.
+
+`maxMedia` caps attachments (default **4** — what the common grids are built to
+lay out); `0` means no limit.
+
+Tapping edit on a thumbnail emits `MediaEditRequested` with the block's
+`uploadId` and current source. The editor does not crop, rotate or filter —
+re-open your own picker and call `insertMedia()` again with the same
+`uploadId` to replace it.
+
+### Showing media full-screen
+
+```php
+WysiwygEditor::preview('image', $post->photo);   // or 'video'
+```
+
+Opens a zoomable image viewer, or a player for video. It lives in the plugin
+because the editor already decodes images and plays video for its own cards,
+and because NativePHP ships no video element for a host to build a viewer out
+of.
+
+## Your own rows in the composer
+
+The editor owns the whole screen, so without this an app could not put its own
+controls beside the text — and most composers have some: *Tag people*, *Add
+location*, an audience picker.
+
+None of that belongs in an editor: they are your features, backed by your data.
+So the editor draws the row and gets out of the way.
+
+```php
+WysiwygEditor::open($html, [
+    'accessories' => [
+        ['id' => 'tag',      'label' => 'Tag people',         'icon' => 'image'],
+        ['id' => 'audience', 'label' => 'Everyone can reply', 'value' => 'Everyone'],
+    ],
+]);
+
+#[On(AccessoryTapped::class)]
+public function onAccessoryTapped(string $accessory): void
+{
+    // Your picker, your data. The editor stays open throughout.
+    WysiwygEditor::setAccessory('audience', 'Everyone can reply', 'People you follow');
+}
+```
+
+Each row takes `id` (reported back on tap), `label`, and optionally `icon` (one
+of the editor's own glyph names) and `value` (trailing text). A row without an
+`id` could never report a tap and one without a `label` would draw as a blank
+tappable strip — both are dropped rather than shown.
 
 ## Polls
 

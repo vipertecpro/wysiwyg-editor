@@ -20,7 +20,7 @@
         "text"
     ],
     "require": {
-        "php": "^8.2|^8.3|^8.4",
+        "php": "^8.4",
         "nativephp/mobile": "^3.0|^4.0"
     },
     "autoload": {
