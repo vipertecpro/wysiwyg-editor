@@ -54,6 +54,12 @@
             "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.Preview",
             "ios": "WysiwygEditorFunctions.Preview",
             "description": "Show a media block full-screen — an image viewer, or a video player"
+        },
+        {
+            "name": "WysiwygEditor.SetAccessory",
+            "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.SetAccessory",
+            "ios": "WysiwygEditorFunctions.SetAccessory",
+            "description": "Update a host accessory row in the open editor — its label, value or icon"
         }
     ],
     "android": {
@@ -87,7 +93,8 @@
         "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled",
         "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested",
         "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged",
-        "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested"
+        "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested",
+        "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
     ],
     "service_provider": "Vipertecpro\\WysiwygEditor\\WysiwygEditorServiceProvider",
     "hooks": {

@@ -433,6 +433,45 @@ describe('Polls', function () {
     });
 });
 
+describe('Host accessory rows', function () {
+    it('has none unless the host asks for them', function () {
+        expect(editor()->config('')['accessories'])->toBe([]);
+    });
+
+    it('carries id, label, icon and value through in order', function () {
+        $config = editor()->config('', ['accessories' => [
+            ['id' => 'tag', 'label' => 'Tag people', 'icon' => 'image'],
+            ['id' => 'audience', 'label' => 'Everyone can reply', 'value' => 'Everyone'],
+        ]]);
+
+        expect($config['accessories'])->toBe([
+            ['id' => 'tag', 'label' => 'Tag people', 'icon' => 'image'],
+            ['id' => 'audience', 'label' => 'Everyone can reply', 'value' => 'Everyone'],
+        ]);
+    });
+
+    /**
+     * A row with no id could never report a tap, and one with no label would
+     * draw as a blank tappable strip. Both are dropped rather than shown.
+     */
+    it('drops rows that could not work', function (array $row) {
+        expect(editor()->config('', ['accessories' => [$row]])['accessories'])->toBe([]);
+    })->with([
+        [['label' => 'No id']],
+        [['id' => 'no-label']],
+        [['id' => '  ', 'label' => 'blank id']],
+        [['id' => 'blank-label', 'label' => '   ']],
+    ]);
+
+    it('ignores keys it does not know', function () {
+        $config = editor()->config('', ['accessories' => [
+            ['id' => 'a', 'label' => 'A', 'onTap' => 'doSomething()'],
+        ]]);
+
+        expect($config['accessories'][0])->toBe(['id' => 'a', 'label' => 'A']);
+    });
+});
+
 describe('Menu mode', function () {
     it('defaults to the scrolling toolbar', function () {
         expect(editor()->config('')['menu'])->toBe('toolbar');

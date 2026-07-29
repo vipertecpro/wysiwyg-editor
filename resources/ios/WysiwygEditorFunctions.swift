@@ -91,6 +91,23 @@ enum WysiwygEditorFunctions {
         }
     }
 
+    /// Update one host row while the editor is open.
+    class SetAccessory: BridgeFunction {
+        func execute(parameters: [String: Any]) throws -> [String: Any] {
+            let accessory = parameters["accessory"] as? String ?? ""
+            let label = parameters["label"] as? String ?? ""
+            let value = parameters["value"] as? String ?? ""
+
+            guard !accessory.isEmpty else { return [:] }
+
+            DispatchQueue.main.async {
+                WysiwygEditorFunctions.live?.setAccessory(id: accessory, label: label, value: value)
+            }
+
+            return [:]
+        }
+    }
+
     class Open: BridgeFunction {
         func execute(parameters: [String: Any]) throws -> [String: Any] {
             let config = WysiwygConfig(parameters)
@@ -107,6 +124,7 @@ private enum WysiwygEvents {
     static let cancelled = "Vipertecpro\\WysiwygEditor\\Events\\EditCancelled"
     static let mediaRequested = "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested"
     static let mediaEditRequested = "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested"
+    static let accessoryTapped = "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
     static let changed = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
 }
 
@@ -228,6 +246,8 @@ struct WysiwygConfig {
     /// Label key -> minutes. Ordered by the ordering of the keys in PHP.
     let pollDurations: [(key: String, minutes: Int)]
     let history: Bool
+    /// Rows the HOST owns, drawn under the media. See WysiwygAccessory.
+    let accessories: [WysiwygAccessory]
     let typography: WysiwygTypography
     let spacing: WysiwygSpacing
     let validation: [String: Any]
@@ -270,6 +290,7 @@ struct WysiwygConfig {
             }
             .sorted { $0.minutes < $1.minutes }
         history = (p["history"] as? NSNumber)?.boolValue ?? true
+        accessories = ((p["accessories"] as? [[String: Any]]) ?? []).map(WysiwygAccessory.init)
         typography = WysiwygTypography(p["typography"] as? [String: Any])
         spacing = WysiwygSpacing(named: p["spacing"] as? String ?? "comfortable")
         validation = p["validation"] as? [String: Any] ?? [:]
@@ -1400,6 +1421,29 @@ struct JsonScanner {
     }
 }
 
+// MARK: - Host accessories
+
+/**
+ One row the host application put in the composer.
+
+ The editor draws it and reports the tap; it does not know or care what the
+ row means. That is the whole point — "Tag people" is the app's feature backed
+ by the app's data, and an editor that tried to own it would be guessing.
+ */
+struct WysiwygAccessory: Identifiable {
+    let id: String
+    var label: String
+    var value: String
+    let icon: String
+
+    init(_ p: [String: Any]) {
+        id = p["id"] as? String ?? ""
+        label = p["label"] as? String ?? ""
+        value = p["value"] as? String ?? ""
+        icon = p["icon"] as? String ?? ""
+    }
+}
+
 // MARK: - Typography & spacing
 
 /**
@@ -2403,6 +2447,7 @@ final class WysiwygDocumentModel: ObservableObject {
             }
         }
 
+        accessories = config.accessories
         refreshCounts()
         focused = entries.compactMap { models[$0.id] }.first
     }
@@ -2636,6 +2681,17 @@ final class WysiwygDocumentModel: ObservableObject {
         let document = blocks()
         charCount = document.reduce(0) { $0 + $1.plainText.count }
         wordCount = countWords(document)
+    }
+
+    /// The host's rows, live — `setAccessory` edits these in place so
+    /// "Add location" can become the place that was picked.
+    @Published var accessories: [WysiwygAccessory] = []
+
+    func setAccessory(id: String, label: String, value: String) {
+        guard let index = accessories.firstIndex(where: { $0.id == id }) else { return }
+
+        if !label.isEmpty { accessories[index].label = label }
+        accessories[index].value = value
     }
 
     /// The auto-save seam: emit ContentChanged once the user stops typing, so
@@ -2885,6 +2941,16 @@ private struct EditorScreen: View {
                     MediaStrip(document: document, theme: theme,
                                onEdit: requestMediaEdit,
                                onDescribe: { describing = $0 })
+                }
+
+                // The host's own rows, under the media and above the counter —
+                // where every composer that has them puts them.
+                if !document.accessories.isEmpty {
+                    AccessoryRows(document: document, theme: theme) { accessory in
+                        var payload: [String: Any] = ["accessory": accessory]
+                        if let id = document.config.id { payload["id"] = id }
+                        LaravelBridge.shared.send?(WysiwygEvents.accessoryTapped, payload)
+                    }
                 }
 
                 // The ring rides in the toolbar when there IS one; only the
@@ -3469,6 +3535,50 @@ private struct PollCard: View {
                 RoundedCornerRect(radius: 12)
                     .stroke(over ? Color.red : theme.textColor.opacity(0.2), lineWidth: 1)
             )
+        }
+    }
+}
+
+// MARK: - Accessory rows
+
+/// The host's rows: an icon, a label, and whatever value the app set.
+private struct AccessoryRows: View {
+    @ObservedObject var document: WysiwygDocumentModel
+    let theme: WysiwygTheme
+    let onTap: (String) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(document.accessories) { accessory in
+                Button {
+                    onTap(accessory.id)
+                } label: {
+                    HStack(spacing: 12) {
+                        if !accessory.icon.isEmpty, let icon = toolIcons[accessory.icon] {
+                            IconShape(data: icon.path)
+                                .stroke(style: StrokeStyle(lineWidth: 2 * 18 / 24,
+                                                           lineCap: .round, lineJoin: .round))
+                                .foregroundColor(theme.accentColor)
+                                .frame(width: 18, height: 18)
+                        }
+
+                        Text(accessory.label)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(theme.accentColor)
+
+                        Spacer()
+
+                        if !accessory.value.isEmpty {
+                            Text(accessory.value)
+                                .font(.system(size: 14))
+                                .foregroundColor(theme.textColor.opacity(0.55))
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(height: 44)
+                    .contentShape(Rectangle())
+                }
+            }
         }
     }
 }

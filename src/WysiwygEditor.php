@@ -195,6 +195,23 @@ class WysiwygEditor
     public const DEFAULT_MAX_MEDIA = 4;
 
     /**
+     * Rows the HOST puts in the composer, under the media.
+     *
+     * The editor owns the whole screen, which means an app cannot put its own
+     * controls beside the text — and every real composer has some. X has
+     * "Tag people", "Add location" and a reply-audience row; LinkedIn has an
+     * audience picker; Facebook has feeling, tag and location.
+     *
+     * None of those belong in an editor: they are the app's features, backed
+     * by the app's data. So the editor draws the row and gets out of the way —
+     * a tap emits {@see Events\AccessoryTapped} with the row's `id` and the
+     * host does whatever it likes, including calling back to change the label.
+     *
+     * @var list<string>  the keys each row accepts
+     */
+    public const ACCESSORY_KEYS = ['id', 'label', 'icon', 'value'];
+
+    /**
      * How long a poll runs, offered in the composer.
      *
      * Labels are localizable like everything else; the VALUE is minutes,
@@ -413,6 +430,26 @@ class WysiwygEditor
     }
 
     /**
+     * Update one of your accessory rows while the editor is open.
+     *
+     * Called after {@see Events\AccessoryTapped} once the app knows what the
+     * user chose — so "Add location" can become "San Francisco" without
+     * closing the editor.
+     */
+    public function setAccessory(string $accessory, string $label = '', string $value = ''): void
+    {
+        if (! function_exists('nativephp_call') || $accessory === '') {
+            return;
+        }
+
+        nativephp_call('WysiwygEditor.SetAccessory', json_encode([
+            'accessory' => $accessory,
+            'label' => $label,
+            'value' => $value,
+        ]));
+    }
+
+    /**
      * Show a media block full-screen.
      *
      * The editor already decodes images and plays video for its own cards, so
@@ -570,6 +607,7 @@ class WysiwygEditor
             'pollMinOptions' => self::POLL_OPTION_RANGE['min'],
             'pollMaxOptions' => self::POLL_OPTION_RANGE['max'],
             'pollDurations' => self::POLL_DURATIONS,
+            'accessories' => $this->resolveAccessories($options['accessories'] ?? []),
             // Undo/redo lead the toolbar by default. Composers built for short
             // posts do not show them, and with no other tools enabled they
             // would be the only thing left on the bar.
@@ -653,6 +691,49 @@ class WysiwygEditor
     protected function pick(mixed $value, array $allowed): string
     {
         return in_array($value, $allowed, true) ? $value : $allowed[0];
+    }
+
+    /**
+     * Host rows for the composer.
+     *
+     * A row needs an `id` to report back with and a `label` to show; anything
+     * without both is dropped rather than drawn as a blank tappable strip.
+     * `icon` names one of the editor's own glyphs, and `value` is the trailing
+     * text a row like "Everyone can reply" carries.
+     *
+     * @param  array<int, array<string, mixed>>  $accessories
+     * @return list<array<string, string>>
+     */
+    protected function resolveAccessories(array $accessories): array
+    {
+        $rows = [];
+
+        foreach ($accessories as $accessory) {
+            if (! is_array($accessory)) {
+                continue;
+            }
+
+            $id = trim((string) ($accessory['id'] ?? ''));
+            $label = trim((string) ($accessory['label'] ?? ''));
+
+            if ($id === '' || $label === '') {
+                continue;
+            }
+
+            $row = ['id' => $id, 'label' => $label];
+
+            foreach (['icon', 'value'] as $key) {
+                $value = trim((string) ($accessory[$key] ?? ''));
+
+                if ($value !== '') {
+                    $row[$key] = $value;
+                }
+            }
+
+            $rows[] = $row;
+        }
+
+        return $rows;
     }
 
     /**
