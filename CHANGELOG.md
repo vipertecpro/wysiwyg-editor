@@ -5,6 +5,29 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-29
+
+### Added
+
+- **`cancelMode => 'draft'`** — backing out of a half-written document offers
+  to keep it rather than bin it, emitting `DraftRequested` with the document.
+  Where a draft LIVES stays the host's business; the editor has no database.
+- **`cancelStyle => 'icon'`** — the close glyph full-screen composers use,
+  instead of the word Cancel.
+- **Video posters.** A frame is pulled from half a second in — past the black
+  or half-exposed opening frame many recordings have — so a video card shows
+  what it contains instead of a grey placeholder.
+
+### Fixed
+
+- **A poll's length was never saved.** `durationMinutes` was missing from the
+  serialized attributes, so the author's choice was dropped and the host had
+  nothing to compute a closing time from.
+- **Blank poll answers were saved.** The composer keeps an empty row so you can
+  type into it; shipping one means a poll with an answer nobody can choose.
+
+Both are covered by parity harness cases on each platform.
+
 ## [0.2.0] - 2026-07-29
 
 ### Added
