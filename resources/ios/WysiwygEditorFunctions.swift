@@ -125,6 +125,7 @@ private enum WysiwygEvents {
     static let mediaRequested = "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested"
     static let mediaEditRequested = "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested"
     static let accessoryTapped = "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
+    static let draftRequested = "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested"
     static let changed = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
 }
 
@@ -238,6 +239,8 @@ struct WysiwygConfig {
     let countStyle: String
     let maxLengthMode: String
     let saveStyle: String
+    let cancelMode: String
+    let cancelStyle: String
     let mediaLayout: String
     let maxMedia: Int
     let pollOptionMaxLength: Int
@@ -276,6 +279,8 @@ struct WysiwygConfig {
         countStyle = p["countStyle"] as? String ?? "text"
         maxLengthMode = p["maxLengthMode"] as? String ?? "hard"
         saveStyle = p["saveStyle"] as? String ?? "text"
+        cancelMode = p["cancelMode"] as? String ?? "discard"
+        cancelStyle = p["cancelStyle"] as? String ?? "text"
         mediaLayout = p["mediaLayout"] as? String ?? "blocks"
         maxMedia = max(0, (p["maxMedia"] as? NSNumber)?.intValue ?? 4)
         pollOptionMaxLength = max(1, (p["pollOptionMaxLength"] as? NSNumber)?.intValue ?? 25)
@@ -2990,14 +2995,37 @@ private struct EditorScreen: View {
         }
         .background(theme.backgroundColor.ignoresSafeArea())
         .ignoresSafeArea(.keyboard, edges: .bottom)
-        .alert(localized(document.config.strings, "discardTitle", "Discard changes?"),
+        .alert(draftMode
+                ? localized(document.config.strings, "draftTitle", "Save post?")
+                : localized(document.config.strings, "discardTitle", "Discard changes?"),
                isPresented: $showDiscard) {
-            Button(localized(document.config.strings, "keepEditing", "Keep Editing"), role: .cancel) {}
-            Button(localized(document.config.strings, "discard", "Discard"), role: .destructive) {
-                onCancel()
+            if draftMode {
+                // Delete is the destructive one; Save is what a half-written
+                // post deserves by default.
+                Button(localized(document.config.strings, "draftDelete", "Delete"),
+                       role: .destructive) { onCancel() }
+                Button(localized(document.config.strings, "draftSave", "Save")) {
+                    let blocks = document.blocks()
+                    let out = HtmlCoder.emit(blocks)
+                    var payload: [String: Any] = [
+                        "html": out.html,
+                        "text": out.text,
+                        "json": JsonCoder.encode(blocks),
+                    ]
+                    if let id = document.config.id { payload["id"] = id }
+                    LaravelBridge.shared.send?(WysiwygEvents.draftRequested, payload)
+                    onCancel()
+                }
+            } else {
+                Button(localized(document.config.strings, "keepEditing", "Keep Editing"),
+                       role: .cancel) {}
+                Button(localized(document.config.strings, "discard", "Discard"),
+                       role: .destructive) { onCancel() }
             }
         } message: {
-            Text(localized(document.config.strings, "discardMessage", "Your edits will be lost."))
+            Text(draftMode
+                ? localized(document.config.strings, "draftMessage", "You can finish it later.")
+                : localized(document.config.strings, "discardMessage", "Your edits will be lost."))
         }
         .alert(localized(document.config.strings, "pollRemoveTitle", "Are you sure?"),
                isPresented: Binding(
@@ -3247,11 +3275,20 @@ private struct EditorScreen: View {
     private var topBar: some View {
         ZStack {
             HStack {
-                Button(localized(document.config.strings, "cancel", "Cancel")) {
+                Button {
                     document.hasChanges ? (showDiscard = true) : onCancel()
+                } label: {
+                    if document.config.cancelStyle == "icon" {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundColor(theme.textColor)
+                            .frame(width: 32, height: 32)
+                    } else {
+                        Text(localized(document.config.strings, "cancel", "Cancel"))
+                            .font(.system(size: 16))
+                            .foregroundColor(theme.textColor)
+                    }
                 }
-                    .font(.system(size: 16))
-                    .foregroundColor(theme.textColor)
                 Spacer()
                 saveButton
             }
@@ -3311,6 +3348,9 @@ private struct EditorScreen: View {
 
         WysiwygEditorPresenter.topController()?.present(alert, animated: true)
     }
+
+    /// Backing out offers to keep the document rather than bin it.
+    private var draftMode: Bool { document.config.cancelMode == "draft" }
 
     private var showsToolbar: Bool {
         !(document.config.toolbar.isEmpty && !document.config.history)

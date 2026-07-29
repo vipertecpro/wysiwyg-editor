@@ -144,6 +144,8 @@ All options are optional:
 | `maxMedia` | int | `4` | Attachments allowed; `0` = no limit |
 | `countStyle` | string | `text` | `text` readout, or a `ring` counting down to `maxLength` |
 | `maxLengthMode` | string | `hard` | `hard` refuses the keystroke; `soft` allows the overrun, shades it and blocks save |
+| `cancelMode` | string | `discard` | `discard` asks to throw the edits away; `draft` offers to keep them and emits `DraftRequested` |
+| `cancelStyle` | string | `text` | `text` shows "Cancel"; `icon` shows a ✕ |
 | `saveStyle` | string | `text` | `text` button, or a `filled` pill that dims until there is something to save |
 | `history` | bool | `true` | Show undo / redo ahead of the tools |
 | `pollOptionMaxLength` | int | `25` | Longest a single poll answer may be |
@@ -206,6 +208,7 @@ WysiwygEditor::open($html, [
 | `…\Events\ContentChanged` | `string $html`, `string $text`, `string $json`, `?string $id` | Typing settled, when `changeDebounce` is set — the auto-save seam |
 | `…\Events\MediaRequested` | `string $kind`, `?string $id` | User tapped image / video / file. Answer with `insertMedia()` |
 | `…\Events\MediaEditRequested` | `string $kind`, `string $uploadId`, `string $source`, `?string $id` | User tapped edit on an attachment. Re-open your own picker |
+| `…\Events\DraftRequested` | `string $html`, `string $text`, `string $json`, `?string $id` | User backed out of a half-written document and chose to keep it (`cancelMode => 'draft'`) |
 | `…\Events\AccessoryTapped` | `string $accessory`, `?string $id` | User tapped one of your own rows. Answer with `setAccessory()` |
 
 All events live under `Vipertecpro\WysiwygEditor\Events\`.

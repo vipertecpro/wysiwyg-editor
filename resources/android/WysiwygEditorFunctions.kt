@@ -85,6 +85,7 @@ object WysiwygEditorFunctions {
     private const val EVENT_CHANGED = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
     private const val EVENT_MEDIA_EDIT = "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested"
     private const val EVENT_ACCESSORY = "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
+    private const val EVENT_DRAFT = "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested"
 
     /** The four surfaces the editor colours. */
     val THEME_KEYS = listOf("background", "text", "accent", "highlight")
@@ -161,6 +162,8 @@ object WysiwygEditorFunctions {
         val countStyle: String,
         val maxLengthMode: String,
         val saveStyle: String,
+        val cancelMode: String,
+        val cancelStyle: String,
         val history: Boolean,
         val pollOptionMaxLength: Int,
         val pollMinOptions: Int,
@@ -294,6 +297,8 @@ object WysiwygEditorFunctions {
                 countStyle = (parameters["countStyle"] as? String) ?: "text",
                 maxLengthMode = (parameters["maxLengthMode"] as? String) ?: "hard",
                 saveStyle = (parameters["saveStyle"] as? String) ?: "text",
+                cancelMode = (parameters["cancelMode"] as? String) ?: "discard",
+                cancelStyle = (parameters["cancelStyle"] as? String) ?: "text",
                 history = parameters["history"] as? Boolean ?: true,
                 pollOptionMaxLength =
                     ((parameters["pollOptionMaxLength"] as? Number)?.toInt() ?: 25).coerceAtLeast(1),
@@ -425,6 +430,27 @@ object WysiwygEditorFunctions {
                     finishCancelled()
                     return
                 }
+                if (config.cancelMode == "draft") {
+                    // Delete is the destructive one; Save is what a
+                    // half-written post deserves by default.
+                    AlertDialog.Builder(activity)
+                        .setTitle(localized(config.strings, "draftTitle", "Save post?"))
+                        .setMessage(localized(config.strings, "draftMessage", "You can finish it later."))
+                        .setPositiveButton(localized(config.strings, "draftSave", "Save")) { _, _ ->
+                            val document = documentRef.value
+                            val out = HtmlCoder.serialize(document)
+                            dispatch(EVENT_DRAFT, config.id, out.first, out.second, JsonCoder.encode(document))
+                            finishCancelled()
+                        }
+                        .setNegativeButton(localized(config.strings, "draftDelete", "Delete")) { _, _ ->
+                            finishCancelled()
+                        }
+                        .setCancelable(true)
+                        .show()
+
+                    return
+                }
+
                 AlertDialog.Builder(activity)
                     .setTitle(localized(config.strings, "discardTitle", "Discard changes?"))
                     .setMessage(localized(config.strings, "discardMessage", "Your edits will be lost."))
@@ -3405,10 +3431,30 @@ internal fun EditorScreen(
                     .padding(horizontal = 8.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                BarButton(
-                    localized(config.strings, "cancel", "Cancel"),
-                    foreground.copy(alpha = 0.8f), FontWeight.Normal, onCancel,
-                )
+                if (config.cancelStyle == "icon") {
+                    // The ✕ every full-screen composer uses.
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable(onClick = onCancel),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        BasicText(
+                            text = "\u2715",
+                            style = TextStyle(
+                                color = foreground,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Medium,
+                            ),
+                        )
+                    }
+                } else {
+                    BarButton(
+                        localized(config.strings, "cancel", "Cancel"),
+                        foreground.copy(alpha = 0.8f), FontWeight.Normal, onCancel,
+                    )
+                }
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     if (config.title.isNotEmpty()) {
                         BasicText(

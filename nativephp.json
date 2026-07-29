@@ -94,7 +94,8 @@
         "Vipertecpro\\WysiwygEditor\\Events\\MediaRequested",
         "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged",
         "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested",
-        "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
+        "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped",
+        "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested"
     ],
     "service_provider": "Vipertecpro\\WysiwygEditor\\WysiwygEditorServiceProvider",
     "hooks": {

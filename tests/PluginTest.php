@@ -526,6 +526,35 @@ describe('Host accessory rows', function () {
     });
 });
 
+describe('Backing out', function () {
+    it('offers to discard by default', function () {
+        $config = editor()->config('');
+
+        expect($config['cancelMode'])->toBe('discard')
+            ->and($config['cancelStyle'])->toBe('text');
+    });
+
+    it('can offer a draft instead, and a close icon', function () {
+        $config = editor()->config('', ['cancelMode' => 'draft', 'cancelStyle' => 'icon']);
+
+        expect($config['cancelMode'])->toBe('draft')
+            ->and($config['cancelStyle'])->toBe('icon');
+    });
+
+    it('falls back for anything unrecognised', function () {
+        $config = editor()->config('', ['cancelMode' => 'nope', 'cancelStyle' => 'nope']);
+
+        expect($config['cancelMode'])->toBe('discard')
+            ->and($config['cancelStyle'])->toBe('text');
+    });
+
+    it('labels every button the draft prompt shows', function () {
+        foreach (['draftTitle', 'draftMessage', 'draftSave', 'draftDelete'] as $key) {
+            expect(WysiwygEditor::STRINGS)->toHaveKey($key);
+        }
+    });
+});
+
 describe('Menu mode', function () {
     it('defaults to the scrolling toolbar', function () {
         expect(editor()->config('')['menu'])->toBe('toolbar');

@@ -164,6 +164,11 @@ class WysiwygEditor
         'altPlaceholder' => 'Describe this for people who cannot see it',
         'altSave' => 'Done',
         'removeMedia' => 'Remove',
+        // Backing out with something written
+        'draftTitle' => 'Save post?',
+        'draftMessage' => 'You can finish it later.',
+        'draftSave' => 'Save',
+        'draftDelete' => 'Delete',
         // Poll composer, inline
         'pollLength' => 'Poll length',
         'pollDay1' => '1 day',
@@ -279,6 +284,32 @@ class WysiwygEditor
      * @var list<string>
      */
     public const MAX_LENGTH_MODES = ['hard', 'soft'];
+
+    /**
+     * What backing out of the editor offers.
+     *
+     *  - discard: "Discard changes?" with Keep Editing / Discard (the default)
+     *  - draft:   "Save post?" with Delete / Save — the composer behaviour,
+     *             where backing out of something half-written should not throw
+     *             it away by default
+     *
+     * `draft` emits {@see Events\DraftRequested} with the document instead of
+     * {@see Events\EditCancelled}, because where a draft is STORED is the
+     * host's business — the editor has no database and should not grow one.
+     *
+     * @var list<string>
+     */
+    public const CANCEL_MODES = ['discard', 'draft'];
+
+    /**
+     * How backing out is drawn.
+     *
+     *  - text: the word "Cancel" (the default)
+     *  - icon: a ✕, which is what full-screen composers use
+     *
+     * @var list<string>
+     */
+    public const CANCEL_STYLES = ['text', 'icon'];
 
     /**
      * How the save action is drawn.
@@ -596,6 +627,8 @@ class WysiwygEditor
             'countStyle' => $this->pick($options['countStyle'] ?? null, self::COUNT_STYLES),
             'maxLengthMode' => $this->pick($options['maxLengthMode'] ?? null, self::MAX_LENGTH_MODES),
             'saveStyle' => $this->pick($options['saveStyle'] ?? null, self::SAVE_STYLES),
+            'cancelMode' => $this->pick($options['cancelMode'] ?? null, self::CANCEL_MODES),
+            'cancelStyle' => $this->pick($options['cancelStyle'] ?? null, self::CANCEL_STYLES),
             'mediaLayout' => $this->pick($options['mediaLayout'] ?? null, self::MEDIA_LAYOUTS),
             // Four is what social composers settle on: enough to tell a story,
             // few enough to lay out in a grid the reader can take in at once.
