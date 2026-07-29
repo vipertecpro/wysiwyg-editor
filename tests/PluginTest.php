@@ -62,6 +62,32 @@ describe('Plugin Manifest', function () {
         expect($manifest['events'])->toContain('Vipertecpro\WysiwygEditor\Events\EditCancelled');
     });
 
+    /**
+     * A bridge function declared in the manifest is CODE-GENERATED into each
+     * platform's registration file, so declaring one without implementing it
+     * does not fail gracefully — it stops the whole app compiling.
+     *
+     * Adding Preview and SetAccessory broke the Android build entirely, and it
+     * went unnoticed because compiling the plugin file alone still succeeded;
+     * only the generated registration referenced the missing classes.
+     */
+    it('implements every bridge function it declares, on both platforms', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+
+        $ios = file_get_contents($this->pluginPath.'/resources/ios/WysiwygEditorFunctions.swift');
+        $android = file_get_contents($this->pluginPath.'/resources/android/WysiwygEditorFunctions.kt');
+
+        foreach ($manifest['bridge_functions'] as $function) {
+            // "WysiwygEditor.Open" -> "Open"
+            $name = substr($function['name'], strrpos($function['name'], '.') + 1);
+
+            expect(preg_match('/class '.$name.'\b/', $ios))
+                ->toBe(1, "iOS has no {$name} bridge function");
+            expect(preg_match('/class '.$name.'\b/', $android))
+                ->toBe(1, "Android has no {$name} bridge function");
+        }
+    });
+
     it('points to native sources that exist', function () {
         expect(file_exists($this->pluginPath.'/resources/ios/WysiwygEditorFunctions.swift'))->toBeTrue();
         expect(file_exists($this->pluginPath.'/resources/android/WysiwygEditorFunctions.kt'))->toBeTrue();

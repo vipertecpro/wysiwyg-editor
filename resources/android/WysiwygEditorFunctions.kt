@@ -144,6 +144,21 @@ object WysiwygEditorFunctions {
         val maxLength: Int,
         val counts: List<String>,
         val menu: String,
+        /** Empty unless the caller handed us JSON — see the Open function. */
+        val contentJson: String,
+        val mediaLayout: String,
+        val maxMedia: Int,
+        val countStyle: String,
+        val maxLengthMode: String,
+        val saveStyle: String,
+        val history: Boolean,
+        val pollOptionMaxLength: Int,
+        val pollMinOptions: Int,
+        val pollMaxOptions: Int,
+        /** Label key -> minutes, shortest first. */
+        val pollDurations: List<Pair<String, Int>>,
+        /** Rows the HOST owns, drawn under the media. */
+        val accessories: List<WysiwygAccessory>,
         val typography: WysiwygTypography,
         val spacing: WysiwygSpacing,
         val validation: Map<String, Any>,
@@ -165,6 +180,44 @@ object WysiwygEditorFunctions {
     internal interface LiveEditor {
         fun insertMedia(kind: String, attrs: Map<String, String>)
         fun updateUpload(uploadId: String, state: String, src: String, message: String)
+        fun setAccessory(id: String, label: String, value: String)
+    }
+
+    /**
+     * Show a media block full-screen.
+     *
+     * Lives here rather than in the host app because the platform has no video
+     * element to build a viewer out of, and because the editor already decodes
+     * images and plays video for its own cards — a host rendering SAVED
+     * content should not have to write that twice.
+     */
+    class Preview(private val activity: FragmentActivity) : BridgeFunction {
+        override fun execute(parameters: Map<String, Any>): Map<String, Any> {
+            val kind = parameters["kind"] as? String ?: "image"
+            val source = parameters["source"] as? String ?: ""
+            val caption = parameters["caption"] as? String ?: ""
+
+            if (source.isNotEmpty()) {
+                activity.runOnUiThread { showMediaPreview(activity, kind, source, caption) }
+            }
+
+            return emptyMap()
+        }
+    }
+
+    /** Update one host accessory row while the editor is open. */
+    class SetAccessory(private val activity: FragmentActivity) : BridgeFunction {
+        override fun execute(parameters: Map<String, Any>): Map<String, Any> {
+            val accessory = parameters["accessory"] as? String ?: ""
+            val label = parameters["label"] as? String ?: ""
+            val value = parameters["value"] as? String ?: ""
+
+            if (accessory.isNotEmpty()) {
+                activity.runOnUiThread { live?.setAccessory(accessory, label, value) }
+            }
+
+            return emptyMap()
+        }
     }
 
     /**
@@ -210,12 +263,34 @@ object WysiwygEditorFunctions {
                 content = parameters["content"] as? String ?: "",
                 // An empty/unknown toolbar would ship a bar with no buttons —
                 // fall back to everything rather than render a dead strip.
-                toolbar = requested.distinct().ifEmpty { AVAILABLE_TOOLS },
+                // An explicit empty list means NO toolbar — a plain-text
+                // composer is a real requirement. A list of names we do not
+                // know still falls back, so a typo cannot strip the bar.
+                toolbar = if (parseStringList(parameters["toolbar"]).isEmpty() &&
+                    parameters.containsKey("toolbar")
+                ) {
+                    emptyList()
+                } else {
+                    requested.distinct().ifEmpty { AVAILABLE_TOOLS }
+                },
                 title = parameters["title"] as? String ?: "",
                 placeholder = parameters["placeholder"] as? String ?: "",
                 maxLength = ((parameters["maxLength"] as? Number)?.toInt() ?: 0).coerceAtLeast(0),
                 counts = parseStringList(parameters["counts"]),
                 menu = (parameters["menu"] as? String) ?: "toolbar",
+                contentJson = parameters["contentJson"] as? String ?: "",
+                mediaLayout = (parameters["mediaLayout"] as? String) ?: "blocks",
+                maxMedia = ((parameters["maxMedia"] as? Number)?.toInt() ?: 4).coerceAtLeast(0),
+                countStyle = (parameters["countStyle"] as? String) ?: "text",
+                maxLengthMode = (parameters["maxLengthMode"] as? String) ?: "hard",
+                saveStyle = (parameters["saveStyle"] as? String) ?: "text",
+                history = parameters["history"] as? Boolean ?: true,
+                pollOptionMaxLength =
+                    ((parameters["pollOptionMaxLength"] as? Number)?.toInt() ?: 25).coerceAtLeast(1),
+                pollMinOptions = ((parameters["pollMinOptions"] as? Number)?.toInt() ?: 2).coerceAtLeast(2),
+                pollMaxOptions = ((parameters["pollMaxOptions"] as? Number)?.toInt() ?: 4).coerceAtLeast(2),
+                pollDurations = parsePollDurations(parameters["pollDurations"]),
+                accessories = parseAccessories(parameters["accessories"]),
                 typography = parseTypography(parameters["typography"]),
                 spacing = WysiwygSpacing.named((parameters["spacing"] as? String) ?: "comfortable"),
                 validation = parseValidation(parameters["validation"]),
@@ -257,7 +332,14 @@ object WysiwygEditorFunctions {
 
             // The document is parsed ONCE here; the same block list seeds the
             // editor and is the baseline the discard check compares against.
-            val initialBlocks = HtmlCoder.parse(config.content)
+            // JSON first: it is the canonical form, and HTML deliberately
+            // cannot carry a device path, so a document re-opened from HTML
+            // would lose every image whose upload had not finished.
+            val initialBlocks = if (config.contentJson.isEmpty()) {
+                HtmlCoder.parse(config.content)
+            } else {
+                JsonCoder.decode(config.contentJson)
+            }
             val initialHtml = HtmlCoder.serialize(initialBlocks).first
 
             val view = ComposeView(activity).apply {
@@ -471,6 +553,53 @@ private fun parseTypography(any: Any?): WysiwygTypography {
         base = (map["fontSize"] as? Number)?.toInt() ?: 16,
         lineHeight = (map["lineHeight"] as? Number)?.toFloat() ?: 1.15f,
     )
+}
+
+/**
+ * One row the host application put in the composer.
+ *
+ * The editor draws it and reports the tap; it does not know what the row
+ * means. Mirrors the Swift WysiwygAccessory.
+ */
+class WysiwygAccessory(
+    val id: String,
+    var label: String,
+    var value: String,
+    val icon: String,
+)
+
+private fun parseAccessories(any: Any?): List<WysiwygAccessory> {
+    val rows = when (any) {
+        is List<*> -> any
+        is JSONArray -> (0 until any.length()).map { any.opt(it) }
+        else -> emptyList<Any?>()
+    }
+
+    return rows.mapNotNull { row ->
+        val map = parseStringMap(row)
+        val id = map["id"].orEmpty()
+        val label = map["label"].orEmpty()
+
+        // A row with no id could never report a tap, and one with no label
+        // would draw as a blank tappable strip.
+        if (id.isEmpty() || label.isEmpty()) {
+            null
+        } else {
+            WysiwygAccessory(id, label, map["value"].orEmpty(), map["icon"].orEmpty())
+        }
+    }
+}
+
+/**
+ * Poll lengths, shortest first — JSON objects have no order, so the ordering
+ * the durations were declared in has to be restored by sorting.
+ */
+private fun parsePollDurations(any: Any?): List<Pair<String, Int>> {
+    val map = parseValidation(any)
+
+    return map.entries
+        .mapNotNull { (key, value) -> (value as? Number)?.let { key to it.toInt() } }
+        .sortedBy { it.second }
 }
 
 private fun parseStringMap(any: Any?): Map<String, String> = when (any) {
@@ -1595,6 +1724,98 @@ internal fun validateDocument(
     return null
 }
 
+// ── Media preview ───────────────────────────────────────────────────────────
+
+/**
+ * Full-screen viewer for one media block.
+ *
+ * A dialog rather than an Activity: it needs no manifest entry, it cannot be
+ * launched by anything but us, and it goes away with the screen that opened it.
+ * Video uses VideoView, which brings its own controls.
+ */
+internal fun showMediaPreview(
+    activity: FragmentActivity,
+    kind: String,
+    source: String,
+    caption: String,
+) {
+    val dialog = android.app.Dialog(activity, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+
+    val root = android.widget.FrameLayout(activity).apply {
+        setBackgroundColor(android.graphics.Color.BLACK)
+    }
+
+    if (kind == "video") {
+        val video = android.widget.VideoView(activity).apply {
+            setVideoURI(
+                if (source.startsWith("http")) {
+                    android.net.Uri.parse(source)
+                } else {
+                    android.net.Uri.fromFile(java.io.File(source))
+                },
+            )
+            setMediaController(android.widget.MediaController(activity).also { it.setAnchorView(this) })
+        }
+        root.addView(
+            video,
+            android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.view.Gravity.CENTER,
+            ),
+        )
+        video.start()
+    } else {
+        val image = android.widget.ImageView(activity).apply {
+            setImageBitmap(decodeMediaImage(source, 2400))
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+        }
+        root.addView(
+            image,
+            android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+    }
+
+    if (caption.isNotEmpty()) {
+        val label = android.widget.TextView(activity).apply {
+            text = caption
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 14f
+            gravity = android.view.Gravity.CENTER
+        }
+        root.addView(
+            label,
+            android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.BOTTOM,
+            ).also { it.bottomMargin = 72 },
+        )
+    }
+
+    val close = android.widget.TextView(activity).apply {
+        text = "\u2715"
+        setTextColor(android.graphics.Color.WHITE)
+        textSize = 22f
+        setPadding(36, 36, 36, 36)
+        setOnClickListener { dialog.dismiss() }
+    }
+    root.addView(
+        close,
+        android.widget.FrameLayout.LayoutParams(
+            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.TOP or android.view.Gravity.START,
+        ),
+    )
+
+    dialog.setContentView(root)
+    dialog.show()
+}
+
 // ── Embeds ──────────────────────────────────────────────────────────────────
 
 /**
@@ -1864,6 +2085,14 @@ internal class BlockSpan(val type: String)
  * backspace at the start of an item removes the whole marker rather than
  * leaving "1" behind.
  */
+/**
+ * Shading on characters past `maxLength` in soft mode.
+ *
+ * Its own span type, not a plain BackgroundColorSpan, so clearing it cannot
+ * clear a highlight the user applied themselves.
+ */
+internal class OverflowSpan : android.text.style.BackgroundColorSpan(0x47EF4444)
+
 internal class MarkerSpan
 
 // ── Styler ──────────────────────────────────────────────────────────────────
@@ -2390,6 +2619,16 @@ internal class EditorController(
      */
     private fun enforceMaxLength(s: android.text.Editable) {
         if (config.maxLength <= 0) return
+
+        // In `soft` mode the keystroke is allowed through: the overflow is
+        // shaded and SAVE is blocked instead. Trimming it hides the problem,
+        // because the writer cannot see how much they have to cut.
+        if (config.maxLengthMode == "soft") {
+            markOverflow(s)
+
+            return
+        }
+
         var guard = 0
         while (plainLength() > config.maxLength && s.isNotEmpty() && guard < 4096) {
             val cursor = editText.selectionStart.coerceIn(0, s.length)
@@ -2398,6 +2637,42 @@ internal class EditorController(
             s.delete(cut, cut + 1)
             guard++
         }
+    }
+
+    /**
+     * Shade whatever runs past the cap.
+     *
+     * The ring says by HOW MUCH; this says exactly WHICH words have to go.
+     * Only the characters that count are counted — list markers are chrome, so
+     * a bulleted line does not shift the boundary.
+     */
+    private fun markOverflow(s: android.text.Editable) {
+        s.getSpans(0, s.length, OverflowSpan::class.java).forEach { s.removeSpan(it) }
+
+        var plain = 0
+        var start = -1
+
+        for (i in 0 until s.length) {
+            if (s.getSpans(i, i + 1, MarkerSpan::class.java).isNotEmpty()) continue
+            if (s[i] == '\n') continue
+
+            plain++
+
+            if (plain > config.maxLength) {
+                start = i
+
+                break
+            }
+        }
+
+        if (start < 0) return
+
+        s.setSpan(
+            OverflowSpan(),
+            start,
+            s.length,
+            android.text.Spanned.SPAN_EXCLUSIVE_INCLUSIVE,
+        )
     }
 
     // ── undo / redo ─────────────────────────────────────────────────────────
@@ -2931,6 +3206,10 @@ internal fun EditorScreen(
     // Bumped on every edit / caret move so the toolbar re-reads active state.
     val revision = remember { mutableStateOf(0) }
     val palette = remember { mutableStateOf<String?>(null) }
+    /** The host's rows, live — setAccessory edits these in place. */
+    val accessories = remember {
+        androidx.compose.runtime.mutableStateListOf<WysiwygAccessory>().also { it.addAll(config.accessories) }
+    }
     /** Which bottom sheet is open, in `menu: sheet` mode. */
     val sheet = remember { mutableStateOf<String?>(null) }
     /** The poll being composed, if any. Non-null means the composer is open. */
@@ -3066,7 +3345,39 @@ internal fun EditorScreen(
                         )
                     }
                 }
-                BarButton(localized(config.strings, "save", "Save"), accent, FontWeight.SemiBold, onSave)
+                if (config.saveStyle == "filled") {
+                    // A pill that dims until there is something worth saving —
+                    // the shape every social composer uses for its primary
+                    // action. Empty counts as unsaveable only here: a plain
+                    // text button that does nothing when tapped reads as broken.
+                    // Words OR blocks: a photo with no caption, or a poll on
+                    // its own, is a perfectly good document.
+                    val hasContent = length.value > 0 ||
+                        entries.any { entry -> entry.segment is Segment.Media }
+                    val over = config.maxLength > 0 &&
+                        config.maxLengthMode == "soft" &&
+                        length.value > config.maxLength
+                    val canSave = hasContent && !over
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(17.dp))
+                            .background(accent.copy(alpha = if (canSave) 1f else 0.4f))
+                            .clickable(enabled = canSave, onClick = onSave)
+                            .padding(horizontal = 16.dp, vertical = 7.dp),
+                    ) {
+                        BasicText(
+                            text = localized(config.strings, "save", "Save"),
+                            style = TextStyle(
+                                color = background,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            ),
+                        )
+                    }
+                } else {
+                    BarButton(localized(config.strings, "save", "Save"), accent, FontWeight.SemiBold, onSave)
+                }
             }
 
 
@@ -3088,7 +3399,17 @@ internal fun EditorScreen(
                         rebuildDocument()
                     }
 
-                    override fun updateUpload(uploadId: String, state: String, src: String, message: String) {
+                    override fun setAccessory(id: String, label: String, value: String) {
+                    val index = accessories.indexOfFirst { it.id == id }
+
+                    if (index < 0) return
+
+                    if (label.isNotEmpty()) accessories[index].label = label
+                    accessories[index].value = value
+                    revision.value++
+                }
+
+                override fun updateUpload(uploadId: String, state: String, src: String, message: String) {
                         val index = entries.indexOfFirst { entry ->
                             (entry.segment as? Segment.Media)?.block?.attrs?.get("uploadId") == uploadId
                         }
@@ -3264,6 +3585,7 @@ internal fun EditorScreen(
                 highlightColor = theme.highlightColor(night),
                 strings = config.strings,
                 haptics = config.haptics,
+                length = length.value,
                 onRequestMedia = onRequestMedia,
                 onDocumentTool = { tool ->
                     when (tool) {
@@ -3699,6 +4021,8 @@ private fun ToolbarRow(
     highlightColor: Color,
     strings: Map<String, String>,
     haptics: Boolean,
+    /** Plain-character count, for the ring. */
+    length: Int = 0,
     onRequestMedia: (String) -> Unit,
     onDocumentTool: (String) -> Unit = {},
     sheet: androidx.compose.runtime.MutableState<String?> =
@@ -3714,26 +4038,32 @@ private fun ToolbarRow(
 
     Column(modifier = Modifier.fillMaxWidth().background(background)) {
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(foreground.copy(alpha = 0.12f)))
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Row(
             modifier = Modifier
-                .fillMaxWidth()
+                .weight(1f)
                 .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ToolButton("undo", false, controller?.canUndo == true, foreground, highlightColor, haptics) {
-                controller?.undo()
+            // Undo / redo lead the configured tools, unless turned off.
+            if (config.history) {
+                ToolButton("undo", false, controller?.canUndo == true, foreground, highlightColor, haptics) {
+                    controller?.undo()
+                }
+                ToolButton("redo", false, controller?.canRedo == true, foreground, highlightColor, haptics) {
+                    controller?.redo()
+                }
+                if (config.toolbar.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 6.dp)
+                            .width(1.dp)
+                            .height(22.dp)
+                            .background(foreground.copy(alpha = 0.15f)),
+                    )
+                }
             }
-            ToolButton("redo", false, controller?.canRedo == true, foreground, highlightColor, haptics) {
-                controller?.redo()
-            }
-            Box(
-                modifier = Modifier
-                    .padding(horizontal = 6.dp)
-                    .width(1.dp)
-                    .height(22.dp)
-                    .background(foreground.copy(alpha = 0.15f)),
-            )
 
             // Sheet mode keeps the marks people reach for constantly one tap
             // away and puts the rest behind Format / Insert, rather than off
@@ -3778,6 +4108,16 @@ private fun ToolbarRow(
                         highlightColor,
                         haptics,
                     ) { sheet.value = if (sheet.value == "insert") null else "insert" }
+                }
+            }
+        }
+
+            // A ring counts toward a limit, so without one there is nothing
+            // to fill. It rides at the END of the bar next to the media
+            // buttons, which is where every composer that has one puts it.
+            if (config.countStyle == "ring" && config.maxLength > 0) {
+                Box(modifier = Modifier.padding(start = 6.dp, end = 14.dp)) {
+                    CountRing(length, config.maxLength, foreground, highlightColor)
                 }
             }
         }
@@ -3866,6 +4206,67 @@ private fun LabelledToolButton(
             text = label,
             style = TextStyle(color = tint, fontSize = 15.sp, fontWeight = FontWeight.Medium),
         )
+    }
+}
+
+/**
+ * A filling circle counting toward the cap, the way social composers do.
+ *
+ * Three states, because a bare percentage does not tell a writer what to do:
+ * filling quietly, a warning once the end is in sight, and — past the cap —
+ * the ring stops growing and shows how far OVER they are, which is the number
+ * they actually need. Normative: the iOS CountRing behaves identically.
+ */
+@Composable
+private fun CountRing(count: Int, limit: Int, foreground: Color, accent: Color) {
+    /** The last stretch, where the ring switches to amber. */
+    val warnAt = 20
+
+    val remaining = limit - count
+    val over = remaining < 0
+    val nearingEnd = remaining <= warnAt && !over
+
+    val tint = when {
+        over -> Color(0xFFEF4444)
+        nearingEnd -> Color(0xFFF59E0B)
+        else -> accent
+    }
+
+    // Grows once the count matters, so the number is readable exactly when the
+    // writer starts caring about it.
+    val diameter = if (nearingEnd || over) 30.dp else 22.dp
+    val progress = if (limit > 0) (count.toFloat() / limit).coerceAtMost(1f) else 0f
+
+    Box(modifier = Modifier.size(diameter), contentAlignment = Alignment.Center) {
+        Canvas(modifier = Modifier.size(diameter)) {
+            val stroke = 2.dp.toPx()
+            drawCircle(
+                color = foreground.copy(alpha = 0.15f),
+                radius = (size.minDimension - stroke) / 2f,
+                style = Stroke(width = stroke),
+            )
+            drawArc(
+                color = tint,
+                startAngle = -90f,
+                sweepAngle = if (over) 360f else progress * 360f,
+                useCenter = false,
+                style = Stroke(width = stroke, cap = StrokeCap.Round),
+                topLeft = androidx.compose.ui.geometry.Offset(stroke / 2f, stroke / 2f),
+                size = androidx.compose.ui.geometry.Size(
+                    size.width - stroke,
+                    size.height - stroke,
+                ),
+            )
+        }
+
+        // Only ever the REMAINING count — a writer near the cap needs to know
+        // how much is left, not how much they have used.
+        if (nearingEnd || over) {
+            BasicText(
+                text = "$remaining",
+                style = TextStyle(color = tint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+            )
+        }
     }
 }
 
