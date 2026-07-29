@@ -364,6 +364,41 @@ do {
     else { failures += 1; print("  \u{2717} (empty) -> unknown -> \(got)") }
 }
 
+// A poll's LENGTH is what the author chose; losing it on save means the host
+// cannot compute when the poll closes. It was dropped once already.
+do {
+    var poll = WysiwygBlock(type: "poll", runs: [])
+    poll.attrs["question"] = "Which?"
+    poll.attrs["durationMinutes"] = "4320"
+    poll.options = [PollOption(id: "o1", label: "A"), PollOption(id: "o2", label: "B")]
+    let round = JsonCoder.decode(JsonCoder.encode([poll]))
+    if round.first?.attrs["durationMinutes"] == "4320" {
+        print("  \u{2713} a poll's length survives the JSON round-trip")
+    } else {
+        failures += 1
+        print("  \u{2717} a poll's length survives the JSON round-trip")
+    }
+}
+
+// The composer keeps a blank row so you can type into it. Saving one means
+// a poll ships with an answer nobody can choose.
+do {
+    var poll = WysiwygBlock(type: "poll", runs: [])
+    poll.attrs["question"] = "Which?"
+    poll.options = [
+        PollOption(id: "o1", label: "A"),
+        PollOption(id: "o2", label: "B"),
+        PollOption(id: "o3", label: "   "),
+    ]
+    let round = JsonCoder.decode(JsonCoder.encode([poll]))
+    if round.first?.options.count == 2 {
+        print("  \u{2713} blank poll answers are not saved")
+    } else {
+        failures += 1
+        print("  \u{2717} blank poll answers are not saved -> \(round.first?.options.count ?? -1)")
+    }
+}
+
 print("Validation — checked natively before a save is allowed")
 do {
     let doc = HtmlCoder.parse("<p>one two three</p>")

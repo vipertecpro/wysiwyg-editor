@@ -783,7 +783,10 @@ internal class WysiwygBlock(
             "video" to listOf("src", "localPath", "poster", "caption", "uploadId"),
             "file" to listOf("src", "localPath", "name", "size", "mime", "uploadId"),
             "embed" to listOf("url", "provider", "html"),
-            "poll" to listOf("question", "multiple", "closesAt"),
+            // durationMinutes is what the AUTHOR chose; closesAt is what a
+            // host computes from it. Both travel, because the editor owns no
+            // clock and cannot turn one into the other.
+            "poll" to listOf("question", "multiple", "durationMinutes", "closesAt"),
             "divider" to listOf(),
         )
     }
@@ -1449,7 +1452,9 @@ internal object JsonCoder {
             }
             if (block.type == "poll") {
                 out.append(",\"options\":[")
-                block.options.forEachIndexed { index, option ->
+                // A blank answer is not an answer. The composer keeps empty
+                // rows so you can type into them; the saved document must not.
+                block.options.filter { it.label.isNotBlank() }.forEachIndexed { index, option ->
                     if (index > 0) out.append(',')
                     out.append("{\"id\":").append(quote(option.id))
                     out.append(",\"label\":").append(quote(option.label)).append('}')
@@ -1763,6 +1768,101 @@ internal fun validateDocument(
     return null
 }
 
+// ── Embeds ──────────────────────────────────────────────────────────────────
+
+/**
+ * Which service an embed URL points at, or "" when it is not one we recognise.
+ *
+ * Deliberately derived from the URL and NOTHING else. The plugin makes no
+ * network requests — fetching OpenGraph tags to build a preview would quietly
+ * turn a zero-permission editor into one that phones out from inside the
+ * user's document. A host that wants a rich preview fetches it with its own
+ * network and auth and passes `title` / `thumbnail` to `insertMedia`.
+ *
+ * Normative: Swift's `embedProvider` returns the same string for the same URL,
+ * and the parity harness asserts it.
+ */
+internal fun embedProvider(url: String): String {
+    var host = url.lowercase()
+
+    // Match on the HOST only, so a path like /youtube.com/fake cannot spoof it.
+    val scheme = host.indexOf("://")
+    if (scheme >= 0) host = host.substring(scheme + 3)
+    host = host.substringBefore('/').substringBefore(':')
+    if (host.startsWith("www.")) host = host.removePrefix("www.")
+    if (host.startsWith("m.")) host = host.removePrefix("m.")
+
+    return when (host) {
+        "youtube.com", "youtu.be", "youtube-nocookie.com" -> "YouTube"
+        "vimeo.com", "player.vimeo.com" -> "Vimeo"
+        "twitter.com", "x.com" -> "X"
+        "open.spotify.com", "spotify.com" -> "Spotify"
+        "soundcloud.com" -> "SoundCloud"
+        "codepen.io" -> "CodePen"
+        "gist.github.com", "github.com" -> "GitHub"
+        "figma.com" -> "Figma"
+        "loom.com" -> "Loom"
+        "tiktok.com" -> "TikTok"
+        "instagram.com" -> "Instagram"
+        "maps.google.com", "google.com" -> "Google Maps"
+        else -> ""
+    }
+}
+
+// ── Segments ────────────────────────────────────────────────────────────────
+
+/**
+ * How a document is laid out for editing. Consecutive TEXT blocks collapse
+ * into one editor (the v1 engine, unchanged); each media block gets its own
+ * view. See docs/DOCUMENT-MODEL.md — this is what keeps caret handling to the
+ * rare text↔media boundary instead of every paragraph break.
+ */
+internal sealed class Segment {
+    /** A run of text blocks sharing one editor. */
+    class Text(val blocks: MutableList<WysiwygBlock>) : Segment()
+
+    /** A single media block rendered as its own card. */
+    class Media(val block: WysiwygBlock) : Segment()
+}
+
+/** Group a block list into segments, preserving document order. */
+internal fun segmentsOf(blocks: List<WysiwygBlock>): List<Segment> {
+    val segments = mutableListOf<Segment>()
+
+    for (block in blocks) {
+        if (block.isText) {
+            val last = segments.lastOrNull()
+            if (last is Segment.Text) {
+                last.blocks.add(block)
+            } else {
+                segments.add(Segment.Text(mutableListOf(block)))
+            }
+        } else {
+            segments.add(Segment.Media(block))
+        }
+    }
+
+    // An empty document still needs somewhere to type.
+    if (segments.isEmpty()) segments.add(Segment.Text(mutableListOf(WysiwygBlock("p"))))
+
+    return segments
+}
+
+/** Flatten segments back into a block list for serialization. */
+internal fun blocksOf(segments: List<Segment>): List<WysiwygBlock> =
+    segments.flatMap { segment ->
+        when (segment) {
+            is Segment.Text -> segment.blocks
+            is Segment.Media -> listOf(segment.block)
+        }
+    }
+
+// ── Toolbar icons ───────────────────────────────────────────────────────────
+
+// NOTE: anything below the "Toolbar icons" marker is OUTSIDE the parity
+// harness, which compiles the region above it WITHOUT the Android SDK.
+// This uses FragmentActivity and android.widget, so it has to live here.
+
 // ── Media preview ───────────────────────────────────────────────────────────
 
 /**
@@ -1855,96 +1955,6 @@ internal fun showMediaPreview(
     dialog.show()
 }
 
-// ── Embeds ──────────────────────────────────────────────────────────────────
-
-/**
- * Which service an embed URL points at, or "" when it is not one we recognise.
- *
- * Deliberately derived from the URL and NOTHING else. The plugin makes no
- * network requests — fetching OpenGraph tags to build a preview would quietly
- * turn a zero-permission editor into one that phones out from inside the
- * user's document. A host that wants a rich preview fetches it with its own
- * network and auth and passes `title` / `thumbnail` to `insertMedia`.
- *
- * Normative: Swift's `embedProvider` returns the same string for the same URL,
- * and the parity harness asserts it.
- */
-internal fun embedProvider(url: String): String {
-    var host = url.lowercase()
-
-    // Match on the HOST only, so a path like /youtube.com/fake cannot spoof it.
-    val scheme = host.indexOf("://")
-    if (scheme >= 0) host = host.substring(scheme + 3)
-    host = host.substringBefore('/').substringBefore(':')
-    if (host.startsWith("www.")) host = host.removePrefix("www.")
-    if (host.startsWith("m.")) host = host.removePrefix("m.")
-
-    return when (host) {
-        "youtube.com", "youtu.be", "youtube-nocookie.com" -> "YouTube"
-        "vimeo.com", "player.vimeo.com" -> "Vimeo"
-        "twitter.com", "x.com" -> "X"
-        "open.spotify.com", "spotify.com" -> "Spotify"
-        "soundcloud.com" -> "SoundCloud"
-        "codepen.io" -> "CodePen"
-        "gist.github.com", "github.com" -> "GitHub"
-        "figma.com" -> "Figma"
-        "loom.com" -> "Loom"
-        "tiktok.com" -> "TikTok"
-        "instagram.com" -> "Instagram"
-        "maps.google.com", "google.com" -> "Google Maps"
-        else -> ""
-    }
-}
-
-// ── Segments ────────────────────────────────────────────────────────────────
-
-/**
- * How a document is laid out for editing. Consecutive TEXT blocks collapse
- * into one editor (the v1 engine, unchanged); each media block gets its own
- * view. See docs/DOCUMENT-MODEL.md — this is what keeps caret handling to the
- * rare text↔media boundary instead of every paragraph break.
- */
-internal sealed class Segment {
-    /** A run of text blocks sharing one editor. */
-    class Text(val blocks: MutableList<WysiwygBlock>) : Segment()
-
-    /** A single media block rendered as its own card. */
-    class Media(val block: WysiwygBlock) : Segment()
-}
-
-/** Group a block list into segments, preserving document order. */
-internal fun segmentsOf(blocks: List<WysiwygBlock>): List<Segment> {
-    val segments = mutableListOf<Segment>()
-
-    for (block in blocks) {
-        if (block.isText) {
-            val last = segments.lastOrNull()
-            if (last is Segment.Text) {
-                last.blocks.add(block)
-            } else {
-                segments.add(Segment.Text(mutableListOf(block)))
-            }
-        } else {
-            segments.add(Segment.Media(block))
-        }
-    }
-
-    // An empty document still needs somewhere to type.
-    if (segments.isEmpty()) segments.add(Segment.Text(mutableListOf(WysiwygBlock("p"))))
-
-    return segments
-}
-
-/** Flatten segments back into a block list for serialization. */
-internal fun blocksOf(segments: List<Segment>): List<WysiwygBlock> =
-    segments.flatMap { segment ->
-        when (segment) {
-            is Segment.Text -> segment.blocks
-            is Segment.Media -> listOf(segment.block)
-        }
-    }
-
-// ── Toolbar icons ───────────────────────────────────────────────────────────
 
 /**
  * One toolbar glyph: outline path data in a 24×24 box, plus its stroke weight.
@@ -3939,7 +3949,43 @@ internal fun countsReadout(
  * Hand-rolled rather than pulling in an image library — the plugin stays
  * dependency-free, like the rest of it.
  */
+/** Does this path look like a video rather than a still? */
+internal fun isVideoSource(source: String): Boolean {
+    val lower = source.lowercase()
+
+    return listOf(".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm").any { lower.endsWith(it) }
+}
+
+/**
+ * The first watchable frame of a video, for its card and its thumbnail.
+ *
+ * Taken a little way in rather than at zero: many recordings open on a black
+ * or half-exposed frame, which makes the card look broken.
+ */
+internal fun videoPoster(source: String): android.graphics.Bitmap? {
+    val retriever = android.media.MediaMetadataRetriever()
+
+    return try {
+        if (source.startsWith("http")) {
+            retriever.setDataSource(source, HashMap<String, String>())
+        } else {
+            retriever.setDataSource(source)
+        }
+
+        retriever.getFrameAtTime(500_000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+    } catch (e: Exception) {
+        null
+    } finally {
+        try { retriever.release() } catch (e: Exception) { /* nothing useful to do */ }
+    }
+}
+
 internal fun decodeMediaImage(source: String, maxPixels: Int = 1200): android.graphics.Bitmap? {
+    // A video is not an image file — the bitmap decoder cannot read one, so
+    // without this a video card shows a grey placeholder instead of what it
+    // contains.
+    if (isVideoSource(source)) return videoPoster(source)
+
     return try {
         val bytes: ByteArray = if (source.startsWith("http://", true) || source.startsWith("https://", true)) {
             val connection = (java.net.URL(source).openConnection() as java.net.HttpURLConnection).apply {

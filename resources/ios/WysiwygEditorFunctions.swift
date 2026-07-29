@@ -387,7 +387,10 @@ struct WysiwygBlock {
         "video": ["src", "localPath", "poster", "caption", "uploadId"],
         "file": ["src", "localPath", "name", "size", "mime", "uploadId"],
         "embed": ["url", "provider", "html"],
-        "poll": ["question", "multiple", "closesAt"],
+        // durationMinutes is what the AUTHOR chose; closesAt is what a
+        // host computes from it. Both travel, because the editor owns no
+        // clock and cannot turn one into the other.
+        "poll": ["question", "multiple", "durationMinutes", "closesAt"],
         "divider": [],
     ]
 }
@@ -1199,7 +1202,12 @@ enum JsonCoder {
             }
             if block.type == "poll" {
                 out += ",\"options\":["
-                for (index, option) in block.options.enumerated() {
+                // A blank answer is not an answer. The composer keeps empty
+                // rows so you can type into them; the saved document must not.
+                let answers = block.options.filter {
+                    !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+                for (index, option) in answers.enumerated() {
                     if index > 0 { out += "," }
                     out += "{\"id\":" + quote(option.id)
                     out += ",\"label\":" + quote(option.label) + "}"
@@ -3708,7 +3716,7 @@ private struct MediaThumbnail: View {
             }
         }
         .task(id: source) {
-            guard !source.isEmpty, block.type == "image" || block.type == "video" else { return }
+            guard !source.isEmpty, ["image", "video"].contains(block.type) else { return }
             let path = source
             image = await Task.detached(priority: .userInitiated) {
                 decodeMediaImage(path, maxPixels: 600)
@@ -3797,11 +3805,45 @@ private struct CountRing: View {
 /// Decode an image for a media card.
 ///
 /// Handles a local file (what the picker/cropper hands us) and an http(s) URL
+/// Does this path look like a video rather than a still?
+func isVideoSource(_ source: String) -> Bool {
+    let lower = source.lowercased()
+
+    return ["mp4", "mov", "m4v", "avi", "mkv", "webm"].contains { lower.hasSuffix("." + $0) }
+}
+
+/// The first watchable frame of a video, for its card and its thumbnail.
+///
+/// Taken a little way in rather than at zero: many recordings open on a black
+/// or half-exposed frame, which makes the card look broken.
+func videoPoster(_ source: String, maxPixels: Int) -> UIImage? {
+    let url = source.lowercased().hasPrefix("http")
+        ? URL(string: source)
+        : URL(fileURLWithPath: source.replacingOccurrences(of: "file://", with: ""))
+
+    guard let url else { return nil }
+
+    let generator = AVAssetImageGenerator(asset: AVAsset(url: url))
+    generator.appliesPreferredTrackTransform = true   // honour the recording's rotation
+    generator.maximumSize = CGSize(width: maxPixels, height: maxPixels)
+
+    let at = CMTime(seconds: 0.5, preferredTimescale: 600)
+
+    guard let cg = try? generator.copyCGImage(at: at, actualTime: nil) else { return nil }
+
+    return UIImage(cgImage: cg)
+}
+
 /// (what a re-opened, already-uploaded document contains). Downsampled so a
 /// full-resolution camera photo cannot blow up memory in a scrolling document.
 /// Hand-rolled rather than pulling in an image library — the plugin stays
 /// dependency-free, like the rest of it.
 func decodeMediaImage(_ source: String, maxPixels: Int = 1200) -> UIImage? {
+    // A video is not an image file — CGImageSource cannot read one, so without
+    // this a video card shows a grey placeholder instead of what it contains.
+    // AVFoundation is already linked for playback, so the frame is free.
+    if isVideoSource(source) { return videoPoster(source, maxPixels: maxPixels) }
+
     let url: URL?
     if source.lowercased().hasPrefix("http://") || source.lowercased().hasPrefix("https://") {
         url = URL(string: source)

@@ -410,6 +410,40 @@ fun main() {
         else { failures++; println("  \u2717 (empty) -> unknown -> $got") }
     }
 
+    // A poll's LENGTH is what the author chose; losing it on save means the
+    // host cannot compute when the poll closes. It was dropped once already.
+    run {
+        val poll = WysiwygBlock("poll")
+        poll.attrs["question"] = "Which?"
+        poll.attrs["durationMinutes"] = "4320"
+        poll.options.add(PollOption("o1", "A"))
+        poll.options.add(PollOption("o2", "B"))
+        val round = JsonCoder.decode(JsonCoder.encode(listOf(poll)))
+        if (round.firstOrNull()?.attrs?.get("durationMinutes") == "4320") {
+            println("  \u2713 a poll's length survives the JSON round-trip")
+        } else {
+            failures++
+            println("  \u2717 a poll's length survives the JSON round-trip")
+        }
+    }
+
+    // The composer keeps a blank row so you can type into it. Saving one
+    // means a poll ships with an answer nobody can choose.
+    run {
+        val poll = WysiwygBlock("poll")
+        poll.attrs["question"] = "Which?"
+        poll.options.add(PollOption("o1", "A"))
+        poll.options.add(PollOption("o2", "B"))
+        poll.options.add(PollOption("o3", "   "))
+        val round = JsonCoder.decode(JsonCoder.encode(listOf(poll)))
+        if (round.firstOrNull()?.options?.size == 2) {
+            println("  \u2713 blank poll answers are not saved")
+        } else {
+            failures++
+            println("  \u2717 blank poll answers are not saved")
+        }
+    }
+
     println("Validation — checked natively before a save is allowed")
     run {
         val doc = HtmlCoder.parse("<p>one two three</p>")
