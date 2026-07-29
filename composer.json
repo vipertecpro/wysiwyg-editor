@@ -10,9 +10,17 @@
         }
     ],
     "homepage": "https://github.com/vipertecpro/wysiwyg-editor",
-    "keywords": ["nativephp", "mobile", "wysiwyg", "editor", "rich-text", "html", "text"],
+    "keywords": [
+        "nativephp",
+        "mobile",
+        "wysiwyg",
+        "editor",
+        "rich-text",
+        "html",
+        "text"
+    ],
     "require": {
-        "php": "^8.4",
+        "php": "^8.2|^8.3|^8.4",
         "nativephp/mobile": "^3.0|^4.0"
     },
     "autoload": {
@@ -31,7 +39,7 @@
         }
     },
     "require-dev": {
-        "pestphp/pest": "^3.0"
+        "pestphp/pest": "^3.0|^4.0"
     },
     "scripts": {
         "test": "pest",
@@ -43,6 +51,10 @@
     "config": {
         "allow-plugins": {
             "pestphp/pest-plugin": true
-        }
+        },
+        "sort-packages": true
+    },
+    "suggest": {
+        "nativephp/native-ui": "Lets the editor adopt your application theme automatically (colours and font)."
     }
 }
