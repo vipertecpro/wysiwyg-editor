@@ -30,6 +30,7 @@ import android.widget.FrameLayout
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -3513,21 +3514,82 @@ internal fun EditorScreen(
 
                     flowEntries.forEachIndexed { index, entry ->
                         when (val segment = entry.segment) {
-                            is Segment.Media -> MediaCard(
-                            segment.block,
-                            foreground,
-                            accent,
-                            config.strings,
-                            onTap = {
-                                if (segment.block.type == "poll") {
-                                    pollDraft.value = PollDraft(
-                                        entryId = entry.id,
-                                        question = segment.block.attrs["question"] ?: "",
-                                        options = segment.block.options.map { it.label },
-                                    )
-                                }
-                            },
-                        )
+                            is Segment.Media -> if (segment.block.type == "poll") {
+                                // Edited where it sits, not behind a sheet.
+                                PollCard(
+                                    block = segment.block,
+                                    config = config,
+                                    foreground = foreground,
+                                    accent = accent,
+                                    onChanged = {
+                                        entries[entries.indexOfFirst { it.id == entry.id }] =
+                                            SegmentEntry(entry.id, Segment.Media(segment.block))
+                                        rebuildDocument()
+                                    },
+                                    onAddOption = {
+                                        if (segment.block.options.size < config.pollMaxOptions) {
+                                            segment.block.options.add(
+                                                PollOption("o${segment.block.options.size + 1}", ""),
+                                            )
+                                            entries[entries.indexOfFirst { it.id == entry.id }] =
+                                                SegmentEntry(entry.id, Segment.Media(segment.block))
+                                            rebuildDocument()
+                                        }
+                                    },
+                                    onCycleDuration = {
+                                        // A tap cycling three choices beats a
+                                        // picker for something with three.
+                                        val durations = config.pollDurations
+
+                                        if (durations.isNotEmpty()) {
+                                            val current = segment.block.attrs["durationMinutes"]?.toIntOrNull()
+                                                ?: durations[0].second
+                                            val at = durations.indexOfFirst { it.second == current }
+                                            val next = durations[(at + 1) % durations.size]
+                                            segment.block.attrs["durationMinutes"] = next.second.toString()
+                                            entries[entries.indexOfFirst { it.id == entry.id }] =
+                                                SegmentEntry(entry.id, Segment.Media(segment.block))
+                                            rebuildDocument()
+                                        }
+                                    },
+                                    onOptionMedia = { onRequestMedia("image") },
+                                    onRemove = {
+                                        // Only warn when there is something to lose.
+                                        val hasContent = segment.block.attrs["question"].orEmpty().isNotEmpty() ||
+                                            segment.block.options.any { it.label.isNotBlank() }
+
+                                        if (hasContent) {
+                                            android.app.AlertDialog.Builder(activity)
+                                                .setTitle(localized(config.strings, "pollRemoveTitle", "Are you sure?"))
+                                                .setMessage(
+                                                    localized(
+                                                        config.strings,
+                                                        "pollRemoveMessage",
+                                                        "Removing the poll will discard what you have typed.",
+                                                    ),
+                                                )
+                                                .setNegativeButton(localized(config.strings, "cancel", "Cancel"), null)
+                                                .setPositiveButton(
+                                                    localized(config.strings, "pollRemove", "Remove"),
+                                                ) { _, _ ->
+                                                    entries.removeAll { it.id == entry.id }
+                                                    rebuildDocument()
+                                                }
+                                                .show()
+                                        } else {
+                                            entries.removeAll { it.id == entry.id }
+                                            rebuildDocument()
+                                        }
+                                    },
+                                )
+                            } else {
+                                MediaCard(
+                                    segment.block,
+                                    foreground,
+                                    accent,
+                                    config.strings,
+                                )
+                            }
                             is Segment.Text -> AndroidView(
                                 modifier = Modifier.fillMaxWidth(),
                                 factory = { context ->
@@ -3698,7 +3760,17 @@ internal fun EditorScreen(
                 onRequestMedia = onRequestMedia,
                 onDocumentTool = { tool ->
                     when (tool) {
-                        "poll" -> pollDraft.value = PollDraft()
+                        "poll" -> {
+                            // Inserted blank and edited in place — a poll IS
+                            // the post as much as the words are, and writing
+                            // one behind a sheet hides what it belongs to.
+                            val poll = WysiwygBlock("poll")
+                            poll.attrs["question"] = ""
+                            poll.attrs["durationMinutes"] =
+                                (config.pollDurations.firstOrNull()?.second ?: 1440).toString()
+                            repeat(config.pollMinOptions) { poll.options.add(PollOption("o${it + 1}", "")) }
+                            insertBlock(poll)
+                        }
                         "divider" -> insertBlock(WysiwygBlock("divider"))
                         "embed" -> showEmbedDialog(activity, config.strings) { url ->
                             val block = WysiwygBlock("embed")
@@ -4420,6 +4492,178 @@ private fun ToolButton(
                     width = icon.stroke * size.width / 24f,
                     cap = StrokeCap.Round,
                     join = StrokeJoin.Round,
+                ),
+            )
+        }
+    }
+}
+
+/**
+ * A poll, edited where it sits.
+ *
+ * Not a modal: a poll IS the post as much as the words are, and writing one
+ * behind a sheet means you cannot see what you are attaching it to. Mirrors
+ * the iOS PollCard, including showing the option overrun rather than refusing
+ * the keystroke — the same reasoning as the character ring, and the same red.
+ */
+@Composable
+private fun PollCard(
+    block: WysiwygBlock,
+    config: WysiwygEditorFunctions.EditorConfig,
+    foreground: Color,
+    accent: Color,
+    onChanged: () -> Unit,
+    onAddOption: () -> Unit,
+    onCycleDuration: () -> Unit,
+    onOptionMedia: (Int) -> Unit,
+    onRemove: () -> Unit,
+) {
+    val strings = config.strings
+    val limit = config.pollOptionMaxLength
+
+    val durationMinutes = block.attrs["durationMinutes"]?.toIntOrNull()
+        ?: config.pollDurations.firstOrNull()?.second
+        ?: 1440
+    val durationLabel = localized(
+        strings,
+        config.pollDurations.firstOrNull { it.second == durationMinutes }?.first ?: "pollDay1",
+        "1 day",
+    )
+
+    Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .border(1.dp, foreground.copy(alpha = 0.2f), RoundedCornerShape(14.dp))
+                .padding(14.dp),
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+        ) {
+            block.options.forEachIndexed { index, option ->
+                val remaining = limit - option.label.length
+                val over = remaining < 0
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+                ) {
+                    // Each answer may carry its own picture, which is what
+                    // turns a poll into something you can vote on by sight.
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(foreground.copy(alpha = 0.07f))
+                            .clickable { onOptionMedia(index) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        val icon = TOOL_ICONS["image"]
+
+                        if (icon != null) {
+                            Canvas(modifier = Modifier.size(18.dp)) {
+                                drawPath(
+                                    path = buildIconPath(icon.path, size.width),
+                                    color = foreground.copy(alpha = 0.45f),
+                                    style = Stroke(
+                                        width = icon.stroke * size.width / 24f,
+                                        cap = StrokeCap.Round,
+                                        join = StrokeJoin.Round,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(
+                                1.dp,
+                                if (over) Color(0xFFEF4444) else foreground.copy(alpha = 0.2f),
+                                RoundedCornerShape(12.dp),
+                            )
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            if (option.label.isEmpty()) {
+                                BasicText(
+                                    text = localized(strings, "pollOption", "Option {n}", n = index + 1),
+                                    style = TextStyle(color = foreground.copy(alpha = 0.38f), fontSize = 15.sp),
+                                )
+                            }
+                            androidx.compose.foundation.text.BasicTextField(
+                                value = option.label,
+                                onValueChange = {
+                                    block.options[index] = PollOption(option.id, it)
+                                    onChanged()
+                                },
+                                singleLine = true,
+                                textStyle = TextStyle(color = foreground, fontSize = 15.sp),
+                                cursorBrush = androidx.compose.ui.graphics.SolidColor(accent),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+
+                        // Only once it matters — the same rule as the ring.
+                        if (remaining <= 5) {
+                            BasicText(
+                                text = "$remaining",
+                                style = TextStyle(
+                                    color = if (over) Color(0xFFEF4444) else foreground.copy(alpha = 0.45f),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (block.options.size < config.pollMaxOptions) {
+                BasicText(
+                    text = localized(strings, "pollAddOption", "Add option"),
+                    style = TextStyle(color = accent, fontSize = 15.sp),
+                    modifier = Modifier.clickable { onAddOption() },
+                )
+            }
+
+            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(foreground.copy(alpha = 0.15f)))
+
+            // How long it runs. The editor records the choice; turning it into
+            // a closing time is the host's job, because it owns no clock.
+            Column(modifier = Modifier.fillMaxWidth().clickable { onCycleDuration() }) {
+                BasicText(
+                    text = localized(strings, "pollLength", "Poll length"),
+                    style = TextStyle(color = foreground.copy(alpha = 0.5f), fontSize = 13.sp),
+                )
+                BasicText(
+                    text = durationLabel,
+                    style = TextStyle(color = accent, fontSize = 15.sp, fontWeight = FontWeight.Medium),
+                )
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(6.dp)
+                .size(28.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(foreground.copy(alpha = 0.1f))
+                .clickable { onRemove() },
+            contentAlignment = Alignment.Center,
+        ) {
+            BasicText(
+                text = "\u2715",
+                style = TextStyle(
+                    color = foreground.copy(alpha = 0.7f),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
                 ),
             )
         }
