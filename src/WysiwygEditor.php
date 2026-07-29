@@ -48,7 +48,7 @@ class WysiwygEditor
         'bulletList', 'orderedList', 'blockquote',
         'link', 'code', 'textColor', 'highlight',
         'image', 'video', 'file',
-        'poll', 'divider',
+        'poll', 'divider', 'embed',
         'clearFormat',
     ];
 
@@ -157,6 +157,10 @@ class WysiwygEditor
         'toolFile' => 'File',
         'toolPoll' => 'Poll',
         'toolDivider' => 'Divider',
+        'toolEmbed' => 'Embed',
+        'embedTitle' => 'Embed a link',
+        'embedPlaceholder' => 'https://youtube.com/watch?v=…',
+        'embedAdd' => 'Embed',
         // Poll composer
         'pollTitle' => 'New poll',
         'pollEditTitle' => 'Edit poll',
@@ -230,6 +234,7 @@ class WysiwygEditor
         'file' => 'toolFile',
         'poll' => 'toolPoll',
         'divider' => 'toolDivider',
+        'embed' => 'toolEmbed',
         'clearFormat' => 'toolClearFormat',
     ];
 

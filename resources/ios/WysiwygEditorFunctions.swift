@@ -1,4 +1,5 @@
 import Foundation
+import AVKit
 import UIKit
 import SwiftUI
 
@@ -180,7 +181,7 @@ struct WysiwygConfig {
         "bold", "italic", "underline", "strikethrough", "h1", "h2", "h3",
         "bulletList", "orderedList", "blockquote", "link", "code",
         "textColor", "highlight", "image", "video", "file",
-        "poll", "divider", "clearFormat",
+        "poll", "divider", "embed", "clearFormat",
     ]
 
     let content: String
@@ -681,7 +682,11 @@ enum HtmlCoder {
             return caption.isEmpty ? (block.attrs["alt"] ?? "") : caption
         case "video": return block.attrs["caption"] ?? ""
         case "file": return block.attrs["name"] ?? ""
-        case "embed": return block.attrs["url"] ?? ""
+        case "embed":
+            // A host that fetched a preview passes a title; otherwise the URL
+            // is all we honestly have.
+            if let title = block.attrs["title"], !title.isEmpty { return title }
+            return block.attrs["url"] ?? ""
         case "poll": return block.attrs["question"] ?? ""
         default: return ""
         }
@@ -973,6 +978,48 @@ func validateDocument(
     }
 
     return nil
+}
+
+// MARK: - Embeds
+
+/**
+ Which service an embed URL points at, or "" when it is not one we recognise.
+
+ Deliberately derived from the URL and NOTHING else. The plugin makes no
+ network requests — fetching OpenGraph tags to build a preview would quietly
+ turn a zero-permission editor into one that phones out from inside the user's
+ document. A host that wants a rich preview fetches it with its own network and
+ auth and passes `title` / `thumbnail` to `insertMedia`.
+
+ Normative: Kotlin's `embedProvider` returns the same string for the same URL,
+ and the parity harness asserts it.
+ */
+func embedProvider(_ url: String) -> String {
+    let lower = url.lowercased()
+
+    // Match on the HOST only, so a path like /youtube.com/fake cannot spoof it.
+    var host = lower
+    if let range = host.range(of: "://") { host = String(host[range.upperBound...]) }
+    if let slash = host.firstIndex(of: "/") { host = String(host[..<slash]) }
+    if let colon = host.firstIndex(of: ":") { host = String(host[..<colon]) }
+    if host.hasPrefix("www.") { host = String(host.dropFirst(4)) }
+    if host.hasPrefix("m.") { host = String(host.dropFirst(2)) }
+
+    switch host {
+    case "youtube.com", "youtu.be", "youtube-nocookie.com": return "YouTube"
+    case "vimeo.com", "player.vimeo.com": return "Vimeo"
+    case "twitter.com", "x.com": return "X"
+    case "open.spotify.com", "spotify.com": return "Spotify"
+    case "soundcloud.com": return "SoundCloud"
+    case "codepen.io": return "CodePen"
+    case "gist.github.com", "github.com": return "GitHub"
+    case "figma.com": return "Figma"
+    case "loom.com": return "Loom"
+    case "tiktok.com": return "TikTok"
+    case "instagram.com": return "Instagram"
+    case "maps.google.com", "google.com": return "Google Maps"
+    default: return ""
+    }
 }
 
 // MARK: - Segments
@@ -1320,18 +1367,6 @@ struct WysiwygTypography {
         }
     }
 
-    /// The host app's font at `size`, falling back to the system font when the
-    /// name does not resolve — a theme naming a font the app never bundled
-    /// should not leave the editor with no text.
-    func font(size: CGFloat, weight: UIFont.Weight) -> UIFont {
-        if !fontFamily.isEmpty, let named = UIFont(name: fontFamily, size: size) {
-            let descriptor = named.fontDescriptor.addingAttributes([
-                .traits: [UIFontDescriptor.TraitKey.weight: weight],
-            ])
-            return UIFont(descriptor: descriptor, size: size)
-        }
-        return UIFont.systemFont(ofSize: size, weight: weight)
-    }
 }
 
 /// Editing density. Points here, dp on Android — the same numbers either way.
@@ -1350,6 +1385,26 @@ struct WysiwygSpacing {
 }
 
 // MARK: - Styler
+
+extension WysiwygTypography {
+    /// The host app's font at `size`, falling back to the system font when the
+    /// name does not resolve — a theme naming a font the app never bundled
+    /// should not leave the editor with no text.
+    ///
+    /// Split from the rest of WysiwygTypography deliberately: everything above
+    /// the Styler marker is compiled by the parity harness WITHOUT UIKit, so
+    /// the size ramp can be asserted off-device. Anything touching UIFont has
+    /// to live below the line.
+    func font(size: CGFloat, weight: UIFont.Weight) -> UIFont {
+        if !fontFamily.isEmpty, let named = UIFont(name: fontFamily, size: size) {
+            let descriptor = named.fontDescriptor.addingAttributes([
+                .traits: [UIFontDescriptor.TraitKey.weight: weight],
+            ])
+            return UIFont(descriptor: descriptor, size: size)
+        }
+        return UIFont.systemFont(ofSize: size, weight: weight)
+    }
+}
 
 /// Maps the abstract document model to themed NSAttributedString display
 /// attributes and back. Display (fonts, colors) is always DERIVED from the
@@ -2646,6 +2701,64 @@ private struct EditorScreen: View {
         }
     }
 
+    /**
+     Play a video card full-screen.
+
+     Full-screen rather than inline on purpose: an inline player inside an
+     editing surface fights the caret and the keyboard for focus, and every
+     editor worth copying (Notes, Docs, Notion) shows a still and plays on tap.
+     */
+    private func playVideo(_ block: WysiwygBlock) {
+        let source = block.attrs["src"]?.isEmpty == false
+            ? block.attrs["src"]!
+            : (block.attrs["localPath"] ?? "")
+
+        guard !source.isEmpty else { return }
+
+        // A local pick is a file path, not a URL, until the host uploads it.
+        let url = source.hasPrefix("http") ? URL(string: source)
+                                           : URL(fileURLWithPath: source)
+
+        guard let url else { return }
+
+        let controller = AVPlayerViewController()
+        controller.player = AVPlayer(url: url)
+        WysiwygEditorPresenter.topController()?.present(controller, animated: true) {
+            controller.player?.play()
+        }
+    }
+
+    /// Ask for a URL and insert an embed block for it.
+    ///
+    /// No preview is fetched — see `embedProvider`. The card shows which
+    /// service the link points at, and renders a title / thumbnail only if the
+    /// HOST supplied one via `insertMedia`.
+    private func promptForEmbed() {
+        let strings = document.config.strings
+        let alert = UIAlertController(title: localized(strings, "embedTitle", "Embed a link"),
+                                      message: nil, preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = localized(strings, "embedPlaceholder", "https://youtube.com/watch?v=…")
+            field.keyboardType = .URL
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        alert.addAction(UIAlertAction(title: localized(strings, "cancel", "Cancel"), style: .cancel))
+        alert.addAction(UIAlertAction(title: localized(strings, "embedAdd", "Embed"), style: .default) { _ in
+            let url = (alert.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard !url.isEmpty else { return }
+
+            var block = WysiwygBlock(type: "embed", runs: [])
+            block.attrs["url"] = url
+            let provider = embedProvider(url)
+            if !provider.isEmpty { block.attrs["provider"] = provider }
+            document.insertBlock(block)
+        })
+
+        WysiwygEditorPresenter.topController()?.present(alert, animated: true)
+    }
+
     /// The poll composer — a question and its options, nothing else. Editing
     /// an existing poll opens the same sheet seeded from that block.
     @ViewBuilder
@@ -2724,6 +2837,9 @@ private struct EditorScreen: View {
         case "divider":
             sheet = nil
             document.insertBlock(WysiwygBlock(type: "divider", runs: []))
+        case "embed":
+            sheet = nil
+            promptForEmbed()
         default:
             break
         }
@@ -2770,12 +2886,18 @@ private struct EditorScreen: View {
         case .media(let block):
             MediaCardView(block: block, theme: theme, strings: document.config.strings)
                 .onTapGesture {
-                    guard block.type == "poll" else { return }
-                    pollDraft = PollDraft(
-                        entryId: entry.id,
-                        question: block.attrs["question"] ?? "",
-                        options: block.options.map(\.label)
-                    )
+                    switch block.type {
+                    case "poll":
+                        pollDraft = PollDraft(
+                            entryId: entry.id,
+                            question: block.attrs["question"] ?? "",
+                            options: block.options.map(\.label)
+                        )
+                    case "video":
+                        playVideo(block)
+                    default:
+                        break
+                    }
                 }
         case .text:
             if let model = document.model(for: entry) {
@@ -2903,6 +3025,9 @@ private struct MediaCardView: View {
     /// image shows immediately, before any upload finishes.
     private var source: String {
         if block.type == "video", let poster = block.attrs["poster"], !poster.isEmpty { return poster }
+        // The plugin fetches nothing; a thumbnail is here only because the host
+        // put it here.
+        if block.type == "embed" { return block.attrs["thumbnail"] ?? "" }
         if let src = block.attrs["src"], !src.isEmpty { return src }
         return block.attrs["localPath"] ?? ""
     }
@@ -2957,6 +3082,15 @@ private struct MediaCardView: View {
                     }
                 }
 
+                if block.type == "embed" {
+                    let provider = block.attrs["provider"] ?? embedProvider(block.attrs["url"] ?? "")
+                    if !provider.isEmpty {
+                        Text(provider)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(theme.accentColor)
+                    }
+                }
+
                 if let caption = block.attrs["caption"], !caption.isEmpty {
                     Text(caption)
                         .font(.system(size: 13))
@@ -2975,7 +3109,8 @@ private struct MediaCardView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             .task(id: source) {
-                guard !source.isEmpty, block.type == "image" || block.type == "video" else { return }
+                guard !source.isEmpty,
+                      ["image", "video", "embed"].contains(block.type) else { return }
                 let decoded = await Task.detached(priority: .userInitiated) {
                     decodeMediaImage(source)
                 }.value
@@ -3024,6 +3159,7 @@ private let toolIcons: [String: ToolIcon] = [
     "p": ToolIcon(path: "M4 6L20 6M4 12L20 12M4 18L14 18"),
     "poll": ToolIcon(path: "M6 19L6 11M12 19L12 5M18 19L18 14"),
     "divider": ToolIcon(path: "M4 12L20 12"),
+    "embed": ToolIcon(path: "M4 6L20 6L20 18L4 18ZM10 10L14 12L10 14Z"),
     "link": ToolIcon(path: "M9.5 12L14.5 12"
         + "M10 8L7.5 8C5.3 8 3.5 9.8 3.5 12C3.5 14.2 5.3 16 7.5 16L10 16"
         + "M14 8L16.5 8C18.7 8 20.5 9.8 20.5 12C20.5 14.2 18.7 16 16.5 16L14 16"),
@@ -3135,6 +3271,7 @@ let toolLabelKeys: [String: String] = [
     "file": "toolFile",
     "poll": "toolPoll",
     "divider": "toolDivider",
+    "embed": "toolEmbed",
     "clearFormat": "toolClearFormat",
 ]
 
@@ -3143,7 +3280,7 @@ let sheetTextStyleTools = ["h1", "h2", "h3", "blockquote"]
 let sheetListTools = ["bulletList", "orderedList"]
 let sheetFormatTools = ["bold", "italic", "underline", "strikethrough",
                         "code", "textColor", "highlight", "clearFormat"]
-let sheetInsertTools = ["image", "video", "file", "poll", "divider", "link"]
+let sheetInsertTools = ["image", "video", "file", "poll", "embed", "divider", "link"]
 
 /// Which sheet, if any, is open.
 enum SheetKind: Identifiable {

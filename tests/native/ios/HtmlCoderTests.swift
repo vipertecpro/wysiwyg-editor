@@ -317,6 +317,53 @@ do {
     }
 }
 
+print("Embeds — provider recognised from the URL alone, with no network")
+do {
+    let got = embedProvider("https://www.youtube.com/watch?v=abc")
+    if got == "YouTube" { print("  \u{2713} https://www.youtube.com/watch?v=abc -> YouTube") }
+    else { failures += 1; print("  \u{2717} https://www.youtube.com/watch?v=abc -> YouTube -> \(got)") }
+}
+do {
+    let got = embedProvider("https://youtu.be/abc")
+    if got == "YouTube" { print("  \u{2713} https://youtu.be/abc -> YouTube") }
+    else { failures += 1; print("  \u{2717} https://youtu.be/abc -> YouTube -> \(got)") }
+}
+do {
+    let got = embedProvider("http://m.youtube.com/watch?v=abc")
+    if got == "YouTube" { print("  \u{2713} http://m.youtube.com/watch?v=abc -> YouTube") }
+    else { failures += 1; print("  \u{2717} http://m.youtube.com/watch?v=abc -> YouTube -> \(got)") }
+}
+do {
+    let got = embedProvider("https://player.vimeo.com/video/1")
+    if got == "Vimeo" { print("  \u{2713} https://player.vimeo.com/video/1 -> Vimeo") }
+    else { failures += 1; print("  \u{2717} https://player.vimeo.com/video/1 -> Vimeo -> \(got)") }
+}
+do {
+    let got = embedProvider("https://x.com/anthropic/status/1")
+    if got == "X" { print("  \u{2713} https://x.com/anthropic/status/1 -> X") }
+    else { failures += 1; print("  \u{2717} https://x.com/anthropic/status/1 -> X -> \(got)") }
+}
+do {
+    let got = embedProvider("https://open.spotify.com/track/1")
+    if got == "Spotify" { print("  \u{2713} https://open.spotify.com/track/1 -> Spotify") }
+    else { failures += 1; print("  \u{2717} https://open.spotify.com/track/1 -> Spotify -> \(got)") }
+}
+do {
+    let got = embedProvider("https://example.com/youtube.com/fake")
+    if got == "" { print("  \u{2713} https://example.com/youtube.com/fake -> unknown") }
+    else { failures += 1; print("  \u{2717} https://example.com/youtube.com/fake -> unknown -> \(got)") }
+}
+do {
+    let got = embedProvider("https://notaservice.io/x")
+    if got == "" { print("  \u{2713} https://notaservice.io/x -> unknown") }
+    else { failures += 1; print("  \u{2717} https://notaservice.io/x -> unknown -> \(got)") }
+}
+do {
+    let got = embedProvider("")
+    if got == "" { print("  \u{2713} (empty) -> unknown") }
+    else { failures += 1; print("  \u{2717} (empty) -> unknown -> \(got)") }
+}
+
 print("Validation — checked natively before a save is allowed")
 do {
     let doc = HtmlCoder.parse("<p>one two three</p>")

@@ -363,6 +363,53 @@ fun main() {
         else { failures++; println("  ✗ an empty document still offers somewhere to type") }
     }
 
+    println("Embeds — provider recognised from the URL alone, with no network")
+    run {
+        val got = embedProvider("https://www.youtube.com/watch?v=abc")
+        if (got == "YouTube") println("  \u2713 https://www.youtube.com/watch?v=abc -> YouTube")
+        else { failures++; println("  \u2717 https://www.youtube.com/watch?v=abc -> YouTube -> $got") }
+    }
+    run {
+        val got = embedProvider("https://youtu.be/abc")
+        if (got == "YouTube") println("  \u2713 https://youtu.be/abc -> YouTube")
+        else { failures++; println("  \u2717 https://youtu.be/abc -> YouTube -> $got") }
+    }
+    run {
+        val got = embedProvider("http://m.youtube.com/watch?v=abc")
+        if (got == "YouTube") println("  \u2713 http://m.youtube.com/watch?v=abc -> YouTube")
+        else { failures++; println("  \u2717 http://m.youtube.com/watch?v=abc -> YouTube -> $got") }
+    }
+    run {
+        val got = embedProvider("https://player.vimeo.com/video/1")
+        if (got == "Vimeo") println("  \u2713 https://player.vimeo.com/video/1 -> Vimeo")
+        else { failures++; println("  \u2717 https://player.vimeo.com/video/1 -> Vimeo -> $got") }
+    }
+    run {
+        val got = embedProvider("https://x.com/anthropic/status/1")
+        if (got == "X") println("  \u2713 https://x.com/anthropic/status/1 -> X")
+        else { failures++; println("  \u2717 https://x.com/anthropic/status/1 -> X -> $got") }
+    }
+    run {
+        val got = embedProvider("https://open.spotify.com/track/1")
+        if (got == "Spotify") println("  \u2713 https://open.spotify.com/track/1 -> Spotify")
+        else { failures++; println("  \u2717 https://open.spotify.com/track/1 -> Spotify -> $got") }
+    }
+    run {
+        val got = embedProvider("https://example.com/youtube.com/fake")
+        if (got == "") println("  \u2713 https://example.com/youtube.com/fake -> unknown")
+        else { failures++; println("  \u2717 https://example.com/youtube.com/fake -> unknown -> $got") }
+    }
+    run {
+        val got = embedProvider("https://notaservice.io/x")
+        if (got == "") println("  \u2713 https://notaservice.io/x -> unknown")
+        else { failures++; println("  \u2717 https://notaservice.io/x -> unknown -> $got") }
+    }
+    run {
+        val got = embedProvider("")
+        if (got == "") println("  \u2713 (empty) -> unknown")
+        else { failures++; println("  \u2717 (empty) -> unknown -> $got") }
+    }
+
     println("Validation — checked natively before a save is allowed")
     run {
         val doc = HtmlCoder.parse("<p>one two three</p>")

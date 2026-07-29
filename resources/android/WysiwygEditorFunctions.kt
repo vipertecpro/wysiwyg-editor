@@ -93,7 +93,7 @@ object WysiwygEditorFunctions {
         "bulletList", "orderedList", "blockquote",
         "link", "code", "textColor", "highlight",
         "image", "video", "file",
-        "poll", "divider",
+        "poll", "divider", "embed",
         "clearFormat",
     )
 
@@ -1595,6 +1595,47 @@ internal fun validateDocument(
     return null
 }
 
+// ── Embeds ──────────────────────────────────────────────────────────────────
+
+/**
+ * Which service an embed URL points at, or "" when it is not one we recognise.
+ *
+ * Deliberately derived from the URL and NOTHING else. The plugin makes no
+ * network requests — fetching OpenGraph tags to build a preview would quietly
+ * turn a zero-permission editor into one that phones out from inside the
+ * user's document. A host that wants a rich preview fetches it with its own
+ * network and auth and passes `title` / `thumbnail` to `insertMedia`.
+ *
+ * Normative: Swift's `embedProvider` returns the same string for the same URL,
+ * and the parity harness asserts it.
+ */
+internal fun embedProvider(url: String): String {
+    var host = url.lowercase()
+
+    // Match on the HOST only, so a path like /youtube.com/fake cannot spoof it.
+    val scheme = host.indexOf("://")
+    if (scheme >= 0) host = host.substring(scheme + 3)
+    host = host.substringBefore('/').substringBefore(':')
+    if (host.startsWith("www.")) host = host.removePrefix("www.")
+    if (host.startsWith("m.")) host = host.removePrefix("m.")
+
+    return when (host) {
+        "youtube.com", "youtu.be", "youtube-nocookie.com" -> "YouTube"
+        "vimeo.com", "player.vimeo.com" -> "Vimeo"
+        "twitter.com", "x.com" -> "X"
+        "open.spotify.com", "spotify.com" -> "Spotify"
+        "soundcloud.com" -> "SoundCloud"
+        "codepen.io" -> "CodePen"
+        "gist.github.com", "github.com" -> "GitHub"
+        "figma.com" -> "Figma"
+        "loom.com" -> "Loom"
+        "tiktok.com" -> "TikTok"
+        "instagram.com" -> "Instagram"
+        "maps.google.com", "google.com" -> "Google Maps"
+        else -> ""
+    }
+}
+
 // ── Segments ────────────────────────────────────────────────────────────────
 
 /**
@@ -1696,6 +1737,7 @@ internal val TOOL_ICONS: Map<String, ToolIcon> = mapOf(
     "p" to ToolIcon("M4 6L20 6M4 12L20 12M4 18L14 18"),
     "poll" to ToolIcon("M6 19L6 11M12 19L12 5M18 19L18 14"),
     "divider" to ToolIcon("M4 12L20 12"),
+    "embed" to ToolIcon("M4 6L20 6L20 18L4 18ZM10 10L14 12L10 14Z"),
     "link" to ToolIcon(
         "M9.5 12L14.5 12" +
             "M10 8L7.5 8C5.3 8 3.5 9.8 3.5 12C3.5 14.2 5.3 16 7.5 16L10 16" +
@@ -3594,6 +3636,7 @@ internal val TOOL_LABEL_KEYS = mapOf(
     "file" to "toolFile",
     "poll" to "toolPoll",
     "divider" to "toolDivider",
+    "embed" to "toolEmbed",
     "clearFormat" to "toolClearFormat",
 )
 
@@ -3602,7 +3645,7 @@ internal val SHEET_TEXT_STYLE_TOOLS = listOf("h1", "h2", "h3", "blockquote")
 internal val SHEET_LIST_TOOLS = listOf("bulletList", "orderedList")
 internal val SHEET_FORMAT_TOOLS =
     listOf("bold", "italic", "underline", "strikethrough", "code", "textColor", "highlight", "clearFormat")
-internal val SHEET_INSERT_TOOLS = listOf("image", "video", "file", "poll", "divider", "link")
+internal val SHEET_INSERT_TOOLS = listOf("image", "video", "file", "poll", "embed", "divider", "link")
 
 /**
  * The tick drawn beside an active row. Same 24x24 grid as the tool glyphs,
