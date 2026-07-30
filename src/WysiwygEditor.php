@@ -454,6 +454,17 @@ class WysiwygEditor
     public const CANCEL_STYLES = ['text', 'icon'];
 
     /**
+     * `none` is for an editor that saves as you type.
+     *
+     * Apple Notes has no Save button because there is nothing to save — the
+     * note is already written. With `changeDebounce` doing the persisting, a
+     * second button that also saves is a lie about what the first one did, so
+     * the close control becomes the only one and it commits on the way out.
+     * The last keystrokes inside the debounce window would otherwise be lost.
+     */
+    public const SAVE_STYLE_NONE = 'none';
+
+    /**
      * How the save action is drawn.
      *
      *  - text: a plain text button (the default)
@@ -463,7 +474,7 @@ class WysiwygEditor
      *
      * @var list<string>
      */
-    public const SAVE_STYLES = ['text', 'filled'];
+    public const SAVE_STYLES = ['text', 'filled', 'none'];
 
     /**
      * Editing density. Values are points on iOS and dp on Android, so the two

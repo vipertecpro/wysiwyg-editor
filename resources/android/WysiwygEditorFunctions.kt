@@ -4275,13 +4275,19 @@ internal fun EditorScreen(
                     .padding(horizontal = 8.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // With no Save button there is nothing to discard TO: the note
+                // is already being written as you type, so closing commits
+                // rather than asking. Apple Notes' "Done".
+                val autosaving = config.saveStyle == "none"
+                val onClose = if (autosaving) onSave else onCancel
+
                 if (config.cancelStyle == "icon") {
                     // The ✕ every full-screen composer uses.
                     Box(
                         modifier = Modifier
                             .size(32.dp)
                             .clip(RoundedCornerShape(16.dp))
-                            .clickable(onClick = onCancel),
+                            .clickable(onClick = onClose),
                         contentAlignment = Alignment.Center,
                     ) {
                         BasicText(
@@ -4295,8 +4301,8 @@ internal fun EditorScreen(
                     }
                 } else {
                     BarButton(
-                        localized(config.strings, "cancel", "Cancel"),
-                        foreground.copy(alpha = 0.8f), FontWeight.Normal, onCancel,
+                        localized(config.strings, if (autosaving) "save" else "cancel", "Cancel"),
+                        foreground.copy(alpha = 0.8f), FontWeight.Normal, onClose,
                     )
                 }
                 // The author's picture up here rather than beside the text, so
@@ -4323,7 +4329,10 @@ internal fun EditorScreen(
                         )
                     }
                 }
-                if (config.saveStyle == "filled") {
+                if (autosaving) {
+                    // Nothing to put here: the close control saved.
+                    Unit
+                } else if (config.saveStyle == "filled") {
                     // A pill that dims until there is something worth saving —
                     // the shape every social composer uses for its primary
                     // action. Empty counts as unsaveable only here: a plain

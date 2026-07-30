@@ -158,7 +158,7 @@ All options are optional:
 | `backgroundMaxLength` | int | `130` | Past this many characters a background is dropped |
 | `cancelMode` | string | `discard` | `discard` asks to throw the edits away; `draft` offers to keep them and emits `DraftRequested` |
 | `cancelStyle` | string | `text` | `text` shows "Cancel"; `icon` shows a ✕ |
-| `saveStyle` | string | `text` | `text` button, or a `filled` pill that dims until there is something to save |
+| `saveStyle` | string | `text` | `text` button, a `filled` pill that dims until there is something to save, or `none` — no Save button at all, for an editor that saves as you type. The close control commits instead |
 | `history` | bool | `true` | Show undo / redo ahead of the tools |
 | `pollOptionMaxLength` | int | `25` | Longest a single poll answer may be |
 | `theme` | array | `[]` | Hex colors: `background`, `text`, `accent` (Save button), `highlight` (active states). Omitted keys fall back to the host app's theme, then to system-adaptive defaults |

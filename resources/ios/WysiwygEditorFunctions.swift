@@ -4092,7 +4092,16 @@ private struct EditorScreen: View {
         ZStack {
             HStack(spacing: 8) {
                 Button {
-                    document.hasChanges ? (showDiscard = true) : onCancel()
+                    // With no Save button there is nothing to discard TO: the
+                    // note is already being written as you type, so closing
+                    // commits rather than asking. Apple Notes' "Done".
+                    if autosaving {
+                        save()
+                    } else if document.hasChanges {
+                        showDiscard = true
+                    } else {
+                        onCancel()
+                    }
                 } label: {
                     if document.config.cancelStyle == "icon" {
                         Image(systemName: "xmark")
@@ -4100,7 +4109,10 @@ private struct EditorScreen: View {
                             .foregroundColor(theme.textColor)
                             .frame(width: 32, height: 32)
                     } else {
-                        Text(localized(document.config.strings, "cancel", "Cancel"))
+                        // When this button saves, it must not say "Cancel".
+                        Text(autosaving
+                             ? localized(document.config.strings, "save", "Done")
+                             : localized(document.config.strings, "cancel", "Cancel"))
                             .font(.system(size: 16))
                             .foregroundColor(theme.textColor)
                     }
@@ -4117,7 +4129,9 @@ private struct EditorScreen: View {
                 }
 
                 Spacer()
-                saveButton
+                if !autosaving {
+                    saveButton
+                }
             }
             if headerAccessories.isEmpty, document.config.avatarPlacement != "header" {
                 Text(document.config.title)
@@ -4299,22 +4313,34 @@ private struct EditorScreen: View {
         document.config.maxLength > 0 && document.charCount > document.config.maxLength
     }
 
+    /// No Save button: the editor saves as you type and closing commits.
+    private var autosaving: Bool { document.config.saveStyle == "none" }
+
+    /// Validate, then hand the document over. Shared by the Save button and by
+    /// the close control when there is no Save button to press.
+    private func save() {
+        let blocks = document.blocks()
+
+        if let problem = validateDocument(blocks, document.config.validation,
+                                          document.config.strings) {
+            // Blocked natively — a failing document never makes the round-trip
+            // to PHP just to be rejected.
+            validationMessage = problem
+
+            return
+        }
+
+        let out = HtmlCoder.emit(blocks, background: document.background)
+        onSave(out.html, out.text, JsonCoder.encode(blocks, background: document.background))
+    }
+
     @ViewBuilder
     private var saveButton: some View {
         let label = localized(document.config.strings, "save", "Save")
         let filled = document.config.saveStyle == "filled"
 
         Button {
-            let blocks = document.blocks()
-            if let problem = validateDocument(blocks, document.config.validation,
-                                              document.config.strings) {
-                // Blocked natively — a failing document never makes the
-                // round-trip to PHP just to be rejected.
-                validationMessage = problem
-                return
-            }
-            let out = HtmlCoder.emit(blocks, background: document.background)
-            onSave(out.html, out.text, JsonCoder.encode(blocks, background: document.background))
+            save()
         } label: {
             if filled {
                 Text(label)

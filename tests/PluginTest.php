@@ -1397,3 +1397,33 @@ describe('Inserting text', function () {
         expect($GLOBALS['nativephp_calls'])->toBe([]);
     });
 });
+
+describe('An editor that saves as you type', function () {
+    /**
+     * Apple Notes has no Save button because there is nothing to save — the
+     * note is already written. A second button that also saves is a lie about
+     * what the first one did.
+     */
+    it('offers a style with no save button at all', function () {
+        expect(editor()->config('', ['saveStyle' => 'none'])['saveStyle'])->toBe('none');
+    });
+
+    it('still falls back for a style it does not know', function () {
+        expect(editor()->config('', ['saveStyle' => 'sparkle'])['saveStyle'])->toBe('text');
+    });
+
+    /**
+     * With `none`, the close control commits — so both platforms have to know
+     * about it, or one of them silently throws the last edits away.
+     */
+    it('is understood by both platforms', function () {
+        foreach (nativeSources() as $platform => $source) {
+            expect($source)->toContain('"none"');
+        }
+    });
+
+    /** The autosave seam it pairs with. */
+    it('pairs with a debounced change event', function () {
+        expect(editor()->config('', ['changeDebounce' => 800])['changeDebounce'])->toBe(800);
+    });
+});
