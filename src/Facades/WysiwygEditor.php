@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static void setAccessory(string $accessory, string $label = '', string $value = '')
  * @method static void preview(string $kind, string $source, string $caption = '')
  * @method static string toMarkdown(string $json)
+ * @method static array attachments(string $json)
  *
  * @see \Vipertecpro\WysiwygEditor\WysiwygEditor
  */

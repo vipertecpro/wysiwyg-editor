@@ -1057,3 +1057,62 @@ describe('Post backgrounds', function () {
             ->and(editor()->config('', ['backgroundMaxLength' => 80])['backgroundMaxLength'])->toBe(80);
     });
 });
+
+describe('Attachments', function () {
+    /**
+     * Most servers want the prose in one table and the files in another. The
+     * editor uploads nothing — the endpoint belongs to the app — so this is
+     * the split, and an app should not have to learn the document format to
+     * do it itself.
+     */
+    it('separates the files from the prose', function () {
+        $json = json_encode(['blocks' => [
+            ['type' => 'p', 'runs' => [['text' => 'Shipping today']]],
+            ['type' => 'image', 'localPath' => '/var/mobile/IMG_1.HEIC', 'alt' => 'Harbour', 'uploadId' => 'u-1'],
+            ['type' => 'video', 'src' => 'https://cdn.example.com/a.mp4', 'caption' => 'Dawn'],
+        ]]);
+
+        expect(editor()->attachments($json))->toBe([
+            ['kind' => 'image', 'path' => '/var/mobile/IMG_1.HEIC', 'url' => '',
+                'alt' => 'Harbour', 'caption' => '', 'uploadId' => 'u-1'],
+            ['kind' => 'video', 'path' => '', 'url' => 'https://cdn.example.com/a.mp4',
+                'alt' => '', 'caption' => 'Dawn', 'uploadId' => ''],
+        ]);
+    });
+
+    /**
+     * Which to do next must never be ambiguous: a device path means it still
+     * needs uploading, a url means it is already yours.
+     */
+    it('fills exactly one of path and url', function () {
+        $json = json_encode(['blocks' => [
+            ['type' => 'image', 'localPath' => '/tmp/a.jpg'],
+            ['type' => 'image', 'src' => 'https://cdn.example.com/b.jpg'],
+        ]]);
+
+        foreach (editor()->attachments($json) as $file) {
+            expect($file['path'] === '')->not->toBe($file['url'] === '');
+        }
+    });
+
+    /** They travel in the document; they are not files. */
+    it('leaves polls, dividers and embeds out of it', function () {
+        $json = json_encode(['blocks' => [
+            ['type' => 'poll', 'question' => 'Ship it?'],
+            ['type' => 'divider'],
+            ['type' => 'embed', 'url' => 'https://youtu.be/x'],
+        ]]);
+
+        expect(editor()->attachments($json))->toBe([]);
+    });
+
+    it('skips a block the user took the file back out of', function () {
+        $json = json_encode(['blocks' => [['type' => 'image', 'alt' => 'nothing here']]]);
+
+        expect(editor()->attachments($json))->toBe([]);
+    });
+
+    it('returns nothing for a document it cannot read', function (string $json) {
+        expect(editor()->attachments($json))->toBe([]);
+    })->with(['not json', '', '{}', '{"blocks":"nope"}']);
+});

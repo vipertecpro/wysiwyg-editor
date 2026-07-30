@@ -637,6 +637,84 @@ class WysiwygEditor
      * is the canonical form, so the export does not inherit a loss that
      * already happened. See {@see Markdown} for what Markdown cannot carry.
      */
+    /**
+     * Every file the document carries, pulled out of the saved JSON.
+     *
+     * Most servers want the prose in one table and the files in another, and
+     * the editor does not upload anything — the endpoint is yours, so the
+     * upload is too. This is the split, so an app does not have to learn the
+     * document format to do it:
+     *
+     *     foreach (WysiwygEditor::attachments($json) as $file) {
+     *         if ($file['path'] === '') {
+     *             continue;   // already on your server; $file['url'] says where
+     *         }
+     *
+     *         Http::attach('file', file_get_contents($file['path']))
+     *             ->post('https://api.example.com/media', ['kind' => $file['kind']]);
+     *     }
+     *
+     * `path` is a device path and is set only while a file has NOT been
+     * uploaded; `url` is set once it has. Exactly one of them is filled for
+     * any given attachment, so which to do next is never ambiguous.
+     *
+     * Polls, dividers and embeds are not files and are not returned — they
+     * travel in the document itself.
+     *
+     * @return list<array{kind: string, path: string, url: string, alt: string, caption: string, uploadId: string}>
+     */
+    public function attachments(string $json): array
+    {
+        $document = json_decode($json, true);
+
+        if (! is_array($document) || ! is_array($document['blocks'] ?? null)) {
+            return [];
+        }
+
+        $out = [];
+
+        foreach ($document['blocks'] as $block) {
+            if (! is_array($block)) {
+                continue;
+            }
+
+            $kind = (string) ($block['type'] ?? '');
+
+            // `camera` is how a photo is ASKED for, not what it comes back as.
+            if (! in_array($kind, ['image', 'video', 'file'], true)) {
+                continue;
+            }
+
+            $path = $this->attr($block, 'localPath');
+            $url = $this->attr($block, 'src');
+
+            // A block carrying neither is a placeholder the user removed the
+            // file from; there is nothing to upload and nothing to point at.
+            if ($path === '' && $url === '') {
+                continue;
+            }
+
+            $out[] = [
+                'kind' => $kind,
+                'path' => $path,
+                'url' => $url,
+                'alt' => $this->attr($block, 'alt'),
+                'caption' => $this->attr($block, 'caption'),
+                'uploadId' => $this->attr($block, 'uploadId'),
+            ];
+        }
+
+        return $out;
+    }
+
+    /** @param  array<string, mixed>  $block */
+    protected function attr(array $block, string $key): string
+    {
+        $value = $block[$key] ?? '';
+
+        return is_string($value) ? $value : '';
+    }
+
     public function toMarkdown(string $json): string
     {
         return Markdown::fromJson($json);
