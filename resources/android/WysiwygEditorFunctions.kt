@@ -183,6 +183,10 @@ object WysiwygEditorFunctions {
         val triggers: Map<String, String>,
         /** Sheets the host declared, presented over the editor's own chrome. */
         val sheets: List<WysiwygHostSheet>,
+        /** Colours a short post can be written on. */
+        val backgrounds: List<WysiwygBackground>,
+        /** Past this many characters a background is dropped. */
+        val backgroundMaxLength: Int,
         /** Which end of the bar the tools sit at. */
         val toolbarAlign: String,
         /** Where the author's picture goes: `text`, `header` or `none`. */
@@ -358,6 +362,8 @@ object WysiwygEditorFunctions {
                     .filterKeys { it.length == 1 }
                     .filterValues { it.isNotEmpty() },
                 sheets = parseSheets(parameters["sheets"]),
+                backgrounds = parseBackgrounds(parameters["backgrounds"]),
+                backgroundMaxLength = (parameters["backgroundMaxLength"] as? Number)?.toInt() ?: 130,
                 toolbarAlign = parameters["toolbarAlign"] as? String ?: "leading",
                 avatarPlacement = parameters["avatarPlacement"] as? String ?: "text",
                 typography = parseTypography(parameters["typography"]),
@@ -411,6 +417,16 @@ object WysiwygEditorFunctions {
             }
             val initialHtml = HtmlCoder.serialize(initialBlocks).first
 
+            // Re-opening a post that was written on a colour puts it back on
+            // that colour, or editing one would quietly strip it.
+            val savedBackground = if (config.contentJson.isEmpty()) {
+                HtmlCoder.parseBackground(config.content)
+            } else {
+                JsonCoder.decodeBackground(config.contentJson)
+            }
+            val initialBackground =
+                if (config.backgrounds.any { it.id == savedBackground }) savedBackground else ""
+
             val view = ComposeView(activity).apply {
                 tag = overlayTag
                 layoutParams = FrameLayout.LayoutParams(
@@ -463,6 +479,9 @@ object WysiwygEditorFunctions {
             // Holds the live document so Cancel/Save can read it without the
             // Compose tree having to hoist it back up on every keystroke.
             val documentRef = mutableStateOf<List<WysiwygBlock>>(initialBlocks)
+            // The colour the post is written ON, by id. Held beside the
+            // document because it belongs to the document, not to a block.
+            val backgroundRef = mutableStateOf(initialBackground)
 
             fun scheduleChangeEvent() {
                 if (config.changeDebounce <= 0) return
@@ -470,8 +489,8 @@ object WysiwygEditorFunctions {
                 val runnable = Runnable {
                     if (finished.get()) return@Runnable
                     val document = documentRef.value
-                    val (html, text) = HtmlCoder.serialize(document)
-                    dispatch(EVENT_CHANGED, config.id, html, text, JsonCoder.encode(document))
+                    val (html, text) = HtmlCoder.serialize(document, backgroundRef.value)
+                    dispatch(EVENT_CHANGED, config.id, html, text, JsonCoder.encode(document, backgroundRef.value))
                 }
                 pendingChange = runnable
                 changeHandler.postDelayed(runnable, config.changeDebounce.toLong())
@@ -479,7 +498,7 @@ object WysiwygEditorFunctions {
 
             /** Cancel path — confirm first when the document actually changed. */
             fun attemptCancel() {
-                val current = HtmlCoder.serialize(documentRef.value).first
+                val current = HtmlCoder.serialize(documentRef.value, backgroundRef.value).first
                 if (current == initialHtml) {
                     finishCancelled()
                     return
@@ -492,8 +511,8 @@ object WysiwygEditorFunctions {
                         .setMessage(localized(config.strings, "draftMessage", "You can finish it later."))
                         .setPositiveButton(localized(config.strings, "draftSave", "Save")) { _, _ ->
                             val document = documentRef.value
-                            val out = HtmlCoder.serialize(document)
-                            dispatch(EVENT_DRAFT, config.id, out.first, out.second, JsonCoder.encode(document))
+                            val out = HtmlCoder.serialize(document, backgroundRef.value)
+                            dispatch(EVENT_DRAFT, config.id, out.first, out.second, JsonCoder.encode(document, backgroundRef.value))
                             finishCancelled()
                         }
                         .setNegativeButton(localized(config.strings, "draftDelete", "Delete")) { _, _ ->
@@ -544,8 +563,8 @@ object WysiwygEditorFunctions {
                                 .setPositiveButton(localized(config.strings, "ok", "OK"), null)
                                 .show()
                         } else {
-                            val (html, text) = HtmlCoder.serialize(document)
-                            finishSaved(html, text, JsonCoder.encode(document))
+                            val (html, text) = HtmlCoder.serialize(document, backgroundRef.value)
+                            finishSaved(html, text, JsonCoder.encode(document, backgroundRef.value))
                         }
                     },
                     onRequestMedia = { kind -> requestMedia(kind, config.id) },
@@ -558,6 +577,7 @@ object WysiwygEditorFunctions {
                     onSheetOptionPicked = { sheetId, option ->
                         sheetOptionPicked(sheetId, option, config.id)
                     },
+                    backgroundState = backgroundRef,
                 )
             }
 
@@ -794,6 +814,52 @@ class WysiwygAccessory(
     /** A sheet to present instead of merely reporting the tap. */
     val sheet: String,
 )
+
+/**
+ * A colour a short post can be written ON.
+ *
+ * Facebook's signature composer move: a few words become a card and stop being
+ * a paragraph. `to` makes it a gradient; without one it is flat.
+ */
+class WysiwygBackground(
+    val id: String,
+    val from: String,
+    val to: String,
+    val textColor: String,
+) {
+    val colors: List<Color>
+        get() {
+            val start = Color(android.graphics.Color.parseColor(from))
+
+            return if (to.isEmpty()) {
+                listOf(start, start)
+            } else {
+                listOf(start, Color(android.graphics.Color.parseColor(to)))
+            }
+        }
+
+    val textArgb: Int get() = android.graphics.Color.parseColor(textColor)
+}
+
+private fun parseBackgrounds(any: Any?): List<WysiwygBackground> {
+    val rows = when (any) {
+        is List<*> -> any
+        is JSONArray -> (0 until any.length()).map { any.opt(it) }
+        else -> emptyList<Any?>()
+    }
+
+    return rows.mapNotNull { row ->
+        val map = parseStringMap(row)
+        val id = map["id"].orEmpty()
+        val from = map["from"].orEmpty()
+
+        if (id.isEmpty() || from.isEmpty()) {
+            null
+        } else {
+            WysiwygBackground(id, from, map["to"].orEmpty(), map["textColor"] ?: "#FFFFFF")
+        }
+    }
+}
 
 /**
  * A sheet the HOST declared for the editor to present.
@@ -2524,6 +2590,11 @@ internal object Styler {
         theme: WysiwygEditorFunctions.EditorTheme,
         night: Boolean,
         typography: WysiwygTypography = WysiwygTypography(),
+        /**
+         * When a post is written ON a colour it is held large and centred, and
+         * the theme's text colour gives way to the one the background carries.
+         */
+        background: WysiwygBackground? = null,
     ): android.text.SpannableStringBuilder {
         val out = android.text.SpannableStringBuilder()
         val source = if (blocks.isEmpty()) listOf(WysiwygBlock("p")) else blocks
@@ -2557,6 +2628,23 @@ internal object Styler {
             }
 
             applyBlockStyle(out, start, out.length, block.type, theme, night, typography)
+
+            if (background != null) {
+                // A few words held large is the whole point; the ramp between
+                // block types stops mattering once the post is a card.
+                val flag = android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                out.setSpan(android.text.style.AbsoluteSizeSpan(28, true), start, out.length, flag)
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(background.textArgb),
+                    start, out.length, flag,
+                )
+                out.setSpan(
+                    android.text.style.AlignmentSpan.Standard(
+                        android.text.Layout.Alignment.ALIGN_CENTER,
+                    ),
+                    start, out.length, android.text.Spanned.SPAN_PARAGRAPH,
+                )
+            }
         }
 
         return out
@@ -3294,6 +3382,29 @@ internal class EditorController(
     /** Current link under the cursor, for pre-filling the link dialog. */
     fun currentLink(): String? = activeMarks().link
 
+    /**
+     * Re-run the styler over what is already typed.
+     *
+     * Writing a post onto a colour changes how every character looks, and the
+     * spans were attached when the text was laid down — so they have to be
+     * laid down again. The caret is put back where it was, because losing it
+     * mid-sentence for a styling change is unforgivable.
+     */
+    fun restyle(background: WysiwygBackground?) {
+        val caret = editText.selectionStart.coerceAtLeast(0)
+        val rebuilt = Styler.toSpannable(document(), theme, night, config.typography, background)
+
+        programmatic = true
+        try {
+            editText.setText(rebuilt)
+            editText.setSelection(caret.coerceAtMost(rebuilt.length))
+        } finally {
+            programmatic = false
+        }
+
+        onStateChanged()
+    }
+
     /** Where the caret sits, or -1 when there is a selection instead. */
     fun caretOrNull(): Int {
         val start = editText.selectionStart
@@ -3674,6 +3785,9 @@ internal fun EditorScreen(
     onSuggestionRequested: (String, String, String) -> Unit = { _, _, _ -> },
     /** Something was chosen in one of the host's own sheets. */
     onSheetOptionPicked: (String, String) -> Unit = { _, _ -> },
+    /** The colour the post is written ON, held by the caller so it can be
+     *  serialized with the document. */
+    backgroundState: androidx.compose.runtime.MutableState<String>? = null,
 ) {
     val night = isSystemInDarkTheme()
     val theme = config.theme
@@ -3689,6 +3803,9 @@ internal fun EditorScreen(
     val palette = remember { mutableStateOf<String?>(null) }
     /** The host's own sheet, if one is open. */
     val hostSheet = remember { mutableStateOf<WysiwygHostSheet?>(null) }
+    /** The colour the post is written ON, by id, or "" for none. */
+    val postBackground = backgroundState ?: remember { mutableStateOf("") }
+    val activeBackground = config.backgrounds.firstOrNull { it.id == postBackground.value }
     /** What the host offered for the query currently being typed. */
     val suggestions = remember { androidx.compose.runtime.mutableStateListOf<WysiwygSuggestion>() }
     /** The live query, or null when no trigger is open. */
@@ -4102,7 +4219,22 @@ internal fun EditorScreen(
                     AvatarView(config.avatar, foreground)
                 }
 
-                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .then(
+                            if (activeBackground == null) {
+                                Modifier
+                            } else {
+                                Modifier.background(
+                                    androidx.compose.ui.graphics.Brush.linearGradient(
+                                        activeBackground.colors,
+                                    ),
+                                )
+                            },
+                        ),
+                ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -4231,6 +4363,7 @@ internal fun EditorScreen(
                                         setText(
                                             Styler.toSpannable(
                                                 segment.blocks, theme, night, config.typography,
+                                                activeBackground,
                                             ),
                                         )
 
@@ -4318,6 +4451,31 @@ internal fun EditorScreen(
                         onDescribe = { id -> showAltDialog(activity, entries, id, config.strings) { rebuildDocument() } },
                         onEdit = onMediaEdit,
                     )
+                }
+            }
+
+            // ── The colours a post can be written on ────────────────────────────
+            // Offered only while the post is still a few words: a paragraph set
+            // in 28pt white on orange is unreadable, and a photo already IS the
+            // card — a colour behind it would be decorating a decoration.
+            val canUseBackground = config.backgrounds.isNotEmpty() &&
+                entries.none { it.segment is Segment.Media } &&
+                length.value <= config.backgroundMaxLength
+
+            if (canUseBackground) {
+                BackgroundPicker(
+                    backgrounds = config.backgrounds,
+                    chosen = postBackground.value,
+                    foreground = foreground,
+                    background = background,
+                    accent = accent,
+                ) { id ->
+                    postBackground.value = if (postBackground.value == id) "" else id
+                    val next = config.backgrounds.firstOrNull { it.id == postBackground.value }
+                    // Every segment restyles: the colour is the document's, not
+                    // one paragraph's, so a post cannot be half on it.
+                    controllers.values.forEach { it.restyle(next) }
+                    revision.value++
                 }
             }
 
@@ -5595,6 +5753,86 @@ private fun HostSheetBody(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The colours a post can be written on, as a row of swatches.
+ *
+ * Sits directly under the writing, where the composer that invented this puts
+ * it — near enough to the text to read as being ABOUT the text, and above the
+ * toolbar so it does not fight the keyboard for the bottom of the screen.
+ * Mirrors the iOS BackgroundPicker.
+ */
+@Composable
+private fun BackgroundPicker(
+    backgrounds: List<WysiwygBackground>,
+    chosen: String,
+    foreground: Color,
+    background: Color,
+    accent: Color,
+    onPick: (String) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+    ) {
+        // Plain first, and it is a swatch like the rest so taking the colour
+        // off is the same gesture as putting it on.
+        Swatch(listOf(background, background), chosen == "", true, foreground, accent) { onPick("") }
+
+        backgrounds.forEach { option ->
+            Swatch(option.colors, chosen == option.id, false, foreground, accent) { onPick(option.id) }
+        }
+    }
+}
+
+@Composable
+private fun Swatch(
+    colors: List<Color>,
+    chosen: Boolean,
+    bordered: Boolean,
+    foreground: Color,
+    accent: Color,
+    onTap: () -> Unit,
+) {
+    Box(
+        modifier = Modifier.size(40.dp).clickable(onClick = onTap),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.size(40.dp)) {
+            val centre = androidx.compose.ui.geometry.Offset(size.width / 2, size.height / 2)
+
+            drawCircle(
+                brush = androidx.compose.ui.graphics.Brush.linearGradient(colors),
+                radius = 15.dp.toPx(),
+                center = centre,
+            )
+
+            if (bordered) {
+                drawCircle(
+                    color = foreground.copy(alpha = 0.2f),
+                    radius = 15.dp.toPx(),
+                    center = centre,
+                    style = Stroke(width = 1.dp.toPx()),
+                )
+            }
+
+            // A ring around the chosen one, standing off it so it reads on a
+            // swatch of any colour.
+            if (chosen) {
+                drawCircle(
+                    color = accent,
+                    radius = 19.dp.toPx(),
+                    center = centre,
+                    style = Stroke(width = 2.dp.toPx()),
+                )
             }
         }
     }

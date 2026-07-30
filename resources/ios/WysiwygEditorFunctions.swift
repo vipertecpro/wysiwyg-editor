@@ -298,6 +298,11 @@ struct WysiwygConfig {
     let triggers: [String: String]
     /// Sheets the host declared, presented over the editor's own window.
     let sheets: [WysiwygHostSheet]
+    /// Colours a short post can be written on.
+    let backgrounds: [WysiwygBackground]
+    /// Past this many characters a background is dropped — a paragraph set in
+    /// 28pt white on orange is unreadable.
+    let backgroundMaxLength: Int
     /// Which end of the bar the tools sit at.
     let toolbarAlign: String
     /// Where the author's picture goes: `text`, `header` or `none`.
@@ -351,6 +356,8 @@ struct WysiwygConfig {
         avatar = p["avatar"] as? String ?? ""
         triggers = p["triggers"] as? [String: String] ?? [:]
         sheets = ((p["sheets"] as? [[String: Any]]) ?? []).map(WysiwygHostSheet.init)
+        backgrounds = ((p["backgrounds"] as? [[String: Any]]) ?? []).map(WysiwygBackground.init)
+        backgroundMaxLength = max(0, (p["backgroundMaxLength"] as? NSNumber)?.intValue ?? 130)
         toolbarAlign = p["toolbarAlign"] as? String ?? "leading"
         avatarPlacement = p["avatarPlacement"] as? String ?? "text"
         typography = WysiwygTypography(p["typography"] as? [String: Any])
@@ -1612,6 +1619,36 @@ struct WysiwygAccessory: Identifiable {
 }
 
 /**
+ A colour a short post can be written ON.
+
+ Facebook's signature composer move: a few words become a card and stop being
+ a paragraph. `to` makes it a gradient; without one it is flat.
+ */
+struct WysiwygBackground: Identifiable, Equatable {
+    let id: String
+    let from: String
+    let to: String
+    let textColor: String
+
+    init(_ p: [String: Any]) {
+        id = p["id"] as? String ?? ""
+        from = p["from"] as? String ?? ""
+        to = p["to"] as? String ?? ""
+        textColor = p["textColor"] as? String ?? "#FFFFFF"
+    }
+
+    var colors: [Color] {
+        let start = Color(UIColor(wysiwygHex: from) ?? .systemBlue)
+
+        guard !to.isEmpty, let end = UIColor(wysiwygHex: to) else { return [start, start] }
+
+        return [start, Color(end)]
+    }
+
+    var textUIColor: UIColor { UIColor(wysiwygHex: textColor) ?? .white }
+}
+
+/**
  A sheet the HOST declared for the editor to present.
 
  The editor owns its own window, so a sheet the host drew would open behind
@@ -1727,6 +1764,9 @@ struct WysiwygStyler {
     let theme: WysiwygTheme
     var typography = WysiwygTypography(nil)
     var spacing = WysiwygSpacing(named: "comfortable")
+    /// When a post is written ON a colour it is held large and centred, and
+    /// the theme's text colour gives way to the one the background carries.
+    var background: WysiwygBackground?
 
     static let ulMarker = "\u{2022}\u{00A0}"                       // "•<nbsp>"
     static func olMarker(_ n: Int) -> String { "\(n).\u{00A0}" }   // "1.<nbsp>"
@@ -1734,7 +1774,13 @@ struct WysiwygStyler {
     // MARK: fonts & paragraph styles
 
     /// Derived from the configured body size — see WysiwygTypography.
-    func fontSize(for block: String) -> CGFloat { typography.size(for: block) }
+    func fontSize(for block: String) -> CGFloat {
+        // A few words held large is the whole point; the ramp between block
+        // types stops mattering once the post is a card.
+        if background != nil { return 28 }
+
+        return typography.size(for: block)
+    }
 
     func font(block: String, marks: MarkSet) -> UIFont {
         let size = fontSize(for: block)
@@ -1763,6 +1809,7 @@ struct WysiwygStyler {
         let style = NSMutableParagraphStyle()
         style.paragraphSpacing = spacing.paragraph
         style.lineHeightMultiple = typography.lineHeight
+        if background != nil { style.alignment = .center }
         switch block {
         case "ul", "ol":
             style.headIndent = 22 // wrapped lines align past the marker
@@ -1787,6 +1834,8 @@ struct WysiwygStyler {
         if let hex = marks.color, let color = UIColor(wysiwygHex: hex) {
             a[.wysiwygTextColor] = hex
             a[.foregroundColor] = color
+        } else if let background {
+            a[.foregroundColor] = background.textUIColor
         } else if block == "blockquote" {
             a[.foregroundColor] = theme.secondaryTextUIColor
         } else {
@@ -1819,7 +1868,7 @@ struct WysiwygStyler {
             .wysiwygMarker: true,
             .font: UIFont.monospacedDigitSystemFont(ofSize: 16, weight: .regular),
             .paragraphStyle: paragraphStyle(for: block),
-            .foregroundColor: theme.secondaryTextUIColor,
+            .foregroundColor: background?.textUIColor ?? theme.secondaryTextUIColor,
         ]
     }
 
@@ -1935,7 +1984,7 @@ func countsReadout(_ config: WysiwygConfig, _ characters: Int, _ words: Int) -> 
 /// list-marker management and serialization. Published state drives SwiftUI.
 final class WysiwygEditorModel: NSObject, ObservableObject {
     let config: WysiwygConfig
-    let styler: WysiwygStyler
+    var styler: WysiwygStyler
     let initialAttributed: NSAttributedString
     /// The initial content re-serialized through the normaliser — the baseline
     /// the discard-confirm compares against.
@@ -1972,6 +2021,31 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         self.initialAttributed = styler.attributed(blocks)
         self.initialNormalizedHtml = HtmlCoder.emit(blocks).html
         super.init()
+    }
+
+    /**
+     Re-run the styler over what is already typed.
+
+     Writing a post onto a colour changes how every character looks, and the
+     attributes were baked in when the text was laid down — so they have to be
+     laid down again. The caret is put back where it was, because losing it
+     mid-sentence for a styling change is unforgivable.
+     */
+    func restyle(background: WysiwygBackground?) {
+        styler.background = background
+
+        guard let tv = textView else { return }
+
+        let caret = tv.selectedRange
+        let restyled = styler.attributed(styler.blocks(from: tv.attributedText))
+
+        isMutating = true
+        tv.attributedText = restyled
+        isMutating = false
+
+        tv.selectedRange = NSRange(location: min(caret.location, restyled.length),
+                                   length: 0)
+        refreshState()
     }
 
     /// This segment's blocks, live from the text view.
@@ -2681,12 +2755,21 @@ final class WysiwygDocumentModel: ObservableObject {
             : JsonCoder.decode(config.contentJson)
         self.initialNormalizedHtml = HtmlCoder.emit(parsed).html
 
+        // Re-opening a post that was written on a colour puts it back on that
+        // colour, or editing one would quietly strip it.
+        let saved = config.contentJson.isEmpty
+            ? HtmlCoder.parseBackground(config.content)
+            : JsonCoder.decodeBackground(config.contentJson)
+        self.background = config.backgrounds.contains { $0.id == saved } ? saved : ""
+
         for segment in segmentsOf(parsed) {
             let entry = SegmentEntry(id: nextId, segment: segment)
             nextId += 1
             entries.append(entry)
             if case .text(let blocks) = segment {
-                models[entry.id] = WysiwygEditorModel(config: config, blocks: blocks)
+                let model = WysiwygEditorModel(config: config, blocks: blocks)
+                model.styler.background = activeBackground
+                models[entry.id] = model
             }
         }
 
@@ -2957,6 +3040,41 @@ final class WysiwygDocumentModel: ObservableObject {
 
         if !label.isEmpty { accessories[index].label = label }
         accessories[index].value = value
+    }
+
+    // MARK: post background
+
+    /// The colour this post is written ON, by id, or "" for none.
+    @Published var background = ""
+
+    var activeBackground: WysiwygBackground? {
+        config.backgrounds.first { $0.id == background }
+    }
+
+    /**
+     Offer a background only while the post is still a few words.
+
+     Facebook's rule, and a sound one: a paragraph set in 28pt white on orange
+     is unreadable, and a photo already IS the card — a colour behind it would
+     be decorating a decoration.
+     */
+    var canUseBackground: Bool {
+        guard !config.backgrounds.isEmpty else { return false }
+        guard mediaEntries.isEmpty else { return false }
+
+        return charCount <= config.backgroundMaxLength
+    }
+
+    /// Write the post onto a colour, or take it back off one.
+    func setBackground(_ id: String) {
+        let next = background == id ? "" : id
+        background = next
+
+        // Every segment restyles: the colour is the document's, not one
+        // paragraph's, so a post cannot be half on it.
+        for model in models.values {
+            model.restyle(background: activeBackground)
+        }
     }
 
     // MARK: suggestions
@@ -3312,9 +3430,19 @@ private struct EditorScreen: View {
                                 segmentView(entry: entry)
                             }
                         }
+                        // Centred in the card rather than pinned to the top:
+                        // a few words on a colour are a poster, not a document.
+                        .frame(maxWidth: .infinity,
+                               minHeight: document.activeBackground == nil ? 0 : 260,
+                               alignment: document.activeBackground == nil ? .topLeading : .center)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(backgroundCard)
+
+                if document.canUseBackground {
+                    BackgroundPicker(document: document, theme: theme)
+                }
 
                 if document.config.mediaLayout == "strip", !document.mediaEntries.isEmpty {
                     MediaStrip(document: document, theme: theme,
@@ -3379,11 +3507,11 @@ private struct EditorScreen: View {
                        role: .destructive) { onCancel() }
                 Button(localized(document.config.strings, "draftSave", "Save")) {
                     let blocks = document.blocks()
-                    let out = HtmlCoder.emit(blocks)
+                    let out = HtmlCoder.emit(blocks, background: document.background)
                     var payload: [String: Any] = [
                         "html": out.html,
                         "text": out.text,
-                        "json": JsonCoder.encode(blocks),
+                        "json": JsonCoder.encode(blocks, background: document.background),
                     ]
                     if let id = document.config.id { payload["id"] = id }
                     LaravelBridge.shared.send?(WysiwygEvents.draftRequested, payload)
@@ -3718,6 +3846,15 @@ private struct EditorScreen: View {
         .padding(.horizontal, 16)
     }
 
+    /// The colour the post is written on, behind the writing.
+    @ViewBuilder
+    private var backgroundCard: some View {
+        if let background = document.activeBackground {
+            LinearGradient(colors: background.colors,
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+        }
+    }
+
     private var headerAccessories: [WysiwygAccessory] {
         document.accessories.filter { $0.placement == "header" }
     }
@@ -3867,8 +4004,8 @@ private struct EditorScreen: View {
                 validationMessage = problem
                 return
             }
-            let out = HtmlCoder.emit(blocks)
-            onSave(out.html, out.text, JsonCoder.encode(blocks))
+            let out = HtmlCoder.emit(blocks, background: document.background)
+            onSave(out.html, out.text, JsonCoder.encode(blocks, background: document.background))
         } label: {
             if filled {
                 Text(label)
@@ -4087,6 +4224,66 @@ private struct AccessoryRows: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Post backgrounds
+
+/**
+ The colours a post can be written on, as a row of swatches.
+
+ Sits directly under the writing, where the composer that invented this puts
+ it — near enough to the text to read as being ABOUT the text, and above the
+ toolbar so it does not fight the keyboard for the bottom of the screen.
+ */
+private struct BackgroundPicker: View {
+    @ObservedObject var document: WysiwygDocumentModel
+    let theme: WysiwygTheme
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                // Plain first, and it is a swatch like the rest so taking the
+                // colour off is the same gesture as putting it on.
+                swatch(colors: [theme.backgroundColor, theme.backgroundColor],
+                       id: "",
+                       bordered: true)
+
+                ForEach(document.config.backgrounds) { background in
+                    swatch(colors: background.colors, id: background.id, bordered: false)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+    }
+
+    private func swatch(colors: [Color], id: String, bordered: Bool) -> some View {
+        let chosen = document.background == id
+
+        return Button {
+            document.setBackground(id)
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(LinearGradient(colors: colors,
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+
+                if bordered {
+                    Circle().stroke(theme.textColor.opacity(0.2), lineWidth: 1)
+                }
+
+                // A ring around the chosen one, standing off it so it reads on
+                // a swatch of any colour.
+                if chosen {
+                    Circle()
+                        .stroke(theme.accentColor, lineWidth: 2)
+                        .frame(width: 38, height: 38)
+                }
+            }
+            .frame(width: 30, height: 30)
+        }
+        .frame(width: 40, height: 40)
     }
 }
 
