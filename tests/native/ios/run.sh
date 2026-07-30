@@ -39,4 +39,18 @@ fi
 cp "$plugin_root/tests/native/ios/HtmlCoderTests.swift" "$work_dir/main.swift"
 
 swiftc -o "$work_dir/tests" "$work_dir/Coder.swift" "$work_dir/main.swift"
-"$work_dir/tests"
+
+out_file="$work_dir/output.txt"
+"$work_dir/tests" | tee "$out_file"
+
+# A harness that compiles nothing must not look like a harness that passed.
+# A UIColor once strayed into the sliced region, the compile failed, and a
+# truncated view of this output still read as green.
+minimum=60
+ran="$(grep -c '✓' "$out_file" || true)"
+
+if [[ "$ran" -lt "$minimum" ]]; then
+    echo "" >&2
+    echo "Only $ran checks ran (expected at least $minimum) — the harness is not exercising the coder." >&2
+    exit 1
+fi

@@ -78,4 +78,18 @@ application { mainClass.set("HtmlCoderTestsKt") }
 GRADLE
 
 # A wrapper only runs from its own project unless pointed elsewhere; -p does that.
-"$gradle_cmd" -p "$work_dir/project" run -q --console=plain 2>&1 | grep -v "^e: The daemon"
+out_file="$work_dir/output.txt"
+"$gradle_cmd" -p "$work_dir/project" run -q --console=plain 2>&1 \
+    | grep -v "^e: The daemon" | tee "$out_file"
+
+# A harness that compiles nothing must not look like a harness that passed.
+# Its iOS twin once sliced out a region that no longer compiled, and a
+# truncated view of the output still read as green.
+minimum=60
+ran="$(grep -c '✓' "$out_file" || true)"
+
+if [[ "$ran" -lt "$minimum" ]]; then
+    echo "" >&2
+    echo "Only $ran checks ran (expected at least $minimum) — the harness is not exercising the coder." >&2
+    exit 1
+fi

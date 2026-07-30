@@ -1637,15 +1637,6 @@ struct WysiwygBackground: Identifiable, Equatable {
         textColor = p["textColor"] as? String ?? "#FFFFFF"
     }
 
-    var colors: [Color] {
-        let start = Color(UIColor(wysiwygHex: from) ?? .systemBlue)
-
-        guard !to.isEmpty, let end = UIColor(wysiwygHex: to) else { return [start, start] }
-
-        return [start, Color(end)]
-    }
-
-    var textUIColor: UIColor { UIColor(wysiwygHex: textColor) ?? .white }
 }
 
 /**
@@ -1736,6 +1727,26 @@ struct WysiwygSpacing {
 }
 
 // MARK: - Styler
+
+/**
+ The drawing side of a background.
+
+ Kept out of the document-model section on purpose: the parity harness slices
+ that region out and compiles it with Foundation alone, so a UIColor in there
+ stops the whole suite compiling.
+ */
+extension WysiwygBackground {
+    var colors: [Color] {
+        let start = Color(UIColor(wysiwygHex: from) ?? .systemBlue)
+
+        guard !to.isEmpty, let end = UIColor(wysiwygHex: to) else { return [start, start] }
+
+        return [start, Color(end)]
+    }
+
+    var textUIColor: UIColor { UIColor(wysiwygHex: textColor) ?? .white }
+}
+
 
 extension WysiwygTypography {
     /// The host app's font at `size`, falling back to the system font when the
