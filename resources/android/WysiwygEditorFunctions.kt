@@ -4040,7 +4040,7 @@ internal fun EditorScreen(
                 // The author's picture beside what they are writing, the way
                 // every social composer arranges it. Top-aligned, because the
                 // text grows downward past it.
-                if (config.avatar.isNotEmpty()) {
+                if (config.avatarPlacement == "text" && config.avatar.isNotEmpty()) {
                     AvatarView(config.avatar, foreground)
                 }
 
@@ -4465,6 +4465,17 @@ internal fun EditorScreen(
         }
 
         // ── The host's own sheet ────────────────────────────────────────────
+        // The IME stays up over a sheet on Android and hides most of it, which
+        // iOS does not do — so put it away as the sheet arrives.
+        LaunchedEffect(hostSheet.value?.id) {
+            if (hostSheet.value != null) {
+                val imm = activity.getSystemService(
+                    android.content.Context.INPUT_METHOD_SERVICE,
+                ) as? android.view.inputmethod.InputMethodManager
+                imm?.hideSoftInputFromWindow(activity.window.decorView.windowToken, 0)
+            }
+        }
+
         hostSheet.value?.let { declared ->
             WysiwygSheet(
                 title = declared.title,
