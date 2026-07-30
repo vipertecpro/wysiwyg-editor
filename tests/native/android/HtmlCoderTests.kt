@@ -30,6 +30,21 @@ private fun check(label: String, input: String, expected: String) {
     }
 }
 
+/**
+ * Assert two strings match, with no round trip in between — for the coders
+ * whose input is not HTML.
+ */
+private fun same(label: String, got: String, expected: String) {
+    if (got == expected) {
+        println("  ✓ $label")
+    } else {
+        failures++
+        println("  ✗ $label")
+        println("      got: $got")
+        println("      exp: $expected")
+    }
+}
+
 /** Assert the plain-text rendition produced for [input]. */
 private fun checkText(label: String, input: String, expected: String) {
     val out = HtmlCoder.serialize(HtmlCoder.parse(input)).second
@@ -504,6 +519,31 @@ fun main() {
             println("  ✗ validation messages are translated -> $message")
         }
     }
+
+// ── Post backgrounds ────────────────────────────────────────────────────────
+println("")
+println("Post backgrounds — a property of the document, not of a run")
+run {
+    val blocks = HtmlCoder.parse("<p>Big news</p>")
+
+    val json = JsonCoder.encode(blocks, "sunset")
+    same("the background sits beside the blocks in JSON",
+        json, "{\"version\":2,\"background\":\"sunset\",\"blocks\":[{\"id\":\"\",\"type\":\"p\",\"runs\":[{\"text\":\"Big news\",\"marks\":{}}]}]}")
+    same("and reads back out", JsonCoder.decodeBackground(json), "sunset")
+    same("a document written on nothing says so", JsonCoder.decodeBackground(JsonCoder.encode(blocks)), "")
+
+    // For a post like this the background IS the post, so the markup carries
+    // it too — a host rendering saved HTML would otherwise lose it.
+    val html = HtmlCoder.serialize(blocks, "sunset").first
+    same("the markup is wrapped", html, "<div data-background=\"sunset\"><p>Big news</p></div>")
+    same("the wrapper reads back out", HtmlCoder.parseBackground(html), "sunset")
+    same("plain markup has no background", HtmlCoder.parseBackground("<p>Big news</p>"), "")
+
+    // The wrapper must not become a block, or every re-open would nest deeper.
+    same("the wrapper survives a round trip", HtmlCoder.serialize(HtmlCoder.parse(html)).first, "<p>Big news</p>")
+    same("the text is unaffected", HtmlCoder.serialize(blocks, "sunset").second, "Big news")
+}
+
 
     println("")
     if (failures == 0) {

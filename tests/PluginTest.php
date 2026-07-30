@@ -1010,3 +1010,50 @@ describe('Counts readout', function () {
             ->and($config['maxLength'])->toBe(500);
     });
 });
+
+describe('Post backgrounds', function () {
+    it('offers none unless the host supplies them', function () {
+        expect(editor()->config('')['backgrounds'])->toBe([]);
+    });
+
+    it('carries a flat colour and a gradient through, keyed or listed', function (array $backgrounds) {
+        expect(editor()->config('', ['backgrounds' => $backgrounds])['backgrounds'])->toBe([
+            ['id' => 'plain', 'from' => '#1877F2', 'textColor' => '#FFFFFF'],
+            ['id' => 'sunset', 'from' => '#FF6B6B', 'to' => '#FFD93D', 'textColor' => '#1C1E21'],
+        ]);
+    })->with([
+        'keyed by id' => [[
+            'plain' => ['from' => '1877F2'],
+            'sunset' => ['from' => '#ff6b6b', 'to' => '#FFD93D', 'textColor' => '#1c1e21'],
+        ]],
+        'listed with an id' => [[
+            ['id' => 'plain', 'from' => '#1877F2'],
+            ['id' => 'sunset', 'from' => '#FF6B6B', 'to' => '#FFD93D', 'textColor' => '#1C1E21'],
+        ]],
+    ]);
+
+    /** White on anything dark is the usual answer, so it is the default. */
+    it('defaults the text to white', function () {
+        $backgrounds = editor()->config('', ['backgrounds' => ['a' => ['from' => '#000000']]])['backgrounds'];
+
+        expect($backgrounds[0]['textColor'])->toBe('#FFFFFF');
+    });
+
+    it('drops a background it could not draw', function (array $background) {
+        expect(editor()->config('', ['backgrounds' => [$background]])['backgrounds'])->toBe([]);
+    })->with([
+        'no id' => [['from' => '#FFFFFF']],
+        'no colour' => [['id' => 'a']],
+        'not a colour' => [['id' => 'a', 'from' => 'cornflower']],
+    ]);
+
+    /**
+     * A paragraph set in 28pt white on orange is unreadable, which is why
+     * Facebook drops the background once the post stops being a few words.
+     */
+    it('stops holding a post large past a length the host can set', function () {
+        expect(editor()->config('')['backgroundMaxLength'])
+            ->toBe(WysiwygEditor::BACKGROUND_MAX_LENGTH)
+            ->and(editor()->config('', ['backgroundMaxLength' => 80])['backgroundMaxLength'])->toBe(80);
+    });
+});

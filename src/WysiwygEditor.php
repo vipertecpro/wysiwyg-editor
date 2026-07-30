@@ -310,6 +310,27 @@ class WysiwygEditor
     public const TOOLBAR_ALIGNMENTS = ['leading', 'trailing'];
 
     /**
+     * A colour a short post can be written ON.
+     *
+     * Facebook's signature composer move: a few words become a card — large,
+     * centred, white on a gradient — and stop being a paragraph. That is a
+     * property of the DOCUMENT, not of a run inside it, so it round-trips as
+     * one and the host gets it back with everything else.
+     *
+     * `from` alone is a flat colour; adding `to` makes it a gradient.
+     *
+     * @var list<string>
+     */
+    public const BACKGROUND_KEYS = ['id', 'from', 'to', 'textColor'];
+
+    /**
+     * Past this many characters a background is dropped, the way Facebook
+     * drops it: the point is a few words held large, and a paragraph set in
+     * 28pt white on orange is unreadable.
+     */
+    public const BACKGROUND_MAX_LENGTH = 130;
+
+    /**
      * Where the author's picture goes.
      *
      * `text` is beside what they are writing, which is what X and Facebook do.
@@ -748,6 +769,11 @@ class WysiwygEditor
             'accessories' => $this->resolveAccessories($options['accessories'] ?? []),
             'customTools' => $this->resolveCustomTools($options['customTools'] ?? []),
             'sheets' => $this->resolveSheets($options['sheets'] ?? []),
+            'backgrounds' => $this->resolveBackgrounds($options['backgrounds'] ?? []),
+            'backgroundMaxLength' => max(
+                0,
+                (int) ($options['backgroundMaxLength'] ?? self::BACKGROUND_MAX_LENGTH)
+            ),
             // Right-aligned when the bar is two buttons rather than a rack of
             // formatting tools — LinkedIn's composer parks its photo and "+"
             // in the corner, and a left-aligned pair reads as an oversight.
@@ -1043,6 +1069,70 @@ class WysiwygEditor
         }
 
         return $rows;
+    }
+
+    /**
+     * A hex colour, normalised with its leading hash, or null if it is not one.
+     *
+     * The same rule the theme keys use — #RGB, #RRGGBB or #RRGGBBAA, hash
+     * optional going in and always present coming out, so the native side
+     * never has to guess.
+     */
+    protected function color(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        if (! preg_match('/^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/', $value, $match)) {
+            return null;
+        }
+
+        return '#'.strtoupper($match[1]);
+    }
+
+    /**
+     * Colours a short post can be written on.
+     *
+     * A background needs an `id` to round-trip as and a `from` colour to draw;
+     * anything without both is dropped rather than offered as a blank swatch.
+     *
+     * @param  array<int, array<string, mixed>>  $backgrounds
+     * @return list<array<string, string>>
+     */
+    protected function resolveBackgrounds(array $backgrounds): array
+    {
+        $out = [];
+
+        foreach ($backgrounds as $key => $background) {
+            if (! is_array($background)) {
+                continue;
+            }
+
+            $id = trim((string) ($background['id'] ?? (is_string($key) ? $key : '')));
+            $from = $this->color($background['from'] ?? '');
+
+            if ($id === '' || $from === null) {
+                continue;
+            }
+
+            $row = ['id' => $id, 'from' => $from];
+
+            // A second colour makes it a gradient; without one it is flat.
+            $to = $this->color($background['to'] ?? '');
+
+            if ($to !== null) {
+                $row['to'] = $to;
+            }
+
+            // White on anything dark is the usual answer, so that is the
+            // default — but a pale background needs to say otherwise.
+            $row['textColor'] = $this->color($background['textColor'] ?? '') ?? '#FFFFFF';
+
+            $out[] = $row;
+        }
+
+        return $out;
     }
 
     /**

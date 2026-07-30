@@ -1094,6 +1094,20 @@ internal object HtmlCoder {
      * <script>/<style> skipped entirely, inter-block whitespace ignored,
      * entities decoded, unsafe link schemes dropped (text kept).
      */
+    /** The background the markup was wrapped in, or "" if it was not. */
+    fun parseBackground(html: String): String {
+        val marker = "data-background=\""
+        val at = html.indexOf(marker)
+
+        if (at < 0) return ""
+
+        val end = html.indexOf('"', at + marker.length)
+
+        if (end < 0) return ""
+
+        return decodeEntities(html.substring(at + marker.length, end))
+    }
+
     fun parse(html: String): MutableList<WysiwygBlock> {
         val blocks = mutableListOf<WysiwygBlock>()
         var current: WysiwygBlock? = null
@@ -1102,6 +1116,11 @@ internal object HtmlCoder {
         val markStack = mutableListOf<Pair<String, (MarkBuilder) -> Unit>>()
         // The media block currently being assembled from a <figure>, if any.
         var mediaBlock: WysiwygBlock? = null
+        // How many document wrappers are open. A bare <div> is treated as a
+        // paragraph, for tolerance when parsing markup from elsewhere — but
+        // OUR background wrapper is not one, and opening a paragraph for it
+        // put a blank line at the top of the post on every re-open.
+        var wrapperDepth = 0
         var inFigcaption = false
         val n = html.length
         var i = 0
@@ -1223,7 +1242,13 @@ internal object HtmlCoder {
                     }
                 }
                 "figcaption" -> inFigcaption = true
-                "p", "div" -> open("p")
+                "p", "div" -> {
+                    if (name == "div" && attrText.contains("data-background")) {
+                        wrapperDepth++
+                    } else {
+                        open("p")
+                    }
+                }
                 "h1" -> open("h1")
                 "h2" -> open("h2")
                 "h3", "h4", "h5", "h6" -> open("h3")
@@ -1260,7 +1285,13 @@ internal object HtmlCoder {
                     inFigcaption = false
                 }
                 "figcaption" -> inFigcaption = false
-                "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li" -> closeBlock()
+                "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li" -> {
+                    if (name == "div" && wrapperDepth > 0) {
+                        wrapperDepth--
+                    } else {
+                        closeBlock()
+                    }
+                }
                 "ul", "ol" -> {
                     closeBlock()
                     if (listStack.isNotEmpty()) listStack.removeAt(listStack.size - 1)
@@ -1342,9 +1373,19 @@ internal object HtmlCoder {
      * whitespace between blocks. An empty document — or a document that is just
      * one empty paragraph — serializes to the EMPTY STRING, not `<p><br></p>`.
      */
-    fun serialize(blocks: List<WysiwygBlock>): Pair<String, String> {
+    fun serialize(blocks: List<WysiwygBlock>, background: String = ""): Pair<String, String> {
         if (blocks.isEmpty()) return "" to ""
         if (blocks.size == 1 && blocks[0].type == "p" && blocks[0].isEmpty) return "" to ""
+
+        // Wrapped rather than JSON-only, because for a post like this the
+        // background IS the post — a host rendering the saved markup would
+        // otherwise show a few words in plain black on white.
+        if (background.isNotEmpty()) {
+            val inner = serialize(blocks)
+
+            return ("<div data-background=\"" + escapeAttribute(background) + "\">" +
+                inner.first + "</div>") to inner.second
+        }
 
         val html = StringBuilder()
         val lines = mutableListOf<String>()
@@ -1699,9 +1740,15 @@ internal object JsonCoder {
 
     // ── encode ──────────────────────────────────────────────────────────────
 
-    fun encode(blocks: List<WysiwygBlock>): String {
+    fun encode(blocks: List<WysiwygBlock>, background: String = ""): String {
         val out = StringBuilder()
-        out.append("{\"version\":2,\"blocks\":[")
+        out.append("{\"version\":2")
+        // A property of the DOCUMENT, not of a run inside it, so it sits beside
+        // the blocks rather than on one of them.
+        if (background.isNotEmpty()) {
+            out.append(",\"background\":").append(quote(background))
+        }
+        out.append(",\"blocks\":[")
         blocks.forEachIndexed { index, block ->
             if (index > 0) out.append(',')
             encodeBlock(out, block)
@@ -1793,6 +1840,17 @@ internal object JsonCoder {
     // ── decode ──────────────────────────────────────────────────────────────
 
     /** Tolerant reader: unknown keys ignored, malformed input yields no blocks. */
+    /** The background a document was written on, or "" if it was not. */
+    fun decodeBackground(json: String): String {
+        val value = try {
+            JsonScanner(json).parseValue()
+        } catch (e: Exception) {
+            return ""
+        }
+
+        return (value as? Map<*, *>)?.get("background") as? String ?: ""
+    }
+
     fun decode(json: String): MutableList<WysiwygBlock> {
         val value = try {
             JsonScanner(json).parseValue()

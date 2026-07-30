@@ -471,6 +471,17 @@ enum HtmlCoder {
     /// div→p, h4-h6→h3), <br> splits blocks, unknown tags ignored (text kept),
     /// <script>/<style> skipped entirely, inter-block whitespace ignored,
     /// entities decoded, unsafe link schemes dropped (text kept).
+    /// The background the markup was wrapped in, or "" if it was not.
+    static func parseBackground(_ html: String) -> String {
+        guard let range = html.range(of: "data-background=\"") else { return "" }
+
+        let rest = html[range.upperBound...]
+
+        guard let end = rest.firstIndex(of: "\"") else { return "" }
+
+        return decodeEntities(String(rest[..<end]))
+    }
+
     static func parse(_ html: String) -> [WysiwygBlock] {
         var blocks: [WysiwygBlock] = []
         var current: WysiwygBlock?
@@ -478,6 +489,11 @@ enum HtmlCoder {
         var listStack: [String] = []
         // The media block currently being assembled from a <figure>, if any.
         var mediaBlock: WysiwygBlock?
+        // How many document wrappers are open. A bare <div> is treated as a
+        // paragraph, for tolerance when parsing markup from elsewhere — but
+        // OUR background wrapper is not one, and opening a paragraph for it
+        // put a blank line at the top of the post on every re-open.
+        var wrapperDepth = 0
         var inFigcaption = false
         var markStack: [(tag: String, apply: (inout MarkSet) -> Void)] = []
         let chars = Array(html)
@@ -608,6 +624,11 @@ enum HtmlCoder {
             case "figcaption":
                 inFigcaption = true
             case "p", "div":
+                if name == "div", attrText.contains("data-background") {
+                    wrapperDepth += 1
+
+                    break
+                }
                 open("p")
             case "h1":
                 open("h1")
@@ -657,6 +678,11 @@ enum HtmlCoder {
             case "figcaption":
                 inFigcaption = false
             case "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li":
+                if name == "div", wrapperDepth > 0 {
+                    wrapperDepth -= 1
+
+                    break
+                }
                 closeBlock()
             case "ul", "ol":
                 closeBlock()
@@ -735,9 +761,19 @@ enum HtmlCoder {
     /// empty paragraphs, consecutive list items grouped into ONE <ul>/<ol>,
     /// no whitespace between blocks — and a document that is nothing but a
     /// single empty paragraph IS the empty document ("", "").
-    static func emit(_ blocks: [WysiwygBlock]) -> (html: String, text: String) {
+    static func emit(_ blocks: [WysiwygBlock], background: String = "") -> (html: String, text: String) {
         if blocks.isEmpty { return ("", "") }
         if blocks.count == 1, blocks[0].type == "p", blocks[0].isEmpty { return ("", "") }
+
+        // Wrapped rather than JSON-only, because for a post like this the
+        // background IS the post — a host rendering the saved markup would
+        // otherwise show a few words in plain black on white.
+        if !background.isEmpty {
+            let inner = emit(blocks)
+
+            return ("<div data-background=\"" + escapeAttr(background) + "\">"
+                    + inner.html + "</div>", inner.text)
+        }
 
         var html = ""
         var lines: [String] = []
@@ -1232,8 +1268,14 @@ enum JsonCoder {
 
     // MARK: encode
 
-    static func encode(_ blocks: [WysiwygBlock]) -> String {
-        var out = "{\"version\":2,\"blocks\":["
+    static func encode(_ blocks: [WysiwygBlock], background: String = "") -> String {
+        var out = "{\"version\":2"
+        // A property of the DOCUMENT, not of a run inside it, so it sits beside
+        // the blocks rather than on one of them.
+        if !background.isEmpty {
+            out += ",\"background\":" + quote(background)
+        }
+        out += ",\"blocks\":["
         for (index, block) in blocks.enumerated() {
             if index > 0 { out += "," }
             out += encodeBlock(block)
@@ -1318,6 +1360,15 @@ enum JsonCoder {
     // MARK: decode
 
     /// Tolerant reader: unknown keys ignored, malformed input yields no blocks.
+    /// The background a document was written on, or "" if it was not.
+    static func decodeBackground(_ json: String) -> String {
+        var scanner = JsonScanner(json)
+
+        guard let root = scanner.parseValue() as? [String: Any] else { return "" }
+
+        return root["background"] as? String ?? ""
+    }
+
     static func decode(_ json: String) -> [WysiwygBlock] {
         var scanner = JsonScanner(json)
         guard let root = scanner.parseValue() as? [String: Any],

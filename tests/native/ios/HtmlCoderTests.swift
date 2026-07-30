@@ -29,6 +29,19 @@ func check(_ label: String, _ input: String, _ expected: String) {
     }
 }
 
+/// Assert two strings match, with no round trip in between — for the coders
+/// whose input is not HTML.
+func same(_ label: String, _ got: String, _ expected: String) {
+    if got == expected {
+        print("  ✓ \(label)")
+    } else {
+        failures += 1
+        print("  ✗ \(label)")
+        print("      got: \(got.debugDescription)")
+        print("      exp: \(expected.debugDescription)")
+    }
+}
+
 /// Assert the plain-text rendition produced for `input`.
 func checkText(_ label: String, _ input: String, _ expected: String) {
     let out = HtmlCoder.emit(HtmlCoder.parse(input)).text
@@ -450,6 +463,30 @@ do {
         failures += 1
         print("  ✗ validation messages are translated -> \(validateDocument(doc, ["minWords": 50], es) ?? "nil")")
     }
+}
+
+// ── Post backgrounds ────────────────────────────────────────────────────────
+print("")
+print("Post backgrounds — a property of the document, not of a run")
+do {
+    let blocks = HtmlCoder.parse("<p>Big news</p>")
+
+    let json = JsonCoder.encode(blocks, background: "sunset")
+    same("the background sits beside the blocks in JSON",
+          json, "{\"version\":2,\"background\":\"sunset\",\"blocks\":[{\"id\":\"\",\"type\":\"p\",\"runs\":[{\"text\":\"Big news\",\"marks\":{}}]}]}")
+    same("and reads back out", JsonCoder.decodeBackground(json), "sunset")
+    same("a document written on nothing says so", JsonCoder.decodeBackground(JsonCoder.encode(blocks)), "")
+
+    // For a post like this the background IS the post, so the markup carries
+    // it too — a host rendering saved HTML would otherwise lose it.
+    let html = HtmlCoder.emit(blocks, background: "sunset").html
+    same("the markup is wrapped", html, "<div data-background=\"sunset\"><p>Big news</p></div>")
+    same("the wrapper reads back out", HtmlCoder.parseBackground(html), "sunset")
+    same("plain markup has no background", HtmlCoder.parseBackground("<p>Big news</p>"), "")
+
+    // The wrapper must not become a block, or every re-open would nest deeper.
+    same("the wrapper survives a round trip", HtmlCoder.emit(HtmlCoder.parse(html)).html, "<p>Big news</p>")
+    same("the text is unaffected", HtmlCoder.emit(blocks, background: "sunset").text, "Big news")
 }
 
 print("")
