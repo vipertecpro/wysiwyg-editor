@@ -16,6 +16,23 @@ beforeEach(function () {
 /**
  * Test double exposing the protected config resolvers.
  */
+/**
+ * Both native sources, keyed by platform.
+ *
+ * Every key of the config exists three times — once in PHP and once in each
+ * native file — because the config arrives as untrusted JSON and has to be
+ * filtered somewhere. Nothing but a test keeps the three in step.
+ *
+ * @return array<string, string>
+ */
+function nativeSources(): array
+{
+    return [
+        'iOS' => file_get_contents(__DIR__.'/../resources/ios/WysiwygEditorFunctions.swift'),
+        'Android' => file_get_contents(__DIR__.'/../resources/android/WysiwygEditorFunctions.kt'),
+    ];
+}
+
 function editor(): WysiwygEditor
 {
     return new class extends WysiwygEditor
@@ -1230,4 +1247,71 @@ describe('Release metadata', function () {
 
         expect($manifest['version'])->toBe($latest[1]);
     });
+});
+
+describe('Nothing declared without somewhere to land', function () {
+    /**
+     * The bug this plugin keeps producing: a key is added to PHP and to ONE
+     * platform, and the feature silently does nothing on the other. It happened
+     * to `avatarPlacement`, and the only symptom was an avatar drawn twice.
+     *
+     * The config is untrusted JSON, so each platform reads the keys it knows by
+     * name — which means there are three copies of every key and no compiler to
+     * keep them in step.
+     */
+    it('reads every option on both platforms', function () {
+        $missing = [];
+
+        foreach (nativeSources() as $platform => $source) {
+            foreach (array_keys(editor()->config('')) as $key) {
+                if (! str_contains($source, "\"{$key}\"")) {
+                    $missing[] = "{$platform} never reads the {$key} option";
+                }
+            }
+        }
+
+        expect($missing)->toBe([]);
+    });
+
+    /**
+     * The nested keys are the easier ones to forget: nothing references them
+     * from PHP except the resolver, and a missing one degrades quietly — a
+     * sheet option with no `detail`, a background with no `to`.
+     */
+    it('reads every nested key on both platforms', function (array $keys, string $what) {
+        $missing = [];
+
+        foreach (nativeSources() as $platform => $source) {
+            foreach ($keys as $key) {
+                // A bracket READ, not merely the name somewhere in the file:
+                // several of these double as tool names, so `textColor` appears
+                // eleven times in the Kotlin and presence alone proves nothing.
+                if (! preg_match('/\w\["'.preg_quote($key, '/').'"\]/', $source)) {
+                    $missing[] = "{$platform} never reads {$what}.{$key}";
+                }
+            }
+        }
+
+        expect($missing)->toBe([]);
+    })->with([
+        [WysiwygEditor::ACCESSORY_KEYS, 'accessory'],
+        [WysiwygEditor::CUSTOM_TOOL_KEYS, 'customTool'],
+        [WysiwygEditor::SHEET_KEYS, 'sheet'],
+        [WysiwygEditor::SHEET_OPTION_KEYS, 'sheetOption'],
+        [WysiwygEditor::BACKGROUND_KEYS, 'background'],
+    ]);
+
+    /**
+     * A control naming a sheet that was never declared must still report its
+     * tap. Doing nothing at all is the worst outcome: the app looks broken and
+     * there is no event left to debug from.
+     */
+    it('looks the sheet up before presenting one, so an unknown name still reports', function (string $platform) {
+        $source = nativeSources()[$platform];
+
+        // Guarding on FINDING the sheet rather than merely on one having been
+        // named is what makes the tap fall through to the event.
+        expect($source)->toMatch('/sheets\.first(OrNull)?\s*[({]/')
+            ->and($source)->toContain('accessoryTapped');
+    })->with(['iOS', 'Android']);
 });
