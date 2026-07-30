@@ -1170,3 +1170,64 @@ describe('Taking only what you need', function () {
         expect(editor()->config('', ['triggers' => false])['triggers'])->toBe([]);
     });
 });
+
+describe('The README describes the plugin that exists', function () {
+    /**
+     * Documentation drifts silently and a developer only finds out when the
+     * thing they copied does nothing. Seven options shipped undocumented
+     * before this test existed.
+     */
+    it('documents every option the editor accepts', function () {
+        $readme = file_get_contents(__DIR__.'/../README.md');
+        $config = editor()->config('');
+
+        // Internal plumbing the caller never passes.
+        $internal = ['content', 'contentJson', 'themeLight', 'themeDark',
+            'pollMinOptions', 'pollMaxOptions', 'pollDurations'];
+
+        foreach (array_diff(array_keys($config), $internal) as $option) {
+            expect($readme)->toContain("`{$option}`");
+        }
+    });
+
+    it('lists every tool a caller can put on the toolbar', function () {
+        $readme = file_get_contents(__DIR__.'/../README.md');
+
+        foreach (WysiwygEditor::AVAILABLE_TOOLS as $tool) {
+            expect($readme)->toContain("`{$tool}`");
+        }
+    });
+
+    it('names every event the editor can dispatch', function () {
+        $readme = file_get_contents(__DIR__.'/../README.md');
+
+        foreach (glob(__DIR__.'/../src/Events/*.php') as $file) {
+            expect($readme)->toContain(basename($file, '.php'));
+        }
+    });
+
+    it('names every method the facade offers', function () {
+        $readme = file_get_contents(__DIR__.'/../README.md');
+        $facade = file_get_contents(__DIR__.'/../src/Facades/WysiwygEditor.php');
+
+        preg_match_all('/@method static \S+ (\w+)\(/', $facade, $methods);
+
+        foreach ($methods[1] as $method) {
+            expect($readme)->toContain($method);
+        }
+    });
+});
+
+describe('Release metadata', function () {
+    /**
+     * The manifest still said 0.1.0 at the point v0.4.0 was tagged — three
+     * releases of drift, in the one file a NativePHP build reads.
+     */
+    it('carries the version the changelog most recently released', function () {
+        $manifest = json_decode(file_get_contents(__DIR__.'/../nativephp.json'), true);
+
+        preg_match('/^## \[(\d+\.\d+\.\d+)\]/m', file_get_contents(__DIR__.'/../CHANGELOG.md'), $latest);
+
+        expect($manifest['version'])->toBe($latest[1]);
+    });
+});

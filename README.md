@@ -22,6 +22,9 @@ a JavaScript editor in a browser.
 - 📑 **Blocks** — H1–H3, bullet / ordered lists, blockquote, dividers
 - 🖼️ **Media** — images, video and attachments, with a pending state while your app uploads
 - 📊 **Polls** — written inline, with per-answer pictures, an option cap and a length
+- 🙋 **Mentions and hashtags** — the editor spots the trigger, YOUR app answers with who matches, and the pick is saved as a link carrying the entity id
+- 🎨 **Post backgrounds** — a few words held large on a colour, the way a social composer does it; round-trips in the HTML and the JSON both
+- 🗂️ **Your own sheets** — declare a list or a grid of options and the editor presents them over its own window, then tells you what was picked
 - 🧰 **Configurable toolbar** — presets (`full`, `basic`, `comment`, `note`) or an explicit ordered tool list
 - 📱 **Bottom-sheet menus** — optional Format / Insert sheets instead of a bar that scrolls off screen
 - ↩️ **Undo / redo**, placeholder text, live character / word / reading-time readouts
@@ -144,8 +147,15 @@ All options are optional:
 | `maxMedia` | int | `4` | Attachments allowed; `0` = no limit |
 | `countStyle` | string | `text` | `text` readout, or a `ring` counting down to `maxLength` |
 | `maxLengthMode` | string | `hard` | `hard` refuses the keystroke; `soft` allows the overrun, shades it and blocks save |
-| `avatar` | string | `''` | The author's picture beside the compose field — a url or a local path |
-| `customTools` | list | `[]` | Extra toolbar buttons: `id`, `icon`, optional `label`. Tapping emits `ToolTapped` |
+| `avatar` | string | `''` | The author's picture — a url or a local path |
+| `avatarPlacement` | string | `text` | `text` beside the writing, `header` beside Close and Save, `none` |
+| `toolbarAlign` | string | `leading` | `trailing` parks a short bar in the corner instead of the left edge |
+| `customTools` | list | `[]` | Extra toolbar buttons: `id`, `icon`, optional `label`, optional `sheet`. Tapping emits `ToolTapped` — unless it names a sheet, which the editor presents instead |
+| `accessories` | list | `[]` | Your own controls — see [Your own rows in the composer](#your-own-rows-in-the-composer) |
+| `sheets` | array | `[]` | Sheets the editor presents on your behalf — see [Your own sheets](#your-own-sheets) |
+| `triggers` | array\|false | `@` → mention, `#` → hashtag | Characters that start a lookup; `false` turns it off entirely |
+| `backgrounds` | array | `[]` | Colours a short post can be written ON — see [Post backgrounds](#post-backgrounds) |
+| `backgroundMaxLength` | int | `130` | Past this many characters a background is dropped |
 | `cancelMode` | string | `discard` | `discard` asks to throw the edits away; `draft` offers to keep them and emits `DraftRequested` |
 | `cancelStyle` | string | `text` | `text` shows "Cancel"; `icon` shows a ✕ |
 | `saveStyle` | string | `text` | `text` button, or a `filled` pill that dims until there is something to save |
@@ -157,8 +167,16 @@ All options are optional:
 Available tools for `toolbar` (this order is the `full` preset):
 `bold`, `italic`, `underline`, `strikethrough`, `h1`, `h2`, `h3`,
 `bulletList`, `orderedList`, `blockquote`, `link`, `code`, `textColor`,
-`highlight`, `image`, `video`, `file`, `poll`, `divider`, `clearFormat`.
+`highlight`, `image`, `camera`, `video`, `file`, `poll`, `divider`, `embed`,
+`clearFormat`.
 Undo/redo are always present and are not toolbar keys.
+
+**You are meant to take only what you need.** An explicit empty list draws no
+bar at all, and everything that costs something is opt-in: name no media tool
+and the picker, the uploader and `MediaRequested` never come into play; pass
+`triggers => false` and nothing watches your keystrokes. An editor opened with
+no options carries no media, no polls, no colours, no host controls and no
+lookups — which is what makes it usable as a plain text field.
 
 Toolbar presets:
 
@@ -212,18 +230,92 @@ WysiwygEditor::open($html, [
 | `…\Events\MediaEditRequested` | `string $kind`, `string $uploadId`, `string $source`, `?string $id` | User tapped edit on an attachment. Re-open your own picker |
 | `…\Events\DraftRequested` | `string $html`, `string $text`, `string $json`, `?string $id` | User backed out of a half-written document and chose to keep it (`cancelMode => 'draft'`) |
 | `…\Events\ToolTapped` | `string $tool`, `?string $id` | User tapped one of your own toolbar buttons |
-| `…\Events\AccessoryTapped` | `string $accessory`, `?string $id` | User tapped one of your own rows. Answer with `setAccessory()` |
+| `…\Events\AccessoryTapped` | `string $accessory`, `?string $id` | User tapped one of your own controls. Answer with `setAccessory()` |
+| `…\Events\SuggestionRequested` | `string $kind`, `string $trigger`, `string $query`, `?string $id` | User typed a trigger character. Answer with `suggestions()` |
+| `…\Events\SheetOptionPicked` | `string $sheet`, `string $option`, `?string $id` | User chose something from one of your declared sheets |
 
 All events live under `Vipertecpro\WysiwygEditor\Events\`.
 
-`$html` is the document in the normalised form below; `$text` is the same
-content as plain text — marks stripped, one line per block — handy for
-excerpts, search indexing and length checks.
+### What you actually receive
 
-`$json` is the **fidelity format**: the block document with block ids, poll
-options and upload state, none of which HTML can represent. Store `$json` when
-you need loss-free round-trips (media, polls, embeds); store `$html` to render.
-For a text-only document the two carry the same information.
+The same document arrives three ways. They are not alternatives to pick
+between — each answers a different question, and a real client usually sends
+more than one. A post with some words, a photo still uploading, a photo
+already uploaded and a poll produces exactly this:
+
+**`$html`** — to RENDER. Safe to publish as-is:
+
+```html
+<p>Shipping <strong>today</strong>.</p>
+<figure data-pending="u-1"><img alt="The harbour"></figure>
+<figure><img src="https://cdn.example.com/a.jpg" alt=""></figure>
+<figure data-poll="{…}"></figure>
+```
+
+Note what is **not** in there: the photo still uploading has no `src` at all. A
+device path must never leak into published markup, so the editor omits it and
+marks the figure `data-pending` instead.
+
+**`$text`** — to SEARCH and to excerpt. Marks stripped, one line per block.
+
+**`$json`** — CANONICAL. The only form carrying device paths, poll option ids,
+upload state and the background a post was written on:
+
+```json
+{"version":2,"background":"sunset","blocks":[
+  {"id":"","type":"p","runs":[
+    {"text":"Shipping ","marks":{}},
+    {"text":"today","marks":{"bold":true}},
+    {"text":".","marks":{}}]},
+  {"id":"","type":"image","localPath":"/var/mobile/…/IMG_0042.HEIC",
+   "alt":"The harbour","uploadId":"u-1"},
+  {"id":"","type":"image","src":"https://cdn.example.com/a.jpg"},
+  {"id":"","type":"poll","question":"Ship it?","durationMinutes":"1440",
+   "options":[{"id":"o1","label":"Yes"},{"id":"o2","label":"No"}]}]}
+```
+
+Store `$json` if the document should ever be **editable** again — re-opening
+from `$html` alone comes back without any photo whose upload had not finished,
+and without the colour the post was written on.
+
+### Saving text and attachments separately
+
+Most servers want the prose in one table and the files in another. The editor
+uploads nothing — the endpoint is yours, so the upload is too — and you should
+not have to learn the document format to find the files:
+
+```php
+#[On(ContentSaved::class)]
+public function onSaved(string $html, string $text, string $json): void
+{
+    $post = Http::withToken($token)
+        ->post('https://api.example.com/posts', [
+            'html' => $html,   // to render
+            'text' => $text,   // to search
+            'json' => $json,   // to re-open for editing
+        ])->json();
+
+    foreach (WysiwygEditor::attachments($json) as $file) {
+        if ($file['path'] === '') {
+            continue;          // already on your server; $file['url'] says where
+        }
+
+        Http::withToken($token)
+            ->attach('file', file_get_contents($file['path']), basename($file['path']))
+            ->post("https://api.example.com/posts/{$post['id']}/media", [
+                'kind' => $file['kind'],       // image | video | file
+                'alt' => $file['alt'],
+                'caption' => $file['caption'],
+                'uploadId' => $file['uploadId'],
+            ]);
+    }
+}
+```
+
+**Exactly one of `path` and `url` is ever filled**, so which to do next is
+never ambiguous: a device path means it still needs uploading, a url means it
+is already yours. Polls, dividers and embeds are not files and are not
+returned — they travel in the document itself.
 
 ### Validation
 
@@ -507,10 +599,176 @@ public function onAccessoryTapped(string $accessory): void
 }
 ```
 
-Each row takes `id` (reported back on tap), `label`, and optionally `icon` (one
-of the editor's own glyph names) and `value` (trailing text). A row without an
-`id` could never report a tap and one without a `label` would draw as a blank
-tappable strip — both are dropped rather than shown.
+Each control takes `id` (reported back on tap), `label`, and optionally:
+
+| Key | Meaning |
+| --- | --- |
+| `icon` | One of the editor's own glyph names |
+| `value` | Trailing text — the choice that was made |
+| `placement` | `row` under the media (default), or `header` beside Close and Save |
+| `style` | `row` full width, `chip` label + disclosure, `icon` a bare glyph. A header control defaults to `chip` |
+| `sheet` | Names a declared sheet to present instead of merely reporting the tap |
+
+A control without an `id` could never report a tap and one without a `label`
+would draw as a blank tappable strip — both are dropped rather than shown.
+
+**`header` is for the controls that belong beside the button that sends the
+post** — an audience picker decides who sees it, so it belongs next to Save,
+not below the fold. An `icon` control draws its `value` beside the glyph once
+it has one, so a schedule button can say *when* rather than looking identical
+before and after you use it.
+
+## Mentions and hashtags
+
+The editor watches for a trigger character and reports what follows it. **It
+has no directory of people and should not grow one** — who is mentionable
+depends entirely on who is asking, which only your app knows.
+
+```php
+use Vipertecpro\WysiwygEditor\Events\SuggestionRequested;
+
+WysiwygEditor::open($html, [
+    'triggers' => ['@' => 'mention', '#' => 'hashtag'],   // the default
+]);
+
+#[On(SuggestionRequested::class)]
+public function onSuggestionRequested(string $kind, string $trigger, string $query = ''): void
+{
+    // Fires on every keystroke, so debounce or cap it before hitting an API.
+    $matches = User::query()
+        ->whereLike('name', "%{$query}%")
+        ->limit(5)
+        ->get()
+        ->map(fn (User $u) => [
+            'id' => (string) $u->id,      // required — becomes the entity reference
+            'label' => $u->name,          // required — what is inserted
+            'detail' => $u->headline,     // optional second line
+            'avatar' => $u->avatar_url,   // optional picture
+        ]);
+
+    WysiwygEditor::suggestions($query, $matches->all());
+}
+```
+
+Picking one writes a **link**, not styled text, so the saved post says WHICH
+person was named rather than merely that some words are blue:
+
+```html
+<p>Shipping this with <a href="mention:u2">@Grace Hopper</a> </p>
+```
+
+The href is `{kind}:{id}` — the `kind` you declared and the `id` you returned.
+Render it however you like; the editor only guarantees it survives the round
+trip, including back into an edit.
+
+Turn it off entirely with `'triggers' => false`, and nothing watches
+keystrokes at all.
+
+## Post backgrounds
+
+A few words held large and centred on a colour, the way a social composer
+does it — the post stops being a paragraph and becomes a card.
+
+```php
+WysiwygEditor::open($html, [
+    'backgrounds' => [
+        'ocean' => ['from' => '#2563EB', 'to' => '#0EA5E9'],
+        'sunset' => ['from' => '#F97316', 'to' => '#DB2777'],
+        'blush' => ['from' => '#FBCFE8', 'to' => '#FDE68A', 'textColor' => '#1F2937'],
+    ],
+    'backgroundMaxLength' => 130,
+]);
+```
+
+`from` alone is a flat colour; adding `to` makes it a gradient. `textColor`
+defaults to white. **Which colours exist is your decision** — the editor ships
+no palette, because that is a brand decision.
+
+The swatches are offered only while the post is still short and has no media:
+a paragraph set in 28pt white on orange is unreadable, and a photo already IS
+the card.
+
+A background belongs to the DOCUMENT, not to a run inside it, so it
+round-trips in both forms:
+
+```html
+<div data-background="sunset"><p>Big news</p></div>
+```
+```json
+{"version":2,"background":"sunset","blocks":[…]}
+```
+
+It is in the HTML as well as the JSON on purpose: for a post like this the
+background IS the post, and a host rendering saved markup would otherwise show
+a few words in plain black on white.
+
+## Your own sheets
+
+The editor owns the screen — on iOS it owns its own window — so **a sheet you
+drew would open behind it**. That is not something an app should have to work
+around, so you declare the options and the editor presents them, then reports
+the pick.
+
+```php
+use Vipertecpro\WysiwygEditor\Events\SheetOptionPicked;
+
+WysiwygEditor::open($html, [
+    'accessories' => [
+        ['id' => 'audience', 'label' => 'Anyone', 'placement' => 'header', 'sheet' => 'audience'],
+    ],
+    'customTools' => [
+        ['id' => 'more', 'icon' => 'plus', 'label' => 'More', 'sheet' => 'compose'],
+    ],
+    'sheets' => [
+        'audience' => [
+            'title' => 'Who can see your post?',
+            'options' => [
+                ['id' => 'public', 'label' => 'Public', 'detail' => 'Anyone', 'icon' => 'globe', 'selected' => true],
+                ['id' => 'friends', 'label' => 'Friends', 'icon' => 'people'],
+            ],
+        ],
+        'compose' => [
+            'style' => 'grid',    // circular tiles, three across
+            'options' => [
+                ['id' => 'media', 'label' => 'Media', 'icon' => 'image'],
+                ['id' => 'poll', 'label' => 'Poll', 'icon' => 'poll'],
+            ],
+        ],
+    ],
+]);
+
+#[On(SheetOptionPicked::class)]
+public function onPicked(string $sheet, string $option): void
+{
+    match ([$sheet, $option]) {
+        ['compose', 'media'] => $this->pickAPhoto(),          // your picker
+        ['compose', 'poll'] => WysiwygEditor::insertTool('poll'),
+        default => $this->remember($sheet, $option),
+    };
+
+    // Write the answer back so the control that opened it shows the choice.
+    WysiwygEditor::setAccessory('audience', 'Friends', 'Friends');
+}
+```
+
+`style` is `list` (rows with a tick) or `grid` (circular tiles). What the
+options MEAN stays yours; the editor draws them and gets out of the way.
+
+**Offer nothing you cannot honour.** A tile that reports a tap nobody acts on
+is a dead control, and it looks exactly like a bug.
+
+### Running one of the editor's own tools
+
+A composer whose toolbar is a sheet of your own still needs to say "insert a
+poll":
+
+```php
+WysiwygEditor::insertTool('poll');      // or divider, image, camera, video, file
+```
+
+Only tools the editor actually owns; anything else is ignored, so a typo does
+nothing rather than something surprising. Formatting marks are not available
+this way — they apply to a selection, and a sheet has no idea what is selected.
 
 ## Polls
 

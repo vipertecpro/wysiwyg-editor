@@ -5,6 +5,60 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-30
+
+### Added
+
+- **Mentions and hashtags.** The editor watches for a trigger character and
+  reports what follows it through `SuggestionRequested`; the host answers with
+  `suggestions()`. Picking one writes a **link** carrying the entity id, not
+  styled text — so the saved document says which person was named, and survives
+  back into an edit. `triggers` is configurable and `false` turns it off.
+- **Host sheets.** The editor owns its own window, so a sheet the host drew
+  would open behind it. `sheets` declares the options — as a `list` with a tick
+  or a `grid` of tiles — the editor presents them, and `SheetOptionPicked`
+  reports the choice. An accessory or a custom tool names one with `sheet`.
+- **`WysiwygEditor::insertTool()`** — run one of the editor's own tools from
+  outside the toolbar, for a composer whose toolbar is a host sheet. Without it
+  the host could offer a tool it had no way to trigger.
+- **`WysiwygEditor::attachments()`** — the files a document carries, pulled out
+  of the saved JSON. Most servers want the prose in one table and the files in
+  another; the editor uploads nothing, so this is the split. Exactly one of
+  `path` and `url` is filled, so which to do next is unambiguous.
+- **Post backgrounds.** A few words held large and centred on a colour, the way
+  a social composer does it. `backgrounds` declares them — the editor ships no
+  palette, because that is a brand decision — and the choice round-trips in the
+  markup and the JSON both. Dropped past `backgroundMaxLength`, and never
+  offered alongside media.
+- **Accessory `placement` and `style`.** A control can sit in the header beside
+  Close and Save rather than in a row under the media, drawn as a `chip` or a
+  bare `icon`. An icon control shows its `value` once it has one, so a schedule
+  button can say *when*.
+- **`toolbarAlign`** — park a short bar in the corner instead of at the leading
+  edge. **`avatarPlacement`** — `text`, `header` or `none`.
+- Host-facing glyphs for an app's own controls: `clock`, `plus`, `globe`,
+  `people`, `calendar`, `briefcase`, `star`, `document`, `chevronDown`.
+
+### Changed
+
+- **A cap no longer conjures a counter.** `counts` decides what the writer is
+  told; `maxLength` decides when Save refuses. A composer can have a 3000
+  character allowance and show nothing. **If you relied on `maxLength` alone to
+  draw an `n/limit` readout, add `'counts' => ['characters']`.**
+
+### Fixed
+
+- Two glyphs were drawn with SVG arcs, which neither path parser implements — a
+  clock face rendered as a stray stroke. Rewritten as cubics, with a test that
+  refuses anything but `M`, `L`, `C` and `Z`.
+- A host sheet opened under the keyboard: Android kept the IME up, and so did
+  iOS once the editor had taken focus.
+- Android drew the avatar twice when it was placed in the header, and held a
+  post written on a colour at the top of the card where iOS centred it.
+- The iOS parity harness sliced out a region that no longer compiled, ran
+  nothing, and reported success. Both runners now count the checks that
+  executed and refuse anything under sixty.
+
 ## [0.4.0] - 2026-07-30
 
 ### Added
