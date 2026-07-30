@@ -60,6 +60,12 @@
             "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.SetAccessory",
             "ios": "WysiwygEditorFunctions.SetAccessory",
             "description": "Update a host accessory row in the open editor — its label, value or icon"
+        },
+        {
+            "name": "WysiwygEditor.Suggestions",
+            "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.Suggestions",
+            "ios": "WysiwygEditorFunctions.Suggestions",
+            "description": "Answer a SuggestionRequested with the people or tags the host found"
         }
     ],
     "android": {
@@ -96,7 +102,8 @@
         "Vipertecpro\\WysiwygEditor\\Events\\MediaEditRequested",
         "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped",
         "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested",
-        "Vipertecpro\\WysiwygEditor\\Events\\ToolTapped"
+        "Vipertecpro\\WysiwygEditor\\Events\\ToolTapped",
+        "Vipertecpro\\WysiwygEditor\\Events\\SuggestionRequested"
     ],
     "service_provider": "Vipertecpro\\WysiwygEditor\\WysiwygEditorServiceProvider",
     "hooks": {

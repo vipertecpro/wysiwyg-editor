@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static void uploadProgress(string $uploadId, float $fraction)
  * @method static void uploadCompleted(string $uploadId, string $url)
  * @method static void uploadFailed(string $uploadId, string $message = '')
+ * @method static void suggestions(string $query, array $suggestions)
  * @method static void setAccessory(string $accessory, string $label = '', string $value = '')
  * @method static void preview(string $kind, string $source, string $caption = '')
  * @method static string toMarkdown(string $json)

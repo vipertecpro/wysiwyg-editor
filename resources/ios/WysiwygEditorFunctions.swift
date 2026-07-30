@@ -91,6 +91,23 @@ enum WysiwygEditorFunctions {
         }
     }
 
+    /// The host's answer to a SuggestionRequested.
+    class Suggestions: BridgeFunction {
+        func execute(parameters: [String: Any]) throws -> [String: Any] {
+            let query = parameters["query"] as? String ?? ""
+            let rows = (parameters["suggestions"] as? [[String: Any]]) ?? []
+
+            DispatchQueue.main.async {
+                WysiwygEditorFunctions.live?.showSuggestions(
+                    query: query,
+                    suggestions: rows.map(WysiwygSuggestion.init)
+                )
+            }
+
+            return [:]
+        }
+    }
+
     /// Update one host row while the editor is open.
     class SetAccessory: BridgeFunction {
         func execute(parameters: [String: Any]) throws -> [String: Any] {
@@ -127,6 +144,7 @@ private enum WysiwygEvents {
     static let accessoryTapped = "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
     static let draftRequested = "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested"
     static let toolTapped = "Vipertecpro\\WysiwygEditor\\Events\\ToolTapped"
+    static let suggestionRequested = "Vipertecpro\\WysiwygEditor\\Events\\SuggestionRequested"
     static let changed = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
 }
 
@@ -256,6 +274,8 @@ struct WysiwygConfig {
     let customTools: [WysiwygCustomTool]
     /// The author's picture, beside what they are writing.
     let avatar: String
+    /// Trigger character -> the `kind` reported with it. Empty turns it off.
+    let triggers: [String: String]
     let typography: WysiwygTypography
     let spacing: WysiwygSpacing
     let validation: [String: Any]
@@ -303,6 +323,7 @@ struct WysiwygConfig {
         accessories = ((p["accessories"] as? [[String: Any]]) ?? []).map(WysiwygAccessory.init)
         customTools = ((p["customTools"] as? [[String: Any]]) ?? []).map(WysiwygCustomTool.init)
         avatar = p["avatar"] as? String ?? ""
+        triggers = p["triggers"] as? [String: String] ?? [:]
         typography = WysiwygTypography(p["typography"] as? [String: Any])
         spacing = WysiwygSpacing(named: p["spacing"] as? String ?? "comfortable")
         validation = p["validation"] as? [String: Any] ?? [:]
@@ -1457,6 +1478,21 @@ struct JsonScanner {
  a scheduler should do — those are the app's features, backed by the app's
  services.
  */
+/// One person or tag the host offered in answer to a query.
+struct WysiwygSuggestion: Identifiable {
+    let id: String
+    let label: String
+    let detail: String
+    let avatar: String
+
+    init(_ p: [String: Any]) {
+        id = p["id"] as? String ?? ""
+        label = p["label"] as? String ?? ""
+        detail = p["detail"] as? String ?? ""
+        avatar = p["avatar"] as? String ?? ""
+    }
+}
+
 struct WysiwygCustomTool: Identifiable {
     let id: String
     let icon: String
@@ -2423,6 +2459,41 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         didChangeExternally()
     }
 
+    /// Swap a range for text carrying a link mark — how a mention is stored.
+    ///
+    /// The link is the entity reference, so what the host gets back says which
+    /// person or tag was chosen, not merely that some words are blue.
+    func replaceWithEntity(range: NSRange, text: String, href: String) {
+        guard let tv = textView, let storage = self.storage,
+              range.location >= 0, NSMaxRange(range) <= storage.length else { return }
+
+        var marks = MarkSet()
+        marks.link = href
+
+        // The trailing space must sit OUTSIDE the link, or the underline runs
+        // past the name and the saved href covers a space nobody clicked.
+        let entity = NSMutableAttributedString(
+            string: text,
+            attributes: styler.attributes(block: activeBlock, marks: marks)
+        )
+        entity.append(NSAttributedString(
+            string: " ",
+            attributes: styler.attributes(block: activeBlock, marks: MarkSet())
+        ))
+
+        isMutating = true
+        storage.replaceCharacters(in: range, with: entity)
+        isMutating = false
+
+        // Past the trailing space, with the link mark dropped — otherwise
+        // everything typed next joins the mention.
+        let caret = range.location + entity.length
+        tv.selectedRange = NSRange(location: caret, length: 0)
+        tv.typingAttributes = styler.attributes(block: activeBlock, marks: MarkSet())
+
+        didChangeExternally()
+    }
+
     func undo() {
         textView?.undoManager?.undo()
         didChangeExternally()
@@ -2733,6 +2804,107 @@ final class WysiwygDocumentModel: ObservableObject {
         accessories[index].value = value
     }
 
+    // MARK: suggestions
+
+    /// What the host offered for the query currently being typed.
+    @Published var suggestions: [WysiwygSuggestion] = []
+    /// The live query, or nil when no trigger is open.
+    @Published var suggestionQuery: SuggestionQuery?
+
+    /// A trigger the user typed and is still writing after.
+    struct SuggestionQuery: Equatable {
+        let kind: String
+        let trigger: String
+        /// Where the trigger character sits, so the whole thing can be replaced.
+        let start: Int
+        var text: String
+    }
+
+    func showSuggestions(query: String, suggestions rows: [WysiwygSuggestion]) {
+        // An answer to a query the user has already moved past is noise.
+        guard suggestionQuery?.text == query else { return }
+
+        suggestions = rows
+    }
+
+    /// Look at where the caret is and decide whether a trigger is open.
+    ///
+    /// Re-derived from the text on every change rather than tracked as state,
+    /// because the caret can move anywhere — tapping elsewhere, selecting,
+    /// undoing — and state would go stale in all three cases.
+    func refreshSuggestionQuery(for model: WysiwygEditorModel) {
+        guard !config.triggers.isEmpty, let tv = model.textView else {
+            clearSuggestions()
+
+            return
+        }
+
+        let text = tv.textStorage.string as NSString
+        let caret = tv.selectedRange.location
+
+        guard tv.selectedRange.length == 0, caret <= text.length else {
+            clearSuggestions()
+
+            return
+        }
+
+        // Walk back to the trigger. A space or a newline ends the query, so
+        // "email me @ the office" never becomes a lookup.
+        var index = caret
+        while index > 0 {
+            let character = text.substring(with: NSRange(location: index - 1, length: 1))
+
+            if character == " " || character == "\n" || character == "\u{00A0}" {
+                break
+            }
+
+            if let kind = config.triggers[character] {
+                let query = text.substring(with: NSRange(location: index, length: caret - index))
+                let found = SuggestionQuery(kind: kind, trigger: character,
+                                            start: index - 1, text: query)
+
+                if suggestionQuery != found {
+                    suggestionQuery = found
+                    var payload: [String: Any] = [
+                        "kind": kind, "trigger": character, "query": query,
+                    ]
+                    if let id = config.id { payload["id"] = id }
+                    LaravelBridge.shared.send?(WysiwygEvents.suggestionRequested, payload)
+                }
+
+                return
+            }
+
+            index -= 1
+        }
+
+        clearSuggestions()
+    }
+
+    func clearSuggestions() {
+        if suggestionQuery != nil { suggestionQuery = nil }
+        if !suggestions.isEmpty { suggestions = [] }
+    }
+
+    /// Replace the trigger and its query with a linked entity.
+    ///
+    /// A link, not styled text: the mention has to survive the round trip, and
+    /// the host's renderer needs to know what it points at.
+    func applySuggestion(_ suggestion: WysiwygSuggestion, to model: WysiwygEditorModel) {
+        guard let query = suggestionQuery, let tv = model.textView else { return }
+
+        let length = query.text.count + 1   // the trigger plus what follows it
+        let range = NSRange(location: query.start, length: min(length, tv.textStorage.length - query.start))
+
+        model.replaceWithEntity(
+            range: range,
+            text: query.trigger + suggestion.label,
+            href: query.kind + ":" + suggestion.id
+        )
+
+        clearSuggestions()
+    }
+
     /// The auto-save seam: emit ContentChanged once the user stops typing, so
     /// the host can persist a draft without the editor owning drafts itself.
     /// Off unless `changeDebounce` > 0.
@@ -2991,6 +3163,14 @@ private struct EditorScreen: View {
                     MediaStrip(document: document, theme: theme,
                                onEdit: requestMediaEdit,
                                onDescribe: { describing = $0 })
+                }
+
+                // The lookup, directly above the toolbar: a picker has to be
+                // there to stay reachable while typing continues.
+                if !document.suggestions.isEmpty, let focused = document.focused {
+                    SuggestionList(suggestions: document.suggestions, theme: theme) {
+                        document.applySuggestion($0, to: focused)
+                    }
                 }
 
                 // The host's own rows, under the media and above the counter —
@@ -3301,7 +3481,10 @@ private struct EditorScreen: View {
                     height: heightBinding(entry.id),
                     autoFocus: entry.id == firstTextId,
                     onFocus: { document.focused = model },
-                    onChange: { document.segmentChanged() },
+                    onChange: {
+                        document.segmentChanged()
+                        document.refreshSuggestionQuery(for: model)
+                    },
                     onBackspaceAtStart: { document.handleBackspaceAtStart(entryId: entry.id) }
                 )
                 .frame(maxWidth: .infinity)
@@ -3670,6 +3853,62 @@ private struct AccessoryRows: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Suggestions
+
+/**
+ The people or tags the host found, above the toolbar.
+
+ Sits between the document and the keyboard, which is where a picker has to be
+ to stay reachable one-handed while typing continues.
+ */
+private struct SuggestionList: View {
+    let suggestions: [WysiwygSuggestion]
+    let theme: WysiwygTheme
+    let onPick: (WysiwygSuggestion) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ForEach(suggestions) { suggestion in
+                    Button {
+                        onPick(suggestion)
+                    } label: {
+                        HStack(spacing: 12) {
+                            if !suggestion.avatar.isEmpty {
+                                AvatarView(source: suggestion.avatar, theme: theme)
+                                    .frame(width: 32, height: 32)
+                            }
+
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(suggestion.label)
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundColor(theme.textColor)
+
+                                if !suggestion.detail.isEmpty {
+                                    Text(suggestion.detail)
+                                        .font(.system(size: 13))
+                                        .foregroundColor(theme.textColor.opacity(0.55))
+                                        .lineLimit(1)
+                                }
+                            }
+
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(height: 48)
+                        .contentShape(Rectangle())
+                    }
+                }
+            }
+        }
+        // Tall enough for a few answers, short enough to leave the document
+        // visible — you are still writing a sentence around the mention.
+        .frame(maxHeight: 208)
+        .background(theme.backgroundColor)
+        .overlay(Rectangle().fill(theme.textColor.opacity(0.12)).frame(height: 0.5), alignment: .top)
     }
 }
 

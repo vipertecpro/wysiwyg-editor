@@ -2,8 +2,10 @@
 
 namespace Vipertecpro\WysiwygEditor;
 
+use Nativephp\NativeUi\Theme;
 use Vipertecpro\WysiwygEditor\Events\ContentSaved;
 use Vipertecpro\WysiwygEditor\Events\EditCancelled;
+use Vipertecpro\WysiwygEditor\Events\MediaRequested;
 
 /**
  * PHP entry point for the native WYSIWYG editor.
@@ -201,6 +203,23 @@ class WysiwygEditor
     public const DEFAULT_MAX_MEDIA = 4;
 
     /**
+     * Characters that start a lookup, and what each one means.
+     *
+     * Typing one of these begins a query: everything typed after it, up to a
+     * space, is sent to the host as {@see Events\SuggestionRequested}. The host
+     * searches whatever it likes — its own users, its own tags, an API — and
+     * answers with {@see WysiwygEditor::suggestions()}. Picking one inserts a
+     * LINKED entity, not just styled text, so the mention survives the round
+     * trip and your renderer knows what it points at.
+     *
+     * The editor deliberately has no directory of people and no tag index. It
+     * spots the trigger, collects the query and draws the answers.
+     *
+     * @var array<string, string> trigger => the `kind` reported with it
+     */
+    public const DEFAULT_TRIGGERS = ['@' => 'mention', '#' => 'hashtag'];
+
+    /**
      * Extra toolbar buttons the HOST defines.
      *
      * The editor cannot know what a GIF picker, a location tagger or a
@@ -228,7 +247,7 @@ class WysiwygEditor
      * a tap emits {@see Events\AccessoryTapped} with the row's `id` and the
      * host does whatever it likes, including calling back to change the label.
      *
-     * @var list<string>  the keys each row accepts
+     * @var list<string> the keys each row accepts
      */
     public const ACCESSORY_KEYS = ['id', 'label', 'icon', 'value'];
 
@@ -239,7 +258,7 @@ class WysiwygEditor
      * because the editor does not own a clock — it records how long the author
      * chose and the host turns that into a closing time when it publishes.
      *
-     * @var array<string, int>  label key => minutes
+     * @var array<string, int> label key => minutes
      */
     public const POLL_DURATIONS = [
         'pollDay1' => 1440,
@@ -310,7 +329,7 @@ class WysiwygEditor
      *             it away by default
      *
      * `draft` emits {@see Events\DraftRequested} with the document instead of
-     * {@see Events\EditCancelled}, because where a draft is STORED is the
+     * {@see EditCancelled}, because where a draft is STORED is the
      * host's business — the editor has no database and should not grow one.
      *
      * @var list<string>
@@ -426,7 +445,7 @@ class WysiwygEditor
      * four surfaces. Consulted per colour scheme so the editor follows the app
      * into dark mode without the developer configuring anything.
      *
-     * @var array<string, list<string>>  editor key => host tokens, best first
+     * @var array<string, list<string>> editor key => host tokens, best first
      */
     protected const HOST_TOKEN_MAP = [
         'background' => ['background', 'surface'],
@@ -524,7 +543,7 @@ class WysiwygEditor
     /**
      * Convert a saved document to Markdown.
      *
-     * Takes the `$json` from {@see Events\ContentSaved}, not the HTML — JSON
+     * Takes the `$json` from {@see ContentSaved}, not the HTML — JSON
      * is the canonical form, so the export does not inherit a loss that
      * already happened. See {@see Markdown} for what Markdown cannot carry.
      */
@@ -537,7 +556,7 @@ class WysiwygEditor
      * Insert a media block at the caret.
      *
      * Call this after your app has picked (and optionally edited) the media —
-     * see {@see \Vipertecpro\WysiwygEditor\Events\MediaRequested}. The block
+     * see {@see MediaRequested}. The block
      * appears immediately using `localPath`, so the user sees it before any
      * upload finishes.
      *
@@ -659,6 +678,7 @@ class WysiwygEditor
             'pollDurations' => self::POLL_DURATIONS,
             'accessories' => $this->resolveAccessories($options['accessories'] ?? []),
             'customTools' => $this->resolveCustomTools($options['customTools'] ?? []),
+            'triggers' => $this->resolveTriggers($options['triggers'] ?? null),
             // The author's picture, shown beside what they are writing — what
             // every social composer puts there. A url or a local path.
             'avatar' => (string) ($options['avatar'] ?? ''),
@@ -711,11 +731,11 @@ class WysiwygEditor
      */
     protected function hostFontFamily(): string
     {
-        if (! class_exists(\Nativephp\NativeUi\Theme::class)) {
+        if (! class_exists(Theme::class)) {
             return '';
         }
 
-        $tokens = \Nativephp\NativeUi\Theme::all();
+        $tokens = Theme::all();
 
         foreach ([$tokens['fonts']['default'] ?? null, $tokens['font-family'] ?? null] as $candidate) {
             if (is_string($candidate) && trim($candidate) !== '') {
@@ -745,6 +765,90 @@ class WysiwygEditor
     protected function pick(mixed $value, array $allowed): string
     {
         return in_array($value, $allowed, true) ? $value : $allowed[0];
+    }
+
+    /**
+     * Which characters start a lookup.
+     *
+     * `false` turns the feature off; an array replaces the defaults, so an app
+     * that only wants hashtags passes `['#' => 'hashtag']`. A trigger must be
+     * a SINGLE character — the editor watches one keystroke, not a prefix.
+     *
+     * @return array<string, string>
+     */
+    protected function resolveTriggers(mixed $triggers): array
+    {
+        if ($triggers === false) {
+            return [];
+        }
+
+        if (! is_array($triggers)) {
+            return self::DEFAULT_TRIGGERS;
+        }
+
+        $out = [];
+
+        foreach ($triggers as $character => $kind) {
+            $character = (string) $character;
+            $kind = trim((string) $kind);
+
+            if (mb_strlen($character) === 1 && $kind !== '') {
+                $out[$character] = $kind;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Answer a {@see Events\SuggestionRequested} with what the host found.
+     *
+     * Each suggestion needs an `id` (yours, echoed back on the resulting
+     * mention), a `label` to show and insert, and optionally `detail` — a
+     * headline, a handle, a follower count — plus `avatar`.
+     *
+     * Call with an empty list to say "nothing matched"; the editor closes the
+     * list rather than leaving a spinner.
+     *
+     * @param  array<int, array<string, mixed>>  $suggestions
+     */
+    public function suggestions(string $query, array $suggestions): void
+    {
+        if (! function_exists('nativephp_call')) {
+            return;
+        }
+
+        $rows = [];
+
+        foreach ($suggestions as $suggestion) {
+            if (! is_array($suggestion)) {
+                continue;
+            }
+
+            $id = trim((string) ($suggestion['id'] ?? ''));
+            $label = trim((string) ($suggestion['label'] ?? ''));
+
+            if ($id === '' || $label === '') {
+                continue;
+            }
+
+            $row = ['id' => $id, 'label' => $label];
+
+            foreach (['detail', 'avatar'] as $key) {
+                $value = trim((string) ($suggestion[$key] ?? ''));
+
+                if ($value !== '') {
+                    $row[$key] = $value;
+                }
+            }
+
+            $rows[] = $row;
+        }
+
+        nativephp_call('WysiwygEditor.Suggestions', json_encode([
+            'query' => $query,
+            'suggestions' => $rows,
+        ]));
     }
 
     /**
@@ -937,11 +1041,11 @@ class WysiwygEditor
      */
     protected function hostTheme(string $scheme): array
     {
-        if (! class_exists(\Nativephp\NativeUi\Theme::class)) {
+        if (! class_exists(Theme::class)) {
             return [];
         }
 
-        $tokens = \Nativephp\NativeUi\Theme::all()[$scheme] ?? [];
+        $tokens = Theme::all()[$scheme] ?? [];
 
         if (! is_array($tokens) || $tokens === []) {
             return [];

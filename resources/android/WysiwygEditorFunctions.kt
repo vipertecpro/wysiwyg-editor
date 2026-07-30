@@ -88,6 +88,7 @@ object WysiwygEditorFunctions {
     private const val EVENT_ACCESSORY = "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped"
     private const val EVENT_DRAFT = "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested"
     private const val EVENT_TOOL = "Vipertecpro\\WysiwygEditor\\Events\\ToolTapped"
+    private const val EVENT_SUGGESTION = "Vipertecpro\\WysiwygEditor\\Events\\SuggestionRequested"
 
     /** The four surfaces the editor colours. */
     val THEME_KEYS = listOf("background", "text", "accent", "highlight")
@@ -176,6 +177,8 @@ object WysiwygEditorFunctions {
         val accessories: List<WysiwygAccessory>,
         val customTools: List<WysiwygCustomTool>,
         val avatar: String,
+        /** Trigger character -> the `kind` reported with it. Empty turns it off. */
+        val triggers: Map<String, String>,
         val typography: WysiwygTypography,
         val spacing: WysiwygSpacing,
         val validation: Map<String, Any>,
@@ -198,6 +201,7 @@ object WysiwygEditorFunctions {
         fun insertMedia(kind: String, attrs: Map<String, String>)
         fun updateUpload(uploadId: String, state: String, src: String, message: String)
         fun setAccessory(id: String, label: String, value: String)
+        fun showSuggestions(query: String, rows: List<WysiwygSuggestion>)
     }
 
     /**
@@ -232,6 +236,18 @@ object WysiwygEditorFunctions {
             if (accessory.isNotEmpty()) {
                 activity.runOnUiThread { live?.setAccessory(accessory, label, value) }
             }
+
+            return emptyMap()
+        }
+    }
+
+    /** The host's answer to a SuggestionRequested. */
+    class Suggestions(private val activity: FragmentActivity) : BridgeFunction {
+        override fun execute(parameters: Map<String, Any>): Map<String, Any> {
+            val query = parameters["query"] as? String ?: ""
+            val rows = parseSuggestions(parameters["suggestions"])
+
+            activity.runOnUiThread { live?.showSuggestions(query, rows) }
 
             return emptyMap()
         }
@@ -312,6 +328,9 @@ object WysiwygEditorFunctions {
                 accessories = parseAccessories(parameters["accessories"]),
                 customTools = parseCustomTools(parameters["customTools"]),
                 avatar = parameters["avatar"] as? String ?: "",
+                triggers = parseStringMap(parameters["triggers"])
+                    .filterKeys { it.length == 1 }
+                    .filterValues { it.isNotEmpty() },
                 typography = parseTypography(parameters["typography"]),
                 spacing = WysiwygSpacing.named((parameters["spacing"] as? String) ?: "comfortable"),
                 validation = parseValidation(parameters["validation"]),
@@ -504,6 +523,9 @@ object WysiwygEditorFunctions {
                     onMediaEdit = { block -> requestMediaEdit(block, config.id) },
                     onAccessoryTapped = { accessory -> accessoryTapped(accessory, config.id) },
                     onCustomTool = { tool -> customToolTapped(tool, config.id) },
+                    onSuggestionRequested = { kind, trigger, query ->
+                        suggestionRequested(kind, trigger, query, config.id)
+                    },
                 )
             }
 
@@ -551,6 +573,17 @@ object WysiwygEditorFunctions {
                 id?.let { put("id", it) }
             }
             NativeActionCoordinator.dispatchEvent(activity, EVENT_TOOL, payload.toString())
+        }
+
+        /** A trigger character is open — ask the host who matches. */
+        private fun suggestionRequested(kind: String, trigger: String, query: String, id: String?) {
+            val payload = JSONObject().apply {
+                put("kind", kind)
+                put("trigger", trigger)
+                put("query", query)
+                id?.let { put("id", it) }
+            }
+            NativeActionCoordinator.dispatchEvent(activity, EVENT_SUGGESTION, payload.toString())
         }
 
         /** One of the host's own rows was tapped. */
@@ -668,6 +701,35 @@ private fun parseCustomTools(any: Any?): List<WysiwygCustomTool> {
             null
         } else {
             WysiwygCustomTool(id, icon, map["label"].orEmpty())
+        }
+    }
+}
+
+/** One person or tag the host offered in answer to a query. */
+class WysiwygSuggestion(
+    val id: String,
+    val label: String,
+    val detail: String,
+    val avatar: String,
+)
+
+internal fun parseSuggestions(any: Any?): List<WysiwygSuggestion> {
+    val rows = when (any) {
+        is List<*> -> any
+        is JSONArray -> (0 until any.length()).map { any.opt(it) }
+        else -> emptyList<Any?>()
+    }
+
+    return rows.mapNotNull { row ->
+        val map = parseStringMap(row)
+        val id = map["id"].orEmpty()
+        val label = map["label"].orEmpty()
+
+        // Without both there is nothing to show and nothing to link to.
+        if (id.isEmpty() || label.isEmpty()) {
+            null
+        } else {
+            WysiwygSuggestion(id, label, map["detail"].orEmpty(), map["avatar"].orEmpty())
         }
     }
 }
@@ -3011,6 +3073,63 @@ internal class EditorController(
     /** Current link under the cursor, for pre-filling the link dialog. */
     fun currentLink(): String? = activeMarks().link
 
+    /** Where the caret sits, or -1 when there is a selection instead. */
+    fun caretOrNull(): Int {
+        val start = editText.selectionStart
+
+        return if (start >= 0 && start == editText.selectionEnd) start else -1
+    }
+
+    /** What is in this segment right now, for trigger detection. */
+    fun textNow(): CharSequence = editText.text
+
+    /**
+     * Swap a range for text carrying a link mark — how a mention is stored.
+     *
+     * The link is the entity reference, so what the host gets back says which
+     * person or tag was chosen, not merely that some words are blue.
+     */
+    fun replaceWithEntity(start: Int, end: Int, text: String, href: String) {
+        val editable = editText.text
+        val from = start.coerceIn(0, editable.length)
+        val to = end.coerceIn(from, editable.length)
+
+        pushUndoForced()
+        programmatic = true
+        try {
+            editable.replace(from, to, text + " ")
+
+            // Whatever the platform copied onto the inserted range goes, so the
+            // mention cannot inherit the styling of the word before it.
+            val stop = (from + text.length + 1).coerceAtMost(editable.length)
+            for (span in editable.getSpans(from, stop, Any::class.java)) {
+                if (span !is SemanticSpan) continue
+                val spanStart = editable.getSpanStart(span)
+                val spanEnd = editable.getSpanEnd(span)
+                editable.removeSpan(span)
+                if (spanStart < from) reapplySingle(editable, span, spanStart, from)
+                if (spanEnd > stop) reapplySingle(editable, span, stop, spanEnd)
+            }
+
+            // The trailing space stays OUTSIDE the link, or the underline runs
+            // past the name and the saved href covers a space nobody clicked.
+            Styler.applyMarks(
+                editable, from, from + text.length, MarkSet(link = href), theme, night,
+            )
+
+            // Past the space, with no marks armed — otherwise everything typed
+            // next joins the mention.
+            pendingMarks = null
+            pendingAnchor = -1
+            editText.setSelection(stop)
+        } finally {
+            programmatic = false
+        }
+
+        emit()
+        onStateChanged()
+    }
+
     private fun applyMarksToSelection(marks: MarkSet) {
         val text = editText.text
         val start = editText.selectionStart.coerceIn(0, text.length)
@@ -3241,6 +3360,15 @@ internal class EditorController(
  */
 internal class SegmentEntry(val id: Int, val segment: Segment)
 
+/** A trigger the user typed and is still writing after. */
+internal data class SuggestionQuery(
+    val kind: String,
+    val trigger: String,
+    /** Where the trigger character sits, so the whole thing can be replaced. */
+    val start: Int,
+    val text: String,
+)
+
 // ── Palettes (normative — identical on iOS) ─────────────────────────────────
 
 internal val TEXT_COLORS = listOf("#EF4444", "#F97316", "#EAB308", "#22C55E", "#3B82F6", "#A855F7")
@@ -3321,6 +3449,8 @@ internal fun EditorScreen(
     onAccessoryTapped: (String) -> Unit = {},
     /** One of the host's own toolbar buttons was tapped. */
     onCustomTool: (String) -> Unit = {},
+    /** A trigger character is open — ask the host who matches. */
+    onSuggestionRequested: (String, String, String) -> Unit = { _, _, _ -> },
 ) {
     val night = isSystemInDarkTheme()
     val theme = config.theme
@@ -3334,6 +3464,10 @@ internal fun EditorScreen(
     // Bumped on every edit / caret move so the toolbar re-reads active state.
     val revision = remember { mutableStateOf(0) }
     val palette = remember { mutableStateOf<String?>(null) }
+    /** What the host offered for the query currently being typed. */
+    val suggestions = remember { androidx.compose.runtime.mutableStateListOf<WysiwygSuggestion>() }
+    /** The live query, or null when no trigger is open. */
+    val suggestionQuery = remember { mutableStateOf<SuggestionQuery?>(null) }
     /** The host's rows, live — setAccessory edits these in place. */
     val accessories = remember {
         androidx.compose.runtime.mutableStateListOf<WysiwygAccessory>().also { it.addAll(config.accessories) }
@@ -3365,6 +3499,80 @@ internal fun EditorScreen(
             onDocumentChanged(out)
             length.value = out.sumOf { it.plainText.length }
             words.value = countWords(out)
+        }
+
+        /**
+         * Look at where the caret is and decide whether a trigger is open.
+         *
+         * Re-derived from the text on every change rather than tracked as
+         * state, because the caret can move anywhere — tapping elsewhere,
+         * selecting, undoing — and state would go stale in all three cases.
+         */
+        fun refreshSuggestionQuery(controller: EditorController?) {
+            val caret = controller?.caretOrNull() ?: -1
+
+            if (config.triggers.isEmpty() || controller == null || caret < 0) {
+                suggestionQuery.value = null
+                suggestions.clear()
+
+                return
+            }
+
+            val text = controller.textNow()
+
+            // Walk back to the trigger. A space or a newline ends the query, so
+            // "email me @ the office" never becomes a lookup.
+            var index = caret.coerceAtMost(text.length)
+            while (index > 0) {
+                val character = text[index - 1]
+
+                if (character == ' ' || character == '\n' || character == '\u00A0') {
+                    break
+                }
+
+                val kind = config.triggers[character.toString()]
+
+                if (kind != null) {
+                    val query = text.subSequence(index, caret).toString()
+                    val found = SuggestionQuery(kind, character.toString(), index - 1, query)
+
+                    if (suggestionQuery.value != found) {
+                        suggestionQuery.value = found
+                        suggestions.clear()
+                        onSuggestionRequested(kind, character.toString(), query)
+                    }
+
+                    return
+                }
+
+                index--
+            }
+
+            suggestionQuery.value = null
+            suggestions.clear()
+        }
+
+        /**
+         * Replace the trigger and its query with a linked entity.
+         *
+         * A link, not styled text: the mention has to survive the round trip,
+         * and the host's renderer needs to know what it points at.
+         */
+        fun applySuggestion(suggestion: WysiwygSuggestion) {
+            val query = suggestionQuery.value
+            val controller = focused.value
+
+            if (query != null && controller != null) {
+                controller.replaceWithEntity(
+                    start = query.start,
+                    end = query.start + query.text.length + 1,
+                    text = query.trigger + suggestion.label,
+                    href = query.kind + ":" + suggestion.id,
+                )
+            }
+
+            suggestionQuery.value = null
+            suggestions.clear()
         }
 
         /**
@@ -3566,6 +3774,15 @@ internal fun EditorScreen(
                         rebuildDocument()
                     }
 
+                    override fun showSuggestions(query: String, rows: List<WysiwygSuggestion>) {
+                        // An answer to a query the user has already moved past
+                        // is noise.
+                        if (suggestionQuery.value?.text != query) return
+
+                        suggestions.clear()
+                        suggestions.addAll(rows)
+                    }
+
                     override fun setAccessory(id: String, label: String, value: String) {
                     val index = accessories.indexOfFirst { it.id == id }
 
@@ -3742,14 +3959,24 @@ internal fun EditorScreen(
                                             editText = this,
                                             config = config,
                                             night = night,
-                                            onDocumentChanged = { rebuildDocument() },
+                                            onDocumentChanged = {
+                                                rebuildDocument()
+                                                // Typing happens where the focus
+                                                // is, which is the segment whose
+                                                // caret we want to look at.
+                                                refreshSuggestionQuery(focused.value)
+                                            },
                                             onStateChanged = { revision.value++ },
                                         )
                                         controller.attachWatcher()
                                         controllers[entry.id] = controller
                                         if (focused.value == null) focused.value = controller
 
-                                        onSelectionMoved = { controller.onCaretMoved(); revision.value++ }
+                                        onSelectionMoved = {
+                                            controller.onCaretMoved()
+                                            revision.value++
+                                            refreshSuggestionQuery(controller)
+                                        }
                                         controller.onBackspaceAtStart = {
                                             handleBackspaceAtStart(entry.id)
                                         }
@@ -3855,6 +4082,15 @@ internal fun EditorScreen(
                         palette.value = null
                         c?.refocus()
                     },
+                )
+            }
+
+            // ── Who matches what is being typed ─────────────────────────────────
+            if (suggestions.isNotEmpty()) {
+                SuggestionList(
+                    suggestions = suggestions,
+                    foreground = foreground,
+                    onPick = { applySuggestion(it) },
                 )
             }
 
@@ -4865,6 +5101,93 @@ private fun AvatarView(source: String, foreground: Color) {
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.size(40.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Who matches what is being typed, between the writing and the toolbar.
+ *
+ * Sits where a keyboard suggestion strip sits, for the same reason: it is
+ * about the word being typed, so it belongs against the keyboard, not floating
+ * over the text it would cover. Mirrors the iOS SuggestionList.
+ */
+@Composable
+private fun SuggestionList(
+    suggestions: List<WysiwygSuggestion>,
+    foreground: Color,
+    onPick: (WysiwygSuggestion) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 220.dp)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        suggestions.forEach { suggestion ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(suggestion) }
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
+            ) {
+                if (suggestion.avatar.isNotEmpty()) {
+                    SuggestionAvatar(suggestion.avatar, foreground)
+                }
+
+                Column {
+                    BasicText(
+                        text = suggestion.label,
+                        style = TextStyle(
+                            color = foreground,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        ),
+                    )
+
+                    if (suggestion.detail.isNotEmpty()) {
+                        BasicText(
+                            text = suggestion.detail,
+                            style = TextStyle(
+                                color = foreground.copy(alpha = 0.5f),
+                                fontSize = 13.sp,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuggestionAvatar(source: String, foreground: Color) {
+    val bitmap = androidx.compose.runtime.remember(source) {
+        androidx.compose.runtime.mutableStateOf<android.graphics.Bitmap?>(null)
+    }
+
+    LaunchedEffect(source) {
+        bitmap.value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            decodeMediaImage(source, 120)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(foreground.copy(alpha = 0.1f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        bitmap.value?.let { image ->
+            Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(32.dp),
             )
         }
     }
