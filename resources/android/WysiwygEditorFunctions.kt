@@ -215,6 +215,7 @@ object WysiwygEditorFunctions {
         fun setAccessory(id: String, label: String, value: String)
         fun showSuggestions(query: String, rows: List<WysiwygSuggestion>)
         fun runTool(tool: String)
+        fun insertText(text: String)
     }
 
     /**
@@ -266,6 +267,25 @@ object WysiwygEditorFunctions {
             val tool = parameters["tool"] as? String ?: return emptyMap()
 
             activity.runOnUiThread { live?.runTool(tool) }
+
+            return emptyMap()
+        }
+    }
+
+    /**
+     * Write text at the caret, as if the user had typed it.
+     *
+     * The seam a HOST command needs: a slash command the editor does not own
+     * comes back as ToolTapped with the trigger already removed, and the app
+     * has to put something there.
+     */
+    class InsertText(private val activity: FragmentActivity) : BridgeFunction {
+        override fun execute(parameters: Map<String, Any>): Map<String, Any> {
+            val text = parameters["text"] as? String ?: return emptyMap()
+
+            if (text.isNotEmpty()) {
+                activity.runOnUiThread { live?.insertText(text) }
+            }
 
             return emptyMap()
         }
@@ -3519,6 +3539,22 @@ internal class EditorController(
     fun textNow(): CharSequence = editText.text
 
     /**
+     * Write text at the caret, inheriting the formatting there.
+     *
+     * Goes through the editable rather than replacing the whole buffer, so the
+     * spans around the caret carry into it — text an app inserted should look
+     * like the text around it.
+     */
+    fun insertTextAtCaret(text: String) {
+        val editable = editText.text
+        val at = editText.selectionStart.coerceIn(0, editable.length)
+
+        pushUndoForced()
+        editable.insert(at, text)
+        editText.setSelection((at + text.length).coerceAtMost(editable.length))
+    }
+
+    /**
      * Remove a range outright.
      *
      * What a COMMAND does with the "/h1" you typed: the trigger and the query
@@ -4348,6 +4384,10 @@ internal fun EditorScreen(
                      * inserting something. A formatting mark applies to a
                      * selection, and a host sheet has no idea what is selected.
                      */
+                    override fun insertText(text: String) {
+                        focused.value?.insertTextAtCaret(text)
+                    }
+
                     override fun runTool(tool: String) {
                         when (tool) {
                             "poll" -> {

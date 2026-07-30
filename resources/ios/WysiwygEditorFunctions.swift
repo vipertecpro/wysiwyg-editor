@@ -110,6 +110,25 @@ enum WysiwygEditorFunctions {
         }
     }
 
+    /**
+     Write text at the caret, as if the user had typed it.
+
+     The seam a HOST command needs: a slash command the editor does not own
+     comes back as ToolTapped with the trigger already removed, and the app has
+     to put something there.
+     */
+    class InsertText: BridgeFunction {
+        func execute(parameters: [String: Any]) throws -> [String: Any] {
+            guard let text = parameters["text"] as? String, !text.isEmpty else { return [:] }
+
+            DispatchQueue.main.async {
+                WysiwygEditorFunctions.live?.focused?.insertText(text)
+            }
+
+            return [:]
+        }
+    }
+
     /// The host's answer to a SuggestionRequested.
     class Suggestions: BridgeFunction {
         func execute(parameters: [String: Any]) throws -> [String: Any] {
@@ -2840,6 +2859,21 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         let safe = min(max(0, caretAt), tv.textStorage.length)
         tv.selectedRange = NSRange(location: safe, length: 0)
         didChangeExternally()
+    }
+
+    /**
+     Write text at the caret, inheriting the formatting there.
+
+     Goes through the input system rather than the storage so it lands in the
+     undo stack — text an app inserted should be as undoable as text the user
+     typed.
+     */
+    func insertText(_ text: String) {
+        guard let tv = textView else { return }
+
+        tv.insertText(text)
+        refreshState()
+        didChange()
     }
 
     /**

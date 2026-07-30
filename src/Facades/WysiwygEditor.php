@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static void uploadFailed(string $uploadId, string $message = '')
  * @method static void suggestions(string $query, array $suggestions)
  * @method static void insertTool(string $tool)
+ * @method static void insertText(string $text)
  * @method static void setAccessory(string $accessory, string $label = '', string $value = '')
  * @method static void preview(string $kind, string $source, string $caption = '')
  * @method static string toMarkdown(string $json)

@@ -1031,6 +1031,27 @@ class WysiwygEditor
         nativephp_call('WysiwygEditor.RunTool', json_encode(['tool' => $tool]));
     }
 
+    /**
+     * Write text at the caret, as if the user had typed it.
+     *
+     * The seam a HOST command needs. A slash command the editor does not own
+     * — `/date`, `/signature`, `/ticket` — comes back as
+     * {@see Events\ToolTapped} with the trigger already removed, and then the
+     * app has to put something there. Without this it could offer the command
+     * but never complete it.
+     *
+     * Inherits the formatting at the caret, because text you insert should
+     * look like the text around it.
+     */
+    public function insertText(string $text): void
+    {
+        if ($text === '' || ! function_exists('nativephp_call')) {
+            return;
+        }
+
+        nativephp_call('WysiwygEditor.InsertText', json_encode(['text' => $text]));
+    }
+
     public function suggestions(string $query, array $suggestions): void
     {
         if (! function_exists('nativephp_call')) {

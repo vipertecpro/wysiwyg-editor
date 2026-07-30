@@ -705,6 +705,21 @@ instruction, not text you meant to keep — and then:
 - a media tool asks you to pick, exactly as the toolbar button does
 - **anything else is yours**, and arrives as `ToolTapped` so you can act on it
 
+For that last case, `insertText()` writes at the caret as if the user had
+typed it — inheriting the formatting there, and landing in the undo stack:
+
+```php
+#[On(ToolTapped::class)]
+public function onToolTapped(string $tool): void
+{
+    if ($tool === 'date') {
+        WysiwygEditor::insertText(now()->format('j F Y'));
+    }
+}
+```
+
+A date format is a product decision, so the editor has no opinion about it.
+
 Which commands exist is your decision, the same way the directory behind `@`
 is. The editor supplies the mechanism, never the list.
 

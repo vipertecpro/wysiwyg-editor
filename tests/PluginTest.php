@@ -1376,3 +1376,24 @@ describe('Slash commands', function () {
         'no label' => [['id' => 'h1', 'tool' => 'h1']],
     ]);
 });
+
+describe('Inserting text', function () {
+    /**
+     * The seam a HOST command needs. `/date` comes back as ToolTapped with the
+     * trigger already deleted — without this the app could offer the command
+     * and never complete it.
+     */
+    it('sends the text a host wants written at the caret', function () {
+        $sent = captureCall(fn () => editor()->insertText('30 July 2026'));
+
+        expect($sent)->toBe(['text' => '30 July 2026']);
+    });
+
+    it('sends nothing for an empty string', function () {
+        $GLOBALS['nativephp_calls'] = [];
+
+        editor()->insertText('');
+
+        expect($GLOBALS['nativephp_calls'])->toBe([]);
+    });
+});

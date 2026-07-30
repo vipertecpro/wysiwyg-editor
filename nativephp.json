@@ -72,6 +72,12 @@
             "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.RunTool",
             "ios": "WysiwygEditorFunctions.RunTool",
             "description": "Ask the open editor to run one of its own tools, for a host sheet that replaces the toolbar"
+        },
+        {
+            "name": "WysiwygEditor.InsertText",
+            "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.InsertText",
+            "ios": "WysiwygEditorFunctions.InsertText",
+            "description": "Write text at the caret, for a host command the editor does not own"
         }
     ],
     "android": {
