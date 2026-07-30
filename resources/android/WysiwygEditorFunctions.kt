@@ -37,6 +37,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -89,6 +90,7 @@ object WysiwygEditorFunctions {
     private const val EVENT_DRAFT = "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested"
     private const val EVENT_TOOL = "Vipertecpro\\WysiwygEditor\\Events\\ToolTapped"
     private const val EVENT_SUGGESTION = "Vipertecpro\\WysiwygEditor\\Events\\SuggestionRequested"
+    private const val EVENT_SHEET = "Vipertecpro\\WysiwygEditor\\Events\\SheetOptionPicked"
 
     /** The four surfaces the editor colours. */
     val THEME_KEYS = listOf("background", "text", "accent", "highlight")
@@ -179,6 +181,12 @@ object WysiwygEditorFunctions {
         val avatar: String,
         /** Trigger character -> the `kind` reported with it. Empty turns it off. */
         val triggers: Map<String, String>,
+        /** Sheets the host declared, presented over the editor's own chrome. */
+        val sheets: List<WysiwygHostSheet>,
+        /** Which end of the bar the tools sit at. */
+        val toolbarAlign: String,
+        /** Where the author's picture goes: `text`, `header` or `none`. */
+        val avatarPlacement: String,
         val typography: WysiwygTypography,
         val spacing: WysiwygSpacing,
         val validation: Map<String, Any>,
@@ -202,6 +210,7 @@ object WysiwygEditorFunctions {
         fun updateUpload(uploadId: String, state: String, src: String, message: String)
         fun setAccessory(id: String, label: String, value: String)
         fun showSuggestions(query: String, rows: List<WysiwygSuggestion>)
+        fun runTool(tool: String)
     }
 
     /**
@@ -236,6 +245,23 @@ object WysiwygEditorFunctions {
             if (accessory.isNotEmpty()) {
                 activity.runOnUiThread { live?.setAccessory(accessory, label, value) }
             }
+
+            return emptyMap()
+        }
+    }
+
+    /**
+     * Run one of the editor's own tools, asked for from outside the toolbar.
+     *
+     * A composer whose toolbar is a host sheet — LinkedIn's "+" — still needs
+     * a way to say "insert a poll". Without this the host could offer a tool
+     * it had no way to trigger.
+     */
+    class RunTool(private val activity: FragmentActivity) : BridgeFunction {
+        override fun execute(parameters: Map<String, Any>): Map<String, Any> {
+            val tool = parameters["tool"] as? String ?: return emptyMap()
+
+            activity.runOnUiThread { live?.runTool(tool) }
 
             return emptyMap()
         }
@@ -331,6 +357,9 @@ object WysiwygEditorFunctions {
                 triggers = parseStringMap(parameters["triggers"])
                     .filterKeys { it.length == 1 }
                     .filterValues { it.isNotEmpty() },
+                sheets = parseSheets(parameters["sheets"]),
+                toolbarAlign = parameters["toolbarAlign"] as? String ?: "leading",
+                avatarPlacement = parameters["avatarPlacement"] as? String ?: "text",
                 typography = parseTypography(parameters["typography"]),
                 spacing = WysiwygSpacing.named((parameters["spacing"] as? String) ?: "comfortable"),
                 validation = parseValidation(parameters["validation"]),
@@ -526,6 +555,9 @@ object WysiwygEditorFunctions {
                     onSuggestionRequested = { kind, trigger, query ->
                         suggestionRequested(kind, trigger, query, config.id)
                     },
+                    onSheetOptionPicked = { sheetId, option ->
+                        sheetOptionPicked(sheetId, option, config.id)
+                    },
                 )
             }
 
@@ -573,6 +605,16 @@ object WysiwygEditorFunctions {
                 id?.let { put("id", it) }
             }
             NativeActionCoordinator.dispatchEvent(activity, EVENT_TOOL, payload.toString())
+        }
+
+        /** Something was chosen in one of the host's own sheets. */
+        private fun sheetOptionPicked(sheet: String, option: String, id: String?) {
+            val payload = JSONObject().apply {
+                put("sheet", sheet)
+                put("option", option)
+                id?.let { put("id", it) }
+            }
+            NativeActionCoordinator.dispatchEvent(activity, EVENT_SHEET, payload.toString())
         }
 
         /** A trigger character is open — ask the host who matches. */
@@ -682,7 +724,13 @@ private fun parseTypography(any: Any?): WysiwygTypography {
  * a scheduler should do — those are the app's features. Mirrors the Swift
  * WysiwygCustomTool.
  */
-class WysiwygCustomTool(val id: String, val icon: String, val label: String)
+class WysiwygCustomTool(
+    val id: String,
+    val icon: String,
+    val label: String,
+    /** A sheet to present instead of merely reporting the tap. */
+    val sheet: String = "",
+)
 
 private fun parseCustomTools(any: Any?): List<WysiwygCustomTool> {
     val rows = when (any) {
@@ -700,7 +748,7 @@ private fun parseCustomTools(any: Any?): List<WysiwygCustomTool> {
         if (id.isEmpty() || icon.isEmpty()) {
             null
         } else {
-            WysiwygCustomTool(id, icon, map["label"].orEmpty())
+            WysiwygCustomTool(id, icon, map["label"].orEmpty(), map["sheet"].orEmpty())
         }
     }
 }
@@ -739,7 +787,97 @@ class WysiwygAccessory(
     var label: String,
     var value: String,
     val icon: String,
+    /** `row` under the media, or `header` beside Close and Post. */
+    val placement: String,
+    /** `row`, `chip` (label + disclosure) or `icon` (a bare glyph). */
+    val style: String,
+    /** A sheet to present instead of merely reporting the tap. */
+    val sheet: String,
 )
+
+/**
+ * A sheet the HOST declared for the editor to present.
+ *
+ * The editor owns the screen, so a sheet the host drew would open behind it.
+ * Declaring it here is the only way the app's own choices can appear over the
+ * editor at all. What the options MEAN stays the app's business.
+ */
+class WysiwygHostSheet(
+    val id: String,
+    val title: String,
+    /** `list` for rows with a tick, `grid` for circular icon tiles. */
+    val style: String,
+    val options: List<Option>,
+) {
+    class Option(
+        val id: String,
+        val label: String,
+        val detail: String,
+        val icon: String,
+        val selected: Boolean,
+    )
+}
+
+private fun parseSheets(any: Any?): List<WysiwygHostSheet> {
+    val rows = when (any) {
+        is List<*> -> any
+        is JSONArray -> (0 until any.length()).map { any.opt(it) }
+        else -> emptyList<Any?>()
+    }
+
+    return rows.mapNotNull { row ->
+        val map = when (row) {
+            is Map<*, *> -> row
+            is JSONObject -> (0 until row.names()?.length().orZero()).associate { i ->
+                val key = row.names()!!.optString(i)
+                key to row.opt(key)
+            }
+            else -> return@mapNotNull null
+        }
+
+        val id = (map["id"] as? String).orEmpty()
+        val options = parseSheetOptions(map["options"])
+
+        if (id.isEmpty() || options.isEmpty()) {
+            null
+        } else {
+            WysiwygHostSheet(
+                id = id,
+                title = (map["title"] as? String).orEmpty(),
+                style = (map["style"] as? String) ?: "list",
+                options = options,
+            )
+        }
+    }
+}
+
+private fun Int?.orZero(): Int = this ?: 0
+
+private fun parseSheetOptions(any: Any?): List<WysiwygHostSheet.Option> {
+    val rows = when (any) {
+        is List<*> -> any
+        is JSONArray -> (0 until any.length()).map { any.opt(it) }
+        else -> emptyList<Any?>()
+    }
+
+    return rows.mapNotNull { row ->
+        val map = parseStringMap(row)
+        val id = map["id"].orEmpty()
+        val label = map["label"].orEmpty()
+
+        if (id.isEmpty() || label.isEmpty()) {
+            null
+        } else {
+            WysiwygHostSheet.Option(
+                id = id,
+                label = label,
+                detail = map["detail"].orEmpty(),
+                icon = map["icon"].orEmpty(),
+                selected = map["selected"] == "true" || map["selected"] == "1",
+            )
+        }
+    }
+}
 
 private fun parseAccessories(any: Any?): List<WysiwygAccessory> {
     val rows = when (any) {
@@ -758,7 +896,18 @@ private fun parseAccessories(any: Any?): List<WysiwygAccessory> {
         if (id.isEmpty() || label.isEmpty()) {
             null
         } else {
-            WysiwygAccessory(id, label, map["value"].orEmpty(), map["icon"].orEmpty())
+            val placement = if (map["placement"] == "header") "header" else "row"
+
+            WysiwygAccessory(
+                id = id,
+                label = label,
+                value = map["value"].orEmpty(),
+                icon = map["icon"].orEmpty(),
+                placement = placement,
+                style = map["style"].takeIf { it in listOf("row", "chip", "icon") }
+                    ?: if (placement == "header") "chip" else "row",
+                sheet = map["sheet"].orEmpty(),
+            )
         }
     }
 }
@@ -2141,6 +2290,20 @@ internal val TOOL_ICONS: Map<String, ToolIcon> = mapOf(
     "p" to ToolIcon("M4 6L20 6M4 12L20 12M4 18L14 18"),
     "poll" to ToolIcon("M6 19L6 11M12 19L12 5M18 19L18 14"),
     "divider" to ToolIcon("M4 12L20 12"),
+
+    // Glyphs a HOST can name for its own controls: an accessory chip, a
+    // sheet option, a tile in the grid a "+" opens onto. Not toolbar tools —
+    // the editor has nothing to do with a calendar — but it has to be able to
+    // DRAW one when an app asks.
+    "chevronDown" to ToolIcon("M6 9L12 15L18 9"),
+    "clock" to ToolIcon("M12 4C16.42 4 20 7.58 20 12C20 16.42 16.42 20 12 20C7.58 20 4 16.42 4 12C4 7.58 7.58 4 12 4ZM12 7.5L12 12L15.5 14"),
+    "plus" to ToolIcon("M12 5L12 19M5 12L19 12"),
+    "globe" to ToolIcon("M12 4C16.42 4 20 7.58 20 12C20 16.42 16.42 20 12 20C7.58 20 4 16.42 4 12C4 7.58 7.58 4 12 4ZM4 12L20 12M12 4C14 6.5 15 9 15 12C15 15 14 17.5 12 20C10 17.5 9 15 9 12C9 9 10 6.5 12 4", 1.6f),
+    "people" to ToolIcon("M9 5C10.66 5 12 6.34 12 8C12 9.66 10.66 11 9 11C7.34 11 6 9.66 6 8C6 6.34 7.34 5 9 5ZM3 19C3 16 5.7 14 9 14C12.3 14 15 16 15 19M16 5.5C17.7 5.9 19 7.3 19 9C19 10.7 17.7 12.1 16 12.5M17 14.5C19.4 15.2 21 16.9 21 19", 1.8f),
+    "calendar" to ToolIcon("M4 7L20 7L20 20L4 20ZM4 7L4 5L20 5L20 7M8 3L8 7M16 3L16 7M8 12L16 12M8 16L13 16", 1.8f),
+    "briefcase" to ToolIcon("M3 8L21 8L21 20L3 20ZM9 8L9 5C9 4.4 9.4 4 10 4L14 4C14.6 4 15 4.4 15 5L15 8M3 13L21 13", 1.8f),
+    "star" to ToolIcon("M12 4L14.5 9.5L20.5 10.2L16 14.2L17.3 20L12 17L6.7 20L8 14.2L3.5 10.2L9.5 9.5Z", 1.8f),
+    "document" to ToolIcon("M6 3L14 3L19 8L19 21L6 21ZM14 3L14 8L19 8M9 12L16 12M9 16L14 16", 1.8f),
     "embed" to ToolIcon("M4 6L20 6L20 18L4 18ZM10 10L14 12L10 14Z"),
     "link" to ToolIcon(
         "M9.5 12L14.5 12" +
@@ -3451,6 +3614,8 @@ internal fun EditorScreen(
     onCustomTool: (String) -> Unit = {},
     /** A trigger character is open — ask the host who matches. */
     onSuggestionRequested: (String, String, String) -> Unit = { _, _, _ -> },
+    /** Something was chosen in one of the host's own sheets. */
+    onSheetOptionPicked: (String, String) -> Unit = { _, _ -> },
 ) {
     val night = isSystemInDarkTheme()
     val theme = config.theme
@@ -3464,6 +3629,8 @@ internal fun EditorScreen(
     // Bumped on every edit / caret move so the toolbar re-reads active state.
     val revision = remember { mutableStateOf(0) }
     val palette = remember { mutableStateOf<String?>(null) }
+    /** The host's own sheet, if one is open. */
+    val hostSheet = remember { mutableStateOf<WysiwygHostSheet?>(null) }
     /** What the host offered for the query currently being typed. */
     val suggestions = remember { androidx.compose.runtime.mutableStateListOf<WysiwygSuggestion>() }
     /** The live query, or null when no trigger is open. */
@@ -3499,6 +3666,19 @@ internal fun EditorScreen(
             onDocumentChanged(out)
             length.value = out.sumOf { it.plainText.length }
             words.value = countWords(out)
+        }
+
+        /** Present the sheet the control names, or just report the tap. */
+        fun tapAccessory(accessory: WysiwygAccessory) {
+            val declared = config.sheets.firstOrNull { it.id == accessory.sheet }
+
+            if (accessory.sheet.isNotEmpty() && declared != null) {
+                hostSheet.value = declared
+
+                return
+            }
+
+            onAccessoryTapped(accessory.id)
         }
 
         /**
@@ -3712,8 +3892,24 @@ internal fun EditorScreen(
                         foreground.copy(alpha = 0.8f), FontWeight.Normal, onCancel,
                     )
                 }
+                // The author's picture up here rather than beside the text, so
+                // the writing runs the full width. LinkedIn's arrangement.
+                if (config.avatarPlacement == "header" && config.avatar.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    SuggestionAvatar(config.avatar, foreground)
+                }
+
+                accessories.filter { it.placement == "header" }.forEach { accessory ->
+                    Spacer(modifier = Modifier.width(8.dp))
+                    HeaderControl(accessory, foreground) { tapAccessory(accessory) }
+                }
+
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    if (config.title.isNotEmpty()) {
+                    // A title centred over host controls collides with them.
+                    if (config.title.isNotEmpty() &&
+                        accessories.none { it.placement == "header" } &&
+                        config.avatarPlacement != "header"
+                    ) {
                         BasicText(
                             text = config.title,
                             style = TextStyle(color = foreground, fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
@@ -3772,6 +3968,31 @@ internal fun EditorScreen(
                             SegmentEntry(nextId[0]++, Segment.Text(mutableListOf(WysiwygBlock("p")))),
                         )
                         rebuildDocument()
+                    }
+
+                    /**
+                     * Run a tool the host asked for by name.
+                     *
+                     * Only the ones that make sense from outside a toolbar:
+                     * inserting something. A formatting mark applies to a
+                     * selection, and a host sheet has no idea what is selected.
+                     */
+                    override fun runTool(tool: String) {
+                        when (tool) {
+                            "poll" -> {
+                                val poll = WysiwygBlock("poll")
+                                poll.attrs["question"] = ""
+                                poll.attrs["durationMinutes"] =
+                                    (config.pollDurations.firstOrNull()?.second ?: 1440).toString()
+                                repeat(config.pollMinOptions) {
+                                    poll.options.add(PollOption("o${it + 1}", ""))
+                                }
+                                insertBlock(poll)
+                            }
+                            "divider" -> insertBlock(WysiwygBlock("divider"))
+                            in WysiwygEditorFunctions.INSERT_TOOLS -> onRequestMedia(tool)
+                            else -> Unit
+                        }
                     }
 
                     override fun showSuggestions(query: String, rows: List<WysiwygSuggestion>) {
@@ -4043,8 +4264,11 @@ internal fun EditorScreen(
             }
 
             // ── The host's own rows, under the media ─────────────────────────────
-            if (accessories.isNotEmpty()) {
-                AccessoryRows(accessories, foreground, accent, onAccessoryTapped)
+            val rowAccessories = accessories.filter { it.placement != "header" }
+            if (rowAccessories.isNotEmpty()) {
+                AccessoryRows(rowAccessories, foreground, accent) { id ->
+                    accessories.firstOrNull { it.id == id }?.let { tapAccessory(it) }
+                }
             }
 
             // ── Counts readout ──────────────────────────────────────────────────
@@ -4110,8 +4334,18 @@ internal fun EditorScreen(
                 onRequestMedia = onRequestMedia,
                 onDocumentTool = { tool ->
                     if (tool.startsWith("custom:")) {
-                        // Nothing for the editor to do — say who was tapped.
-                        onCustomTool(tool.removePrefix("custom:"))
+                        val toolId = tool.removePrefix("custom:")
+                        val declared = config.customTools.firstOrNull { it.id == toolId }
+                        val target = config.sheets.firstOrNull { it.id == declared?.sheet }
+
+                        // A button that names a sheet opens it here rather than
+                        // making the host answer a tap and then ask us to draw
+                        // something.
+                        if (target != null) {
+                            hostSheet.value = target
+                        } else {
+                            onCustomTool(toolId)
+                        }
                     }
                     when (tool) {
                         "poll" -> {
@@ -4230,6 +4464,21 @@ internal fun EditorScreen(
             }
         }
 
+        // ── The host's own sheet ────────────────────────────────────────────
+        hostSheet.value?.let { declared ->
+            WysiwygSheet(
+                title = declared.title,
+                background = background,
+                foreground = foreground,
+                onDismiss = { hostSheet.value = null },
+            ) {
+                HostSheetBody(declared, foreground, accent) { option ->
+                    hostSheet.value = null
+                    onSheetOptionPicked(declared.id, option)
+                }
+            }
+        }
+
         // ── Poll composer ───────────────────────────────────────────────────
         pollDraft.value?.let { draft ->
             WysiwygSheet(
@@ -4268,7 +4517,9 @@ internal fun countsReadout(
 ): String {
     val parts = mutableListOf<String>()
 
-    if (config.maxLength > 0) {
+    // The cap turns the character count into "n/limit"; whether it is shown at
+    // all is still `counts`, so a composer can have a cap and no readout.
+    if (config.maxLength > 0 && config.counts.contains("characters")) {
         parts.add("$characters/${config.maxLength}")
     } else if (config.counts.contains("characters")) {
         parts.add(localized(config.strings, "countCharacters", "{n} chars", n = characters))
@@ -4618,6 +4869,14 @@ private fun ToolbarRow(
                 .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
+            // A short bar parked in the corner: two buttons at the leading edge
+            // of an empty row read as an oversight, which is why LinkedIn's
+            // composer puts its photo and "+" on the right.
+            horizontalArrangement = if (config.toolbarAlign == "trailing") {
+                androidx.compose.foundation.layout.Arrangement.End
+            } else {
+                androidx.compose.foundation.layout.Arrangement.Start
+            },
         ) {
             // Undo / redo lead the configured tools, unless turned off.
             if (config.history) {
@@ -5159,6 +5418,162 @@ private fun SuggestionList(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * The host's own options, as a list or a grid.
+ *
+ * A list is rows with a tick on the chosen one — an audience picker. A grid is
+ * circular tiles, which is what a composer's "+" opens onto. Neither knows
+ * what the options mean; that is the point. Mirrors the iOS HostSheetBody.
+ */
+@Composable
+private fun HostSheetBody(
+    sheet: WysiwygHostSheet,
+    foreground: Color,
+    accent: Color,
+    onPick: (String) -> Unit,
+) {
+    if (sheet.style == "grid") {
+        // Three across is what every composer's tile grid uses.
+        Column(modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp)) {
+            sheet.options.chunked(3).forEach { rowOptions ->
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+                    rowOptions.forEach { option ->
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { onPick(option.id) },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(28.dp))
+                                    .background(foreground.copy(alpha = 0.07f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                GlyphIcon(option.icon, 24.dp, foreground)
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            BasicText(
+                                text = option.label,
+                                style = TextStyle(color = foreground, fontSize = 13.sp),
+                            )
+                        }
+                    }
+
+                    // Keep the last row's tiles under the ones above rather
+                    // than spread across the width.
+                    repeat(3 - rowOptions.size) {
+                        Box(modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    } else {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            sheet.options.forEach { option ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .clickable { onPick(option.id) }
+                        .padding(horizontal = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
+                ) {
+                    if (option.icon.isNotEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(foreground.copy(alpha = 0.07f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            GlyphIcon(option.icon, 20.dp, foreground)
+                        }
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        BasicText(
+                            text = option.label,
+                            style = TextStyle(color = foreground, fontSize = 16.sp),
+                        )
+
+                        if (option.detail.isNotEmpty()) {
+                            BasicText(
+                                text = option.detail,
+                                style = TextStyle(color = foreground.copy(alpha = 0.55f), fontSize = 13.sp),
+                            )
+                        }
+                    }
+
+                    // A ring either way, so the rows line up whether or not
+                    // anything is chosen yet.
+                    Canvas(modifier = Modifier.size(22.dp)) {
+                        drawCircle(
+                            color = if (option.selected) accent else foreground.copy(alpha = 0.3f),
+                            radius = size.minDimension / 2 - 1.dp.toPx(),
+                            style = Stroke(width = 2.dp.toPx()),
+                        )
+                        if (option.selected) {
+                            drawCircle(color = accent, radius = 6.dp.toPx())
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One of the editor's own glyphs, at whatever size the caller needs. */
+@Composable
+private fun GlyphIcon(name: String, size: androidx.compose.ui.unit.Dp, color: Color) {
+    val icon = TOOL_ICONS[name] ?: return
+
+    Canvas(modifier = Modifier.size(size)) {
+        drawPath(
+            path = buildIconPath(icon.path, this.size.width),
+            color = color,
+            style = Stroke(
+                width = icon.stroke * this.size.width / 24f,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round,
+            ),
+        )
+    }
+}
+
+/** A host control in the top bar: a labelled chip, or a bare glyph. */
+@Composable
+private fun HeaderControl(
+    accessory: WysiwygAccessory,
+    foreground: Color,
+    onTap: () -> Unit,
+) {
+    if (accessory.style == "icon") {
+        Box(
+            modifier = Modifier.size(32.dp).clickable(onClick = onTap),
+            contentAlignment = Alignment.Center,
+        ) {
+            GlyphIcon(accessory.icon, 20.dp, foreground)
+        }
+    } else {
+        Row(
+            modifier = Modifier.clickable(onClick = onTap),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(2.dp),
+        ) {
+            BasicText(
+                text = accessory.value.ifEmpty { accessory.label },
+                style = TextStyle(color = foreground, fontSize = 15.sp, fontWeight = FontWeight.Medium),
+            )
+            GlyphIcon("chevronDown", 14.dp, foreground)
         }
     }
 }

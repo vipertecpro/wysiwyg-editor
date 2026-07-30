@@ -232,7 +232,7 @@ class WysiwygEditor
      *
      * @var list<string>
      */
-    public const CUSTOM_TOOL_KEYS = ['id', 'icon', 'label'];
+    public const CUSTOM_TOOL_KEYS = ['id', 'icon', 'label', 'sheet'];
 
     /**
      * Rows the HOST puts in the composer, under the media.
@@ -249,7 +249,76 @@ class WysiwygEditor
      *
      * @var list<string> the keys each row accepts
      */
-    public const ACCESSORY_KEYS = ['id', 'label', 'icon', 'value'];
+    public const ACCESSORY_KEYS = ['id', 'label', 'icon', 'value', 'placement', 'style', 'sheet'];
+
+    /**
+     * Where a host control sits.
+     *
+     * `row` is the strip under the media, which is where X and Facebook put
+     * theirs. `header` is the top bar beside Close and Post, which is where
+     * LinkedIn puts its audience picker — and a picker that decides who sees
+     * the post belongs beside the button that sends it, not below the fold.
+     *
+     * @var list<string>
+     */
+    public const ACCESSORY_PLACEMENTS = ['row', 'header'];
+
+    /**
+     * How a host control draws.
+     *
+     * `row` is a full-width strip. `chip` is a label with a disclosure arrow,
+     * which is what an audience picker looks like. `icon` is a bare glyph, for
+     * something like a schedule button that needs no words.
+     *
+     * @var list<string>
+     */
+    public const ACCESSORY_STYLES = ['row', 'chip', 'icon'];
+
+    /**
+     * A sheet the HOST defines and the editor presents.
+     *
+     * The editor owns the screen — on iOS it owns its own window — so a sheet
+     * the host draws would open behind it. That is not a detail an app should
+     * have to work around, so the host DECLARES its sheet and the editor
+     * presents it natively, over everything, and reports the choice through
+     * {@see Events\SheetOptionPicked}.
+     *
+     * What the options mean stays the app's business. The editor draws a list
+     * or a grid of them and gets out of the way.
+     *
+     * @var list<string>
+     */
+    public const SHEET_KEYS = ['id', 'title', 'style', 'options'];
+
+    /**
+     * `list` is rows with a label, an optional detail line and a tick on the
+     * chosen one. `grid` is circular icon tiles, which is what a composer's
+     * "+" opens onto.
+     *
+     * @var list<string>
+     */
+    public const SHEET_STYLES = ['list', 'grid'];
+
+    /** @var list<string> */
+    public const SHEET_OPTION_KEYS = ['id', 'label', 'detail', 'icon', 'selected'];
+
+    /**
+     * Which end of the bar the tools sit at.
+     *
+     * @var list<string>
+     */
+    public const TOOLBAR_ALIGNMENTS = ['leading', 'trailing'];
+
+    /**
+     * Where the author's picture goes.
+     *
+     * `text` is beside what they are writing, which is what X and Facebook do.
+     * `header` is the top bar, which is what LinkedIn does — it puts the
+     * picture next to the audience picker, so the writing runs full width.
+     *
+     * @var list<string>
+     */
+    public const AVATAR_PLACEMENTS = ['text', 'header', 'none'];
 
     /**
      * How long a poll runs, offered in the composer.
@@ -678,6 +747,14 @@ class WysiwygEditor
             'pollDurations' => self::POLL_DURATIONS,
             'accessories' => $this->resolveAccessories($options['accessories'] ?? []),
             'customTools' => $this->resolveCustomTools($options['customTools'] ?? []),
+            'sheets' => $this->resolveSheets($options['sheets'] ?? []),
+            // Right-aligned when the bar is two buttons rather than a rack of
+            // formatting tools — LinkedIn's composer parks its photo and "+"
+            // in the corner, and a left-aligned pair reads as an oversight.
+            'toolbarAlign' => $this->pick($options['toolbarAlign'] ?? null, self::TOOLBAR_ALIGNMENTS),
+            // Beside the text, or up in the header next to the audience
+            // picker. `none` leaves the writing the full width.
+            'avatarPlacement' => $this->pick($options['avatarPlacement'] ?? null, self::AVATAR_PLACEMENTS),
             'triggers' => $this->resolveTriggers($options['triggers'] ?? null),
             // The author's picture, shown beside what they are writing — what
             // every social composer puts there. A url or a local path.
@@ -762,9 +839,9 @@ class WysiwygEditor
      *
      * @param  list<string>  $allowed
      */
-    protected function pick(mixed $value, array $allowed): string
+    protected function pick(mixed $value, array $allowed, ?string $default = null): string
     {
-        return in_array($value, $allowed, true) ? $value : $allowed[0];
+        return in_array($value, $allowed, true) ? $value : ($default ?? $allowed[0]);
     }
 
     /**
@@ -812,6 +889,26 @@ class WysiwygEditor
      *
      * @param  array<int, array<string, mixed>>  $suggestions
      */
+    /**
+     * Ask the open editor to run one of its OWN tools.
+     *
+     * The seam a host sheet needs. LinkedIn's composer has no formatting bar —
+     * everything is behind a "+" the app draws — so when the user picks "Poll"
+     * from that sheet, something has to tell the editor to insert one. Without
+     * this the host could offer a tool it had no way to trigger.
+     *
+     * Only tools the editor actually owns; anything else is ignored, because a
+     * typo should do nothing rather than something surprising.
+     */
+    public function insertTool(string $tool): void
+    {
+        if (! in_array($tool, self::AVAILABLE_TOOLS, true)) {
+            return;
+        }
+
+        nativephp_call('WysiwygEditor.RunTool', json_encode(['tool' => $tool]));
+    }
+
     public function suggestions(string $query, array $suggestions): void
     {
         if (! function_exists('nativephp_call')) {
@@ -877,10 +974,13 @@ class WysiwygEditor
             }
 
             $row = ['id' => $id, 'icon' => $icon];
-            $label = trim((string) ($tool['label'] ?? ''));
 
-            if ($label !== '') {
-                $row['label'] = $label;
+            foreach (['label', 'sheet'] as $key) {
+                $value = trim((string) ($tool[$key] ?? ''));
+
+                if ($value !== '') {
+                    $row[$key] = $value;
+                }
             }
 
             $out[] = $row;
@@ -890,12 +990,17 @@ class WysiwygEditor
     }
 
     /**
-     * Host rows for the composer.
+     * Host controls for the composer.
      *
-     * A row needs an `id` to report back with and a `label` to show; anything
+     * One needs an `id` to report back with and a `label` to show; anything
      * without both is dropped rather than drawn as a blank tappable strip.
-     * `icon` names one of the editor's own glyphs, and `value` is the trailing
-     * text a row like "Everyone can reply" carries.
+     * `icon` names one of the editor's own glyphs, `value` is the trailing
+     * text a row like "Everyone can reply" carries, `placement` and `style`
+     * say where and how it draws, and `sheet` names a sheet to present instead
+     * of merely reporting the tap.
+     *
+     * A control in the header defaults to the `chip` style, because that is
+     * what fits there — a full-width row in a 52-point bar is not a thing.
      *
      * @param  array<int, array<string, mixed>>  $accessories
      * @return list<array<string, string>>
@@ -918,7 +1023,7 @@ class WysiwygEditor
 
             $row = ['id' => $id, 'label' => $label];
 
-            foreach (['icon', 'value'] as $key) {
+            foreach (['icon', 'value', 'sheet'] as $key) {
                 $value = trim((string) ($accessory[$key] ?? ''));
 
                 if ($value !== '') {
@@ -926,10 +1031,98 @@ class WysiwygEditor
                 }
             }
 
+            $placement = $this->pick($accessory['placement'] ?? null, self::ACCESSORY_PLACEMENTS);
+            $row['placement'] = $placement;
+            $row['style'] = $this->pick(
+                $accessory['style'] ?? null,
+                self::ACCESSORY_STYLES,
+                $placement === 'header' ? 'chip' : 'row',
+            );
+
             $rows[] = $row;
         }
 
         return $rows;
+    }
+
+    /**
+     * Sheets the host declares for the editor to present.
+     *
+     * A sheet with no options would open onto nothing, and one with no id
+     * could never be asked for, so both are required. Options follow the same
+     * rule as rows: an id to report and a label to show.
+     *
+     * @param  array<int, array<string, mixed>>  $sheets
+     * @return list<array<string, mixed>>
+     */
+    protected function resolveSheets(array $sheets): array
+    {
+        $out = [];
+
+        foreach ($sheets as $key => $sheet) {
+            if (! is_array($sheet)) {
+                continue;
+            }
+
+            // Declared either as a list of sheets each carrying an id, or as
+            // a map keyed by it — both read naturally, so both are accepted.
+            $id = trim((string) ($sheet['id'] ?? (is_string($key) ? $key : '')));
+            $options = $this->resolveSheetOptions($sheet['options'] ?? []);
+
+            if ($id === '' || $options === []) {
+                continue;
+            }
+
+            $out[] = [
+                'id' => $id,
+                'title' => trim((string) ($sheet['title'] ?? '')),
+                'style' => $this->pick($sheet['style'] ?? null, self::SHEET_STYLES),
+                'options' => $options,
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $options
+     * @return list<array<string, mixed>>
+     */
+    protected function resolveSheetOptions(array $options): array
+    {
+        $out = [];
+
+        foreach ($options as $option) {
+            if (! is_array($option)) {
+                continue;
+            }
+
+            $id = trim((string) ($option['id'] ?? ''));
+            $label = trim((string) ($option['label'] ?? ''));
+
+            if ($id === '' || $label === '') {
+                continue;
+            }
+
+            $row = ['id' => $id, 'label' => $label];
+
+            foreach (['detail', 'icon'] as $key) {
+                $value = trim((string) ($option[$key] ?? ''));
+
+                if ($value !== '') {
+                    $row[$key] = $value;
+                }
+            }
+
+            // The tick, so a sheet can show what is already chosen.
+            if (! empty($option['selected'])) {
+                $row['selected'] = true;
+            }
+
+            $out[] = $row;
+        }
+
+        return $out;
     }
 
     /**

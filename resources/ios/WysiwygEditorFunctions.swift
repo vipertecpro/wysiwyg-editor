@@ -91,6 +91,25 @@ enum WysiwygEditorFunctions {
         }
     }
 
+    /**
+     Run one of the editor's own tools, asked for from outside the toolbar.
+
+     A composer whose toolbar is a host sheet — LinkedIn's "+" — still needs a
+     way to say "insert a poll". Without this the host could offer a tool it
+     had no way to trigger.
+     */
+    class RunTool: BridgeFunction {
+        func execute(parameters: [String: Any]) throws -> [String: Any] {
+            guard let tool = parameters["tool"] as? String else { return [:] }
+
+            DispatchQueue.main.async {
+                WysiwygEditorFunctions.live?.runTool(tool)
+            }
+
+            return [:]
+        }
+    }
+
     /// The host's answer to a SuggestionRequested.
     class Suggestions: BridgeFunction {
         func execute(parameters: [String: Any]) throws -> [String: Any] {
@@ -145,6 +164,7 @@ private enum WysiwygEvents {
     static let draftRequested = "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested"
     static let toolTapped = "Vipertecpro\\WysiwygEditor\\Events\\ToolTapped"
     static let suggestionRequested = "Vipertecpro\\WysiwygEditor\\Events\\SuggestionRequested"
+    static let sheetOptionPicked = "Vipertecpro\\WysiwygEditor\\Events\\SheetOptionPicked"
     static let changed = "Vipertecpro\\WysiwygEditor\\Events\\ContentChanged"
 }
 
@@ -276,6 +296,12 @@ struct WysiwygConfig {
     let avatar: String
     /// Trigger character -> the `kind` reported with it. Empty turns it off.
     let triggers: [String: String]
+    /// Sheets the host declared, presented over the editor's own window.
+    let sheets: [WysiwygHostSheet]
+    /// Which end of the bar the tools sit at.
+    let toolbarAlign: String
+    /// Where the author's picture goes: `text`, `header` or `none`.
+    let avatarPlacement: String
     let typography: WysiwygTypography
     let spacing: WysiwygSpacing
     let validation: [String: Any]
@@ -324,6 +350,9 @@ struct WysiwygConfig {
         customTools = ((p["customTools"] as? [[String: Any]]) ?? []).map(WysiwygCustomTool.init)
         avatar = p["avatar"] as? String ?? ""
         triggers = p["triggers"] as? [String: String] ?? [:]
+        sheets = ((p["sheets"] as? [[String: Any]]) ?? []).map(WysiwygHostSheet.init)
+        toolbarAlign = p["toolbarAlign"] as? String ?? "leading"
+        avatarPlacement = p["avatarPlacement"] as? String ?? "text"
         typography = WysiwygTypography(p["typography"] as? [String: Any])
         spacing = WysiwygSpacing(named: p["spacing"] as? String ?? "comfortable")
         validation = p["validation"] as? [String: Any] ?? [:]
@@ -1497,11 +1526,14 @@ struct WysiwygCustomTool: Identifiable {
     let id: String
     let icon: String
     let label: String
+    /// A sheet to present instead of merely reporting the tap.
+    let sheet: String
 
     init(_ p: [String: Any]) {
         id = p["id"] as? String ?? ""
         icon = p["icon"] as? String ?? ""
         label = p["label"] as? String ?? ""
+        sheet = p["sheet"] as? String ?? ""
     }
 }
 
@@ -1510,12 +1542,60 @@ struct WysiwygAccessory: Identifiable {
     var label: String
     var value: String
     let icon: String
+    /// `row` under the media, or `header` beside Close and Post.
+    let placement: String
+    /// `row`, `chip` (label + disclosure) or `icon` (a bare glyph).
+    let style: String
+    /// A sheet to present instead of merely reporting the tap.
+    let sheet: String
 
     init(_ p: [String: Any]) {
         id = p["id"] as? String ?? ""
         label = p["label"] as? String ?? ""
         value = p["value"] as? String ?? ""
         icon = p["icon"] as? String ?? ""
+        placement = p["placement"] as? String ?? "row"
+        style = p["style"] as? String ?? "row"
+        sheet = p["sheet"] as? String ?? ""
+    }
+}
+
+/**
+ A sheet the HOST declared for the editor to present.
+
+ The editor owns its own window, so a sheet the host drew would open behind
+ it. Declaring it here is not ceremony — it is the only way the app's own
+ choices can appear over the editor at all. What the options MEAN stays the
+ app's business; the editor draws them and reports the pick.
+ */
+struct WysiwygHostSheet: Identifiable {
+    let id: String
+    let title: String
+    /// `list` for rows with a tick, `grid` for circular icon tiles.
+    let style: String
+    let options: [Option]
+
+    struct Option: Identifiable {
+        let id: String
+        let label: String
+        let detail: String
+        let icon: String
+        let selected: Bool
+
+        init(_ p: [String: Any]) {
+            id = p["id"] as? String ?? ""
+            label = p["label"] as? String ?? ""
+            detail = p["detail"] as? String ?? ""
+            icon = p["icon"] as? String ?? ""
+            selected = (p["selected"] as? NSNumber)?.boolValue ?? false
+        }
+    }
+
+    init(_ p: [String: Any]) {
+        id = p["id"] as? String ?? ""
+        title = p["title"] as? String ?? ""
+        style = p["style"] as? String ?? "list"
+        options = ((p["options"] as? [[String: Any]]) ?? []).map(Option.init)
     }
 }
 
@@ -1780,7 +1860,9 @@ struct WysiwygStyler {
 func countsReadout(_ config: WysiwygConfig, _ characters: Int, _ words: Int) -> String {
     var parts: [String] = []
 
-    if config.maxLength > 0 {
+    // The cap turns the character count into "n/limit"; whether it is shown
+    // at all is still `counts`, so a composer can have a cap and no readout.
+    if config.maxLength > 0, config.counts.contains("characters") {
         parts.append("\(characters)/\(config.maxLength)")
     } else if config.counts.contains("characters") {
         parts.append(localized(config.strings, "countCharacters", "{n} chars", n: characters))
@@ -2615,6 +2697,28 @@ final class WysiwygDocumentModel: ObservableObject {
         segmentChanged()
     }
 
+    /**
+     Run a tool the host asked for by name.
+
+     Only the ones that make sense from outside a toolbar: inserting something.
+     A formatting mark applies to a selection, and a host sheet has no idea
+     what is selected — those stay on the bar where the caret is visible.
+     */
+    func runTool(_ tool: String) {
+        switch tool {
+        case "poll":
+            insertPoll()
+        case "divider":
+            insertBlock(WysiwygBlock(type: "divider", runs: []))
+        case "image", "camera", "video", "file":
+            var payload: [String: Any] = ["kind": tool]
+            if let id = config.id { payload["id"] = id }
+            LaravelBridge.shared.send?(WysiwygEvents.mediaRequested, payload)
+        default:
+            break
+        }
+    }
+
     /// Insert an empty poll with the fewest answers that make one.
     func insertPoll() {
         var block = WysiwygBlock(type: "poll", runs: [])
@@ -3121,6 +3225,8 @@ private struct EditorScreen: View {
     @State private var palette: PaletteKind?
     /// Which bottom sheet is open, in `menu: sheet` mode.
     @State private var sheet: SheetKind?
+    /// The host's own sheet, if one is open.
+    @State private var hostSheet: WysiwygHostSheet?
     /// The attachment whose description is being written.
     @State private var describing: SegmentEntry?
     /// The poll awaiting a removal confirm.
@@ -3143,7 +3249,7 @@ private struct EditorScreen: View {
                 // every social composer arranges it. Top-aligned, because the
                 // text grows downward past it.
                 HStack(alignment: .top, spacing: 0) {
-                    if !document.config.avatar.isEmpty {
+                    if document.config.avatarPlacement == "text", !document.config.avatar.isEmpty {
                         AvatarView(source: document.config.avatar, theme: theme)
                             .padding(.leading, 16)
                             .padding(.top, 14)
@@ -3175,11 +3281,10 @@ private struct EditorScreen: View {
 
                 // The host's own rows, under the media and above the counter —
                 // where every composer that has them puts them.
-                if !document.accessories.isEmpty {
-                    AccessoryRows(document: document, theme: theme) { accessory in
-                        var payload: [String: Any] = ["accessory": accessory]
-                        if let id = document.config.id { payload["id"] = id }
-                        LaravelBridge.shared.send?(WysiwygEvents.accessoryTapped, payload)
+                if !rowAccessories.isEmpty {
+                    AccessoryRows(accessories: rowAccessories, theme: theme) { accessory in
+                        guard let row = document.accessories.first(where: { $0.id == accessory }) else { return }
+                        tapAccessory(row)
                     }
                 }
 
@@ -3276,7 +3381,17 @@ private struct EditorScreen: View {
     /// The open sheet, over everything including the toolbar.
     @ViewBuilder
     private var sheetOverlay: some View {
-        if let kind = sheet, let focused = document.focused {
+        if let declared = hostSheet {
+            WysiwygSheet(theme: theme, title: declared.title, onDismiss: { hostSheet = nil }) {
+                HostSheetBody(sheet: declared, theme: theme) { option in
+                    hostSheet = nil
+
+                    var payload: [String: Any] = ["sheet": declared.id, "option": option]
+                    if let id = document.config.id { payload["id"] = id }
+                    LaravelBridge.shared.send?(WysiwygEvents.sheetOptionPicked, payload)
+                }
+            }
+        } else if let kind = sheet, let focused = document.focused {
             switch kind {
             case .format:
                 WysiwygSheet(theme: theme,
@@ -3394,7 +3509,19 @@ private struct EditorScreen: View {
             model.linkTapped()
         case let custom where custom.hasPrefix("custom:"):
             sheet = nil
-            var payload: [String: Any] = ["tool": String(custom.dropFirst("custom:".count))]
+            let toolId = String(custom.dropFirst("custom:".count))
+
+            // A button that names a sheet opens it here rather than making the
+            // host answer a tap and then ask us to draw something.
+            if let declared = document.config.customTools.first(where: { $0.id == toolId }),
+               !declared.sheet.isEmpty,
+               let target = document.config.sheets.first(where: { $0.id == declared.sheet }) {
+                hostSheet = target
+
+                return
+            }
+
+            var payload: [String: Any] = ["tool": toolId]
             if let id = document.config.id { payload["id"] = id }
             LaravelBridge.shared.send?(WysiwygEvents.toolTapped, payload)
         case "image", "camera", "video", "file":
@@ -3499,7 +3626,7 @@ private struct EditorScreen: View {
 
     private var topBar: some View {
         ZStack {
-            HStack {
+            HStack(spacing: 8) {
                 Button {
                     document.hasChanges ? (showDiscard = true) : onCancel()
                 } label: {
@@ -3514,17 +3641,73 @@ private struct EditorScreen: View {
                             .foregroundColor(theme.textColor)
                     }
                 }
+
+                // The author's picture up here rather than beside the text, so
+                // the writing runs the full width. LinkedIn's arrangement.
+                if document.config.avatarPlacement == "header", !document.config.avatar.isEmpty {
+                    AvatarView(source: document.config.avatar, theme: theme, size: 28)
+                }
+
+                ForEach(headerAccessories) { accessory in
+                    headerControl(accessory)
+                }
+
                 Spacer()
                 saveButton
             }
-            Text(document.config.title)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundColor(theme.textColor)
-                .lineLimit(1)
-                .padding(.horizontal, 76)
+            if headerAccessories.isEmpty, document.config.avatarPlacement != "header" {
+                Text(document.config.title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(theme.textColor)
+                    .lineLimit(1)
+                    .padding(.horizontal, 76)
+            }
         }
         .frame(height: 52)
         .padding(.horizontal, 16)
+    }
+
+    private var headerAccessories: [WysiwygAccessory] {
+        document.accessories.filter { $0.placement == "header" }
+    }
+
+    private var rowAccessories: [WysiwygAccessory] {
+        document.accessories.filter { $0.placement != "header" }
+    }
+
+    /// A host control in the top bar: a labelled chip, or a bare glyph.
+    @ViewBuilder
+    private func headerControl(_ accessory: WysiwygAccessory) -> some View {
+        Button {
+            tapAccessory(accessory)
+        } label: {
+            if accessory.style == "icon" {
+                ToolGlyph(name: accessory.icon, size: 20, color: theme.textColor)
+                    .frame(width: 32, height: 32)
+            } else {
+                HStack(spacing: 2) {
+                    Text(accessory.value.isEmpty ? accessory.label : accessory.value)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(theme.textColor)
+                        .lineLimit(1)
+                    ToolGlyph(name: "chevronDown", size: 14, color: theme.textColor)
+                }
+            }
+        }
+    }
+
+    /// Present the sheet the control names, or just report the tap.
+    private func tapAccessory(_ accessory: WysiwygAccessory) {
+        if !accessory.sheet.isEmpty,
+           let declared = document.config.sheets.first(where: { $0.id == accessory.sheet }) {
+            hostSheet = declared
+
+            return
+        }
+
+        var payload: [String: Any] = ["accessory": accessory.id]
+        if let id = document.config.id { payload["id"] = id }
+        LaravelBridge.shared.send?(WysiwygEvents.accessoryTapped, payload)
     }
 
     /// What the document area draws. In `strip` layout media is pulled out of
@@ -3816,13 +3999,13 @@ private struct PollCard: View {
 
 /// The host's rows: an icon, a label, and whatever value the app set.
 private struct AccessoryRows: View {
-    @ObservedObject var document: WysiwygDocumentModel
+    let accessories: [WysiwygAccessory]
     let theme: WysiwygTheme
     let onTap: (String) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(document.accessories) { accessory in
+            ForEach(accessories) { accessory in
                 Button {
                     onTap(accessory.id)
                 } label: {
@@ -3920,6 +4103,7 @@ private struct SuggestionList: View {
 private struct AvatarView: View {
     let source: String
     let theme: WysiwygTheme
+    var size: CGFloat = 40
 
     @State private var image: UIImage?
 
@@ -3934,7 +4118,7 @@ private struct AvatarView: View {
                     .clipShape(Circle())
             }
         }
-        .frame(width: 40, height: 40)
+        .frame(width: size, height: size)
         .task(id: source) {
             guard !source.isEmpty else { return }
             let path = source
@@ -4376,6 +4560,20 @@ private let toolIcons: [String: ToolIcon] = [
     "p": ToolIcon(path: "M4 6L20 6M4 12L20 12M4 18L14 18"),
     "poll": ToolIcon(path: "M6 19L6 11M12 19L12 5M18 19L18 14"),
     "divider": ToolIcon(path: "M4 12L20 12"),
+
+    // Glyphs a HOST can name for its own controls: an accessory chip, a
+    // sheet option, a tile in the grid a "+" opens onto. Not toolbar tools —
+    // the editor has nothing to do with a calendar — but it has to be able to
+    // DRAW one when an app asks.
+    "chevronDown": ToolIcon(path: "M6 9L12 15L18 9"),
+    "clock": ToolIcon(path: "M12 4C16.42 4 20 7.58 20 12C20 16.42 16.42 20 12 20C7.58 20 4 16.42 4 12C4 7.58 7.58 4 12 4ZM12 7.5L12 12L15.5 14"),
+    "plus": ToolIcon(path: "M12 5L12 19M5 12L19 12"),
+    "globe": ToolIcon(path: "M12 4C16.42 4 20 7.58 20 12C20 16.42 16.42 20 12 20C7.58 20 4 16.42 4 12C4 7.58 7.58 4 12 4ZM4 12L20 12M12 4C14 6.5 15 9 15 12C15 15 14 17.5 12 20C10 17.5 9 15 9 12C9 9 10 6.5 12 4", stroke: 1.6),
+    "people": ToolIcon(path: "M9 5C10.66 5 12 6.34 12 8C12 9.66 10.66 11 9 11C7.34 11 6 9.66 6 8C6 6.34 7.34 5 9 5ZM3 19C3 16 5.7 14 9 14C12.3 14 15 16 15 19M16 5.5C17.7 5.9 19 7.3 19 9C19 10.7 17.7 12.1 16 12.5M17 14.5C19.4 15.2 21 16.9 21 19", stroke: 1.8),
+    "calendar": ToolIcon(path: "M4 7L20 7L20 20L4 20ZM4 7L4 5L20 5L20 7M8 3L8 7M16 3L16 7M8 12L16 12M8 16L13 16", stroke: 1.8),
+    "briefcase": ToolIcon(path: "M3 8L21 8L21 20L3 20ZM9 8L9 5C9 4.4 9.4 4 10 4L14 4C14.6 4 15 4.4 15 5L15 8M3 13L21 13", stroke: 1.8),
+    "star": ToolIcon(path: "M12 4L14.5 9.5L20.5 10.2L16 14.2L17.3 20L12 17L6.7 20L8 14.2L3.5 10.2L9.5 9.5Z", stroke: 1.8),
+    "document": ToolIcon(path: "M6 3L14 3L19 8L19 21L6 21ZM14 3L14 8L19 8M9 12L16 12M9 16L14 16", stroke: 1.8),
     "embed": ToolIcon(path: "M4 6L20 6L20 18L4 18ZM10 10L14 12L10 14Z"),
     "link": ToolIcon(path: "M9.5 12L14.5 12"
         + "M10 8L7.5 8C5.3 8 3.5 9.8 3.5 12C3.5 14.2 5.3 16 7.5 16L10 16"
@@ -4457,6 +4655,23 @@ private struct IconShape: Shape {
         }
 
         return path
+    }
+}
+
+/// One of the editor's own glyphs, at whatever size the caller needs.
+private struct ToolGlyph: View {
+    let name: String
+    var size: CGFloat = 20
+    let color: Color
+
+    var body: some View {
+        if let icon = toolIcons[name] {
+            IconShape(data: icon.path)
+                .stroke(style: StrokeStyle(lineWidth: icon.stroke * size / 24,
+                                           lineCap: .round, lineJoin: .round))
+                .foregroundColor(color)
+                .frame(width: size, height: size)
+        }
     }
 }
 
@@ -4559,11 +4774,24 @@ private struct ToolbarRow: View {
         }
         .background(theme.backgroundColor.overlay(theme.textColor.opacity(0.04)))
         .overlay(Rectangle().fill(theme.textColor.opacity(0.12)).frame(height: 0.5), alignment: .top)
+        .background(
+            GeometryReader { geo in
+                Color.clear.onAppear { barWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { barWidth = $0 }
+            }
+        )
     }
 
     private var tools: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
+                // A short bar parked in the corner: two buttons at the leading
+                // edge of an empty row read as an oversight, which is why
+                // LinkedIn's composer puts its photo and "+" on the right.
+                if model.config.toolbarAlign == "trailing" {
+                    Spacer(minLength: 0)
+                }
+
                 // Undo / redo lead the configured tools, unless turned off.
                 if model.config.history {
                     button("undo", active: false, enabled: model.canUndo) { model.undo() }
@@ -4591,8 +4819,15 @@ private struct ToolbarRow: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+            // A scroll view sizes to its content, so the Spacer above has
+            // nothing to push against until the row is told to fill the width.
+            .frame(minWidth: model.config.toolbarAlign == "trailing" ? barWidth : 0,
+                   alignment: model.config.toolbarAlign == "trailing" ? .trailing : .leading)
         }
     }
+
+    /// The width the bar has to fill for a trailing alignment to mean anything.
+    @State private var barWidth: CGFloat = 0
 
     /// Sheet mode: the two or three marks people reach for constantly stay one
     /// tap away; everything else is behind Format / Insert rather than off the
@@ -4854,6 +5089,97 @@ private struct SheetSection: View {
             .padding(.horizontal, 20)
             .padding(.top, 14)
             .padding(.bottom, 4)
+    }
+}
+
+/**
+ The host's own options, as a list or a grid.
+
+ A list is rows with a tick on the chosen one — an audience picker. A grid is
+ circular tiles, which is what a composer's "+" opens onto. Neither knows what
+ the options mean; that is the point.
+ */
+private struct HostSheetBody: View {
+    let sheet: WysiwygHostSheet
+    let theme: WysiwygTheme
+    let onPick: (String) -> Void
+
+    /// Three across is what every composer's tile grid uses.
+    private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+
+    var body: some View {
+        if sheet.style == "grid" {
+            LazyVGrid(columns: columns, spacing: 20) {
+                ForEach(sheet.options) { option in
+                    Button {
+                        onPick(option.id)
+                    } label: {
+                        VStack(spacing: 8) {
+                            ZStack {
+                                Circle().fill(theme.textColor.opacity(0.07))
+                                ToolGlyph(name: option.icon, size: 24, color: theme.textColor)
+                            }
+                            .frame(width: 56, height: 56)
+
+                            Text(option.label)
+                                .font(.system(size: 13))
+                                .foregroundColor(theme.textColor)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+        } else {
+            VStack(spacing: 0) {
+                ForEach(sheet.options) { option in
+                    Button {
+                        onPick(option.id)
+                    } label: {
+                        HStack(spacing: 12) {
+                            if !option.icon.isEmpty {
+                                ZStack {
+                                    Circle().fill(theme.textColor.opacity(0.07))
+                                    ToolGlyph(name: option.icon, size: 20, color: theme.textColor)
+                                }
+                                .frame(width: 40, height: 40)
+                            }
+
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(option.label)
+                                    .font(.system(size: 16))
+                                    .foregroundColor(theme.textColor)
+
+                                if !option.detail.isEmpty {
+                                    Text(option.detail)
+                                        .font(.system(size: 13))
+                                        .foregroundColor(theme.textColor.opacity(0.55))
+                                }
+                            }
+
+                            Spacer()
+
+                            // A ring either way, so the rows line up whether or
+                            // not anything is chosen yet.
+                            ZStack {
+                                Circle()
+                                    .stroke(option.selected
+                                            ? theme.accentColor
+                                            : theme.textColor.opacity(0.3), lineWidth: 2)
+                                if option.selected {
+                                    Circle().fill(theme.accentColor).frame(width: 12, height: 12)
+                                }
+                            }
+                            .frame(width: 22, height: 22)
+                        }
+                        .padding(.horizontal, 20)
+                        .frame(height: 64)
+                        .contentShape(Rectangle())
+                    }
+                }
+            }
+        }
     }
 }
 

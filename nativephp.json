@@ -66,6 +66,12 @@
             "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.Suggestions",
             "ios": "WysiwygEditorFunctions.Suggestions",
             "description": "Answer a SuggestionRequested with the people or tags the host found"
+        },
+        {
+            "name": "WysiwygEditor.RunTool",
+            "android": "com.vipertecpro.plugins.wysiwyg_editor.WysiwygEditorFunctions.RunTool",
+            "ios": "WysiwygEditorFunctions.RunTool",
+            "description": "Ask the open editor to run one of its own tools, for a host sheet that replaces the toolbar"
         }
     ],
     "android": {
@@ -103,7 +109,8 @@
         "Vipertecpro\\WysiwygEditor\\Events\\AccessoryTapped",
         "Vipertecpro\\WysiwygEditor\\Events\\DraftRequested",
         "Vipertecpro\\WysiwygEditor\\Events\\ToolTapped",
-        "Vipertecpro\\WysiwygEditor\\Events\\SuggestionRequested"
+        "Vipertecpro\\WysiwygEditor\\Events\\SuggestionRequested",
+        "Vipertecpro\\WysiwygEditor\\Events\\SheetOptionPicked"
     ],
     "service_provider": "Vipertecpro\\WysiwygEditor\\WysiwygEditorServiceProvider",
     "hooks": {

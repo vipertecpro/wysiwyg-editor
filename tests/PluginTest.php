@@ -1,5 +1,6 @@
 <?php
 
+use Nativephp\NativeUi\Theme;
 use Vipertecpro\WysiwygEditor\WysiwygEditor;
 
 /**
@@ -145,6 +146,43 @@ describe('Native parity', function () {
      * added to PHP alone, they silently vanished from both editors with no
      * error anywhere. These read the native sources and fail loudly instead.
      */
+    /**
+     * The glyph tables are two hand-written copies of the same drawings. A
+     * name present in one and not the other draws a blank gap on that platform
+     * and nowhere else — the kind of thing nobody notices until a user does.
+     */
+    it('draws the same set of glyphs on both platforms', function () {
+        $swift = file_get_contents(__DIR__.'/../resources/ios/WysiwygEditorFunctions.swift');
+        $kotlin = file_get_contents(__DIR__.'/../resources/android/WysiwygEditorFunctions.kt');
+
+        preg_match_all('/"([a-zA-Z0-9]+)": ToolIcon\(/', $swift, $ios);
+        preg_match_all('/"([a-zA-Z0-9]+)" to ToolIcon\(/', $kotlin, $android);
+
+        sort($ios[1]);
+        sort($android[1]);
+
+        expect($ios[1])->not->toBeEmpty()
+            ->and($android[1])->toBe($ios[1]);
+    });
+
+    /**
+     * Both path parsers understand M, L, C and Z and nothing else. An SVG arc
+     * pasted in from a design tool parses to a stray stroke — which is exactly
+     * what a clock face did, and it looked like a rendering glitch rather than
+     * a bad path.
+     */
+    it('draws every glyph with commands the parsers actually implement', function (string $file, string $pattern) {
+        preg_match_all($pattern, file_get_contents(__DIR__.'/../resources/'.$file), $found);
+
+        foreach ($found[1] as $path) {
+            expect(preg_replace('/[^A-Za-z]/', '', $path))
+                ->toMatch('/^[MLCZ]*$/');
+        }
+    })->with([
+        ['ios/WysiwygEditorFunctions.swift', '/ToolIcon\(path: "([^"]+)"/'],
+        ['android/WysiwygEditorFunctions.kt', '/ToolIcon\("([^"]+)"/'],
+    ]);
+
     it('lists the same tools natively as PHP does', function (string $file, string $pattern) {
         $source = file_get_contents($this->pluginPath.$file);
 
@@ -487,6 +525,108 @@ describe('Polls', function () {
     });
 });
 
+describe('Host sheets', function () {
+    it('has none unless the host declares them', function () {
+        expect(editor()->config('')['sheets'])->toBe([]);
+    });
+
+    /**
+     * The editor owns its own window, so a sheet the host drew would open
+     * BEHIND it. Declaring it here is not ceremony — it is the only way the
+     * app's own choices can appear over the editor at all.
+     */
+    it('carries a declared sheet through, keyed or listed', function (array $sheets) {
+        $config = editor()->config('', ['sheets' => $sheets]);
+
+        expect($config['sheets'])->toBe([[
+            'id' => 'audience',
+            'title' => 'Who can see your post?',
+            'style' => 'list',
+            'options' => [
+                ['id' => 'anyone', 'label' => 'Anyone', 'detail' => 'On or off the network', 'selected' => true],
+                ['id' => 'connections', 'label' => 'Connections only'],
+            ],
+        ]]);
+    })->with([
+        'keyed by id' => [['audience' => [
+            'title' => 'Who can see your post?',
+            'options' => [
+                ['id' => 'anyone', 'label' => 'Anyone', 'detail' => 'On or off the network', 'selected' => true],
+                ['id' => 'connections', 'label' => 'Connections only'],
+            ],
+        ]]],
+        'listed with an id' => [[[
+            'id' => 'audience',
+            'title' => 'Who can see your post?',
+            'options' => [
+                ['id' => 'anyone', 'label' => 'Anyone', 'detail' => 'On or off the network', 'selected' => true],
+                ['id' => 'connections', 'label' => 'Connections only'],
+            ],
+        ]]],
+    ]);
+
+    it('offers a grid, for the tiles a composer opens onto', function () {
+        $config = editor()->config('', ['sheets' => ['compose' => [
+            'style' => 'grid',
+            'options' => [['id' => 'media', 'label' => 'Media', 'icon' => 'image']],
+        ]]]);
+
+        expect($config['sheets'][0]['style'])->toBe('grid');
+    });
+
+    it('falls back to a list for a style it does not know', function () {
+        $config = editor()->config('', ['sheets' => ['a' => [
+            'style' => 'carousel',
+            'options' => [['id' => 'x', 'label' => 'X']],
+        ]]]);
+
+        expect($config['sheets'][0]['style'])->toBe('list');
+    });
+
+    /** A sheet with nothing in it would open onto a blank panel. */
+    it('drops a sheet that could not work', function (array $sheets) {
+        expect(editor()->config('', ['sheets' => $sheets])['sheets'])->toBe([]);
+    })->with([
+        'no options' => [['a' => ['title' => 'Empty']]],
+        'no id' => [[['options' => [['id' => 'x', 'label' => 'X']]]]],
+        'options that could not work' => [['a' => ['options' => [['label' => 'No id'], ['id' => 'no-label']]]]],
+    ]);
+
+    it('ignores keys an option does not have', function () {
+        $config = editor()->config('', ['sheets' => ['a' => [
+            'options' => [['id' => 'x', 'label' => 'X', 'onTap' => 'doSomething()']],
+        ]]]);
+
+        expect($config['sheets'][0]['options'][0])->toBe(['id' => 'x', 'label' => 'X']);
+    });
+});
+
+describe('Composer layout', function () {
+    it('puts the tools at the leading edge by default', function () {
+        expect(editor()->config('')['toolbarAlign'])->toBe('leading');
+    });
+
+    /**
+     * A bar of two buttons reads as an oversight at the left edge; LinkedIn
+     * parks its photo and "+" in the corner.
+     */
+    it('can park a short bar in the corner', function () {
+        expect(editor()->config('', ['toolbarAlign' => 'trailing'])['toolbarAlign'])->toBe('trailing');
+    });
+
+    it('falls back for an alignment it does not know', function () {
+        expect(editor()->config('', ['toolbarAlign' => 'middle'])['toolbarAlign'])->toBe('leading');
+    });
+
+    it('puts the author picture beside the writing by default', function () {
+        expect(editor()->config('')['avatarPlacement'])->toBe('text');
+    });
+
+    it('can move the picture into the header, leaving the writing full width', function (string $where) {
+        expect(editor()->config('', ['avatarPlacement' => $where])['avatarPlacement'])->toBe($where);
+    })->with(['header', 'none']);
+});
+
 describe('Host accessory rows', function () {
     it('has none unless the host asks for them', function () {
         expect(editor()->config('')['accessories'])->toBe([]);
@@ -499,9 +639,49 @@ describe('Host accessory rows', function () {
         ]]);
 
         expect($config['accessories'])->toBe([
-            ['id' => 'tag', 'label' => 'Tag people', 'icon' => 'image'],
-            ['id' => 'audience', 'label' => 'Everyone can reply', 'value' => 'Everyone'],
+            ['id' => 'tag', 'label' => 'Tag people', 'icon' => 'image', 'placement' => 'row', 'style' => 'row'],
+            ['id' => 'audience', 'label' => 'Everyone can reply', 'value' => 'Everyone', 'placement' => 'row', 'style' => 'row'],
         ]);
+    });
+
+    /**
+     * LinkedIn's audience picker lives beside Post, not below the fold — a
+     * control that decides who sees the post belongs next to the button that
+     * sends it.
+     */
+    it('can put a control in the header, where a chip is the only thing that fits', function () {
+        $config = editor()->config('', ['accessories' => [
+            ['id' => 'audience', 'label' => 'Anyone', 'placement' => 'header'],
+        ]]);
+
+        expect($config['accessories'][0]['placement'])->toBe('header')
+            ->and($config['accessories'][0]['style'])->toBe('chip');
+    });
+
+    it('lets a header control ask for a bare icon instead', function () {
+        $config = editor()->config('', ['accessories' => [
+            ['id' => 'schedule', 'label' => 'Schedule', 'icon' => 'clock',
+                'placement' => 'header', 'style' => 'icon'],
+        ]]);
+
+        expect($config['accessories'][0]['style'])->toBe('icon');
+    });
+
+    it('falls back for a placement or style it does not know', function () {
+        $config = editor()->config('', ['accessories' => [
+            ['id' => 'a', 'label' => 'A', 'placement' => 'floating', 'style' => 'neon'],
+        ]]);
+
+        expect($config['accessories'][0]['placement'])->toBe('row')
+            ->and($config['accessories'][0]['style'])->toBe('row');
+    });
+
+    it('carries the sheet a control opens', function () {
+        $config = editor()->config('', ['accessories' => [
+            ['id' => 'audience', 'label' => 'Anyone', 'sheet' => 'who-can-see'],
+        ]]);
+
+        expect($config['accessories'][0]['sheet'])->toBe('who-can-see');
     });
 
     /**
@@ -522,7 +702,8 @@ describe('Host accessory rows', function () {
             ['id' => 'a', 'label' => 'A', 'onTap' => 'doSomething()'],
         ]]);
 
-        expect($config['accessories'][0])->toBe(['id' => 'a', 'label' => 'A']);
+        expect($config['accessories'][0])
+            ->toBe(['id' => 'a', 'label' => 'A', 'placement' => 'row', 'style' => 'row']);
     });
 });
 
@@ -652,20 +833,20 @@ describe('Typography', function () {
     });
 
     it('adopts the host application font when the caller names none', function () {
-        \Nativephp\NativeUi\Theme::load(['fonts' => ['default' => 'Sora']]);
+        Theme::load(['fonts' => ['default' => 'Sora']]);
 
         expect(editor()->config('')['typography']['fontFamily'])->toBe('Sora');
 
-        \Nativephp\NativeUi\Theme::reset();
+        Theme::reset();
     });
 
     it('lets an explicit family win over the host font', function () {
-        \Nativephp\NativeUi\Theme::load(['fonts' => ['default' => 'Sora']]);
+        Theme::load(['fonts' => ['default' => 'Sora']]);
 
         expect(editor()->config('', ['typography' => ['fontFamily' => 'Inter']])['typography']['fontFamily'])
             ->toBe('Inter');
 
-        \Nativephp\NativeUi\Theme::reset();
+        Theme::reset();
     });
 });
 
@@ -732,7 +913,7 @@ describe('Host theme adoption', function () {
     });
 
     it('derives the editor palette from the host tokens', function () {
-        \Nativephp\NativeUi\Theme::load([
+        Theme::load([
             'light' => [
                 'background' => '#FFFFFF',
                 'on-background' => '#111111',
@@ -763,11 +944,11 @@ describe('Host theme adoption', function () {
             'highlight' => '#00FFFF',
         ]);
 
-        \Nativephp\NativeUi\Theme::reset();
+        Theme::reset();
     });
 
     it('stays empty when the host has no tokens, so native defaults apply', function () {
-        \Nativephp\NativeUi\Theme::reset();
+        Theme::reset();
 
         $config = editor()->config('');
 
@@ -776,11 +957,11 @@ describe('Host theme adoption', function () {
     });
 
     it('ignores malformed host colours rather than passing them through', function () {
-        \Nativephp\NativeUi\Theme::load(['light' => ['background' => 'rebeccapurple']]);
+        Theme::load(['light' => ['background' => 'rebeccapurple']]);
 
         expect(editor()->config('')['themeLight'])->toBe([]);
 
-        \Nativephp\NativeUi\Theme::reset();
+        Theme::reset();
     });
 });
 
@@ -809,5 +990,23 @@ describe('Theme resolution', function () {
         ]]);
 
         expect($config['theme'])->toBe([]);
+    });
+});
+
+describe('Counts readout', function () {
+    /**
+     * A cap is not a request for a readout. LinkedIn's composer has a
+     * 3000-character allowance and shows no counter at all — the cap decides
+     * when SAVE refuses, `counts` decides what the writer is told.
+     */
+    it('shows nothing for a cap alone, because counts is what asks', function () {
+        expect(editor()->config('', ['maxLength' => 3000])['counts'])->toBe([]);
+    });
+
+    it('turns the character count into n/limit when there is a cap', function () {
+        $config = editor()->config('', ['maxLength' => 500, 'counts' => ['characters']]);
+
+        expect($config['counts'])->toBe(['characters'])
+            ->and($config['maxLength'])->toBe(500);
     });
 });
