@@ -3709,7 +3709,7 @@ private struct EditorScreen: View {
             if let declared = document.config.customTools.first(where: { $0.id == toolId }),
                !declared.sheet.isEmpty,
                let target = document.config.sheets.first(where: { $0.id == declared.sheet }) {
-                hostSheet = target
+                presentHostSheet(target)
 
                 return
             }
@@ -3869,6 +3869,18 @@ private struct EditorScreen: View {
         }
     }
 
+    /**
+     Open one of the host's sheets, with the keyboard out of the way.
+
+     A sheet that opens UNDER the keyboard is a sheet the user cannot read —
+     and the keyboard is up whenever this is reached, because the editor took
+     focus when it opened.
+     */
+    private func presentHostSheet(_ sheet: WysiwygHostSheet) {
+        document.focused?.textView?.resignFirstResponder()
+        hostSheet = sheet
+    }
+
     private var headerAccessories: [WysiwygAccessory] {
         document.accessories.filter { $0.placement == "header" }
     }
@@ -3884,8 +3896,20 @@ private struct EditorScreen: View {
             tapAccessory(accessory)
         } label: {
             if accessory.style == "icon" {
-                ToolGlyph(name: accessory.icon, size: 20, color: theme.textColor)
-                    .frame(width: 32, height: 32)
+                // A bare glyph until the host gives it a value — a schedule
+                // button that has been used should say WHEN, not just sit
+                // there looking the same as before it was tapped.
+                HStack(spacing: 4) {
+                    ToolGlyph(name: accessory.icon, size: 20, color: theme.textColor)
+                        .frame(width: accessory.value.isEmpty ? 32 : 20, height: 32)
+
+                    if !accessory.value.isEmpty {
+                        Text(accessory.value)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(theme.textColor)
+                            .lineLimit(1)
+                    }
+                }
             } else {
                 HStack(spacing: 2) {
                     Text(accessory.value.isEmpty ? accessory.label : accessory.value)
@@ -3902,7 +3926,7 @@ private struct EditorScreen: View {
     private func tapAccessory(_ accessory: WysiwygAccessory) {
         if !accessory.sheet.isEmpty,
            let declared = document.config.sheets.first(where: { $0.id == accessory.sheet }) {
-            hostSheet = declared
+            presentHostSheet(declared)
 
             return
         }

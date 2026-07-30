@@ -1116,3 +1116,57 @@ describe('Attachments', function () {
         expect(editor()->attachments($json))->toBe([]);
     })->with(['not json', '', '{}', '{"blocks":"nope"}']);
 });
+
+describe('Taking only what you need', function () {
+    /**
+     * The whole premise: an app picks the tools it wants and pays for nothing
+     * else. A composer that only needs bold should not end up with a poll
+     * composer, a media strip and a colour picker it never asked for.
+     */
+    it('gives an app exactly the tools it asked for', function (array $toolbar) {
+        expect(editor()->config('', ['toolbar' => $toolbar])['toolbar'])->toBe($toolbar);
+    })->with([
+        'one tool' => [['bold']],
+        'writing, no media' => [['bold', 'italic', 'link']],
+        'media, no writing' => [['image', 'video']],
+    ]);
+
+    /** An explicit empty list means no bar, not a fallback to everything. */
+    it('draws no toolbar at all when asked for none', function () {
+        expect(editor()->config('', ['toolbar' => []])['toolbar'])->toBe([]);
+    });
+
+    /**
+     * Everything that costs something is opt-in. An editor configured with
+     * nothing carries no media, no polls, no colours, no host controls and no
+     * lookups — which is what makes it usable as a plain text field.
+     */
+    it('carries nothing an app did not ask for', function () {
+        $config = editor()->config('');
+
+        expect($config['backgrounds'])->toBe([])
+            ->and($config['accessories'])->toBe([])
+            ->and($config['customTools'])->toBe([])
+            ->and($config['sheets'])->toBe([])
+            ->and($config['counts'])->toBe([])
+            ->and($config['avatar'])->toBe('')
+            ->and($config['maxLength'])->toBe(0)
+            ->and($config['validation'])->toBe([]);
+    });
+
+    /**
+     * Media is the expensive one: it drags in a picker, an uploader and the
+     * events that carry them. An app that never lists a media tool never has
+     * to answer MediaRequested at all.
+     */
+    it('asks for no media unless a media tool was listed', function () {
+        $config = editor()->config('', ['toolbar' => ['bold', 'italic', 'bulletList']]);
+
+        expect(array_intersect($config['toolbar'], WysiwygEditor::INSERT_TOOLS))->toBe([]);
+    });
+
+    /** Mentions cost a round trip per keystroke, so they are opt-out too. */
+    it('watches for no trigger characters when told not to', function () {
+        expect(editor()->config('', ['triggers' => false])['triggers'])->toBe([]);
+    });
+});

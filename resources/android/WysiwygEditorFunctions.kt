@@ -5879,11 +5879,22 @@ private fun HeaderControl(
     onTap: () -> Unit,
 ) {
     if (accessory.style == "icon") {
-        Box(
-            modifier = Modifier.size(32.dp).clickable(onClick = onTap),
-            contentAlignment = Alignment.Center,
+        // A bare glyph until the host gives it a value — a schedule button
+        // that has been used should say WHEN, not just sit there looking the
+        // same as before it was tapped.
+        Row(
+            modifier = Modifier.clickable(onClick = onTap).padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp),
         ) {
             GlyphIcon(accessory.icon, 20.dp, foreground)
+
+            if (accessory.value.isNotEmpty()) {
+                BasicText(
+                    text = accessory.value,
+                    style = TextStyle(color = foreground, fontSize = 14.sp, fontWeight = FontWeight.Medium),
+                )
+            }
         }
     } else {
         Row(
