@@ -45,6 +45,24 @@ a JavaScript editor in a browser.
   in CI, so treat it as best-effort
 - iOS 15+ / Android API 26+
 
+### A note on NativePHP 4.0.0
+
+This plugin works on `nativephp/mobile` 3.x and 4.x. As of 4.0.0 there is one
+thing to know that is **not** this plugin's doing:
+
+`native:run` fails on both platforms with *"Composer install failed"*. The
+build stages a copy of your app and runs `composer install` in it;
+`BundleExclusions::PROJECT` excludes `storage/framework` from that copy, and
+4.0.0's service provider now needs `storage/framework/views` when
+`package:discover` boots. The bundle-zip path re-creates those directories —
+the staged copy does not.
+
+`4.0.0-rc.1` builds fine. Reported upstream.
+
+The one thing you lose by staying on the RC is `FakeBridge` macros, so the
+assertions in [Testing your integration](#testing-your-integration) are
+inert there — they cost nothing and start working the moment you move up.
+
 ## Platform support
 
 **Both platforms have the same features.** One PHP API, one document model,
@@ -950,6 +968,47 @@ grep -c yourNewOption "$C/Documents/app/app/NativeComponents/YourScreen.php"
 
 Native (Swift/Kotlin) code is compiled into the app and does NOT suffer from
 this — only the PHP bundle does.
+
+## Testing your integration
+
+NativePHP 4.0 lets a plugin teach its own assertions to the test bridge, so a
+test of YOUR screen reads in terms of the editor rather than of bridge method
+strings:
+
+```php
+use Native\Mobile\Testing\Native;
+
+it('opens the editor when a new page is started', function () {
+    $bridge = Native::fakeBridge();
+
+    Native::test(Pages::class)->call('newPage');
+
+    $bridge->assertEditorOpened();
+});
+
+it('answers a slash command with the matching rows', function () {
+    $bridge = Native::fakeBridge();
+
+    Native::test(Pages::class)->call('onSuggestionRequested', 'command', 'to-do');
+
+    $bridge->assertSuggestionsOffered(['To-do list']);
+});
+```
+
+Registered for you when the app is running its tests. Available:
+
+| Assertion | Passes when |
+| --- | --- |
+| `assertEditorOpened(?$option, $value)` | The editor was opened — optionally with a given option set |
+| `assertEditorNotOpened()` | It was not |
+| `assertSuggestionsOffered(?array $labels)` | You answered a lookup — optionally with exactly these rows |
+| `assertNoSuggestionsOffered()` | You did not |
+| `assertMediaInserted(?string $kind)` | A picked file was handed back |
+| `assertToolRun(string $tool)` | One of the editor's tools was asked for by name |
+| `assertTextInserted(?string $text)` | A host command wrote at the caret |
+| `assertAccessorySet($id, ?$value)` | A host control was updated to show a choice |
+
+Needs `nativephp/mobile` 4.0.0 or newer — see the note under Requirements.
 
 ## License
 
