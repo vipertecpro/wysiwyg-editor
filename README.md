@@ -664,6 +664,50 @@ trip, including back into an edit.
 Turn it off entirely with `'triggers' => false`, and nothing watches
 keystrokes at all.
 
+### Slash commands
+
+A command is a suggestion row that names a **tool**. Same pipeline as a
+mention — the editor spots the trigger, you answer with what matches — and the
+only difference is what a pick does:
+
+```php
+WysiwygEditor::open($html, [
+    'triggers' => ['/' => 'command', '@' => 'mention'],
+]);
+
+#[On(SuggestionRequested::class)]
+public function onSuggestionRequested(string $kind, string $query = ''): void
+{
+    if ($kind !== 'command') {
+        return $this->offerPeople($query);
+    }
+
+    $commands = [
+        ['id' => 'h1', 'label' => 'Heading 1', 'icon' => 'h1', 'tool' => 'h1'],
+        ['id' => 'todo', 'label' => 'To-do list', 'icon' => 'checklist', 'tool' => 'checklist'],
+        ['id' => 'divider', 'label' => 'Divider', 'icon' => 'divider', 'tool' => 'divider'],
+        ['id' => 'photo', 'label' => 'Image', 'icon' => 'image', 'tool' => 'image'],
+        // Not an editor tool — reported to you as ToolTapped instead.
+        ['id' => 'date', 'label' => "Today's date", 'icon' => 'calendar', 'tool' => 'date'],
+    ];
+
+    WysiwygEditor::suggestions($query, array_values(array_filter(
+        $commands,
+        fn (array $c) => $query === '' || str_contains($c['label'], $query),
+    )));
+}
+```
+
+Picking one deletes the trigger and everything typed after it — `/h1` is an
+instruction, not text you meant to keep — and then:
+
+- a tool the editor owns runs on that line (`h1`, `checklist`, `divider`, `poll`, the marks)
+- a media tool asks you to pick, exactly as the toolbar button does
+- **anything else is yours**, and arrives as `ToolTapped` so you can act on it
+
+Which commands exist is your decision, the same way the directory behind `@`
+is. The editor supplies the mechanism, never the list.
+
 ## Post backgrounds
 
 A few words held large and centred on a colour, the way a social composer

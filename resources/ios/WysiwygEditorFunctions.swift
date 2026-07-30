@@ -1608,12 +1608,19 @@ struct WysiwygSuggestion: Identifiable {
     let label: String
     let detail: String
     let avatar: String
+    /// One of the editor's own glyphs, for a row with no picture.
+    let icon: String
+    /// A tool to RUN instead of inserting anything — what makes a row a
+    /// command rather than a mention.
+    let tool: String
 
     init(_ p: [String: Any]) {
         id = p["id"] as? String ?? ""
         label = p["label"] as? String ?? ""
         detail = p["detail"] as? String ?? ""
         avatar = p["avatar"] as? String ?? ""
+        icon = p["icon"] as? String ?? ""
+        tool = p["tool"] as? String ?? ""
     }
 }
 
@@ -2835,6 +2842,25 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         didChangeExternally()
     }
 
+    /**
+     Remove a range outright.
+
+     What a COMMAND does with the "/h1" you typed: the trigger and the query
+     are an instruction, not text, so they go before the tool runs.
+     */
+    func deleteRange(_ range: NSRange) {
+        guard let tv = textView, let storage = self.storage,
+              range.location >= 0, NSMaxRange(range) <= storage.length else { return }
+
+        isMutating = true
+        storage.deleteCharacters(in: range)
+        isMutating = false
+
+        tv.selectedRange = NSRange(location: range.location, length: 0)
+        refreshState()
+        didChange()
+    }
+
     /// Swap a range for text carrying a link mark — how a mention is stored.
     ///
     /// The link is the entity reference, so what the host gets back says which
@@ -3338,6 +3364,17 @@ final class WysiwygDocumentModel: ObservableObject {
         let length = query.text.count + 1   // the trigger plus what follows it
         let range = NSRange(location: query.start, length: min(length, tv.textStorage.length - query.start))
 
+        // A COMMAND: the trigger and what was typed after it go, and the tool
+        // runs on the line they were on. Nothing is inserted — "/h1" is an
+        // instruction, not text you meant to keep.
+        if !suggestion.tool.isEmpty {
+            model.deleteRange(range)
+            clearSuggestions()
+            runSuggestedTool(suggestion.tool, on: model)
+
+            return
+        }
+
         model.replaceWithEntity(
             range: range,
             text: query.trigger + suggestion.label,
@@ -3345,6 +3382,32 @@ final class WysiwygDocumentModel: ObservableObject {
         )
 
         clearSuggestions()
+    }
+
+    /**
+     Run what a command row asked for.
+
+     A tool the editor owns is applied to the line the command was typed on.
+     Anything else is the HOST's own command — `/date`, `/mention-me` — so it
+     is reported rather than guessed at.
+     */
+    private func runSuggestedTool(_ tool: String, on model: WysiwygEditorModel) {
+        switch tool {
+        case "bold", "italic", "underline", "strikethrough", "code":
+            model.toggleInline(tool)
+        case "h1", "h2", "h3", "bulletList", "orderedList", "checklist", "blockquote", "p":
+            model.applyBlock(tool)
+        case "poll", "divider":
+            runTool(tool)
+        case "image", "camera", "video", "file":
+            var payload: [String: Any] = ["kind": tool]
+            if let id = config.id { payload["id"] = id }
+            LaravelBridge.shared.send?(WysiwygEvents.mediaRequested, payload)
+        default:
+            var payload: [String: Any] = ["tool": tool]
+            if let id = config.id { payload["id"] = id }
+            LaravelBridge.shared.send?(WysiwygEvents.toolTapped, payload)
+        }
     }
 
     /// The auto-save seam: emit ContentChanged once the user stops typing, so
@@ -4520,7 +4583,17 @@ private struct SuggestionList: View {
                         onPick(suggestion)
                     } label: {
                         HStack(spacing: 12) {
-                            if !suggestion.avatar.isEmpty {
+                            if !suggestion.icon.isEmpty {
+                                // A command has a glyph where a person has a
+                                // face. Same footprint, so the rows line up
+                                // whichever kind of lookup is open.
+                                ZStack {
+                                    Circle().fill(theme.textColor.opacity(0.07))
+                                    ToolGlyph(name: suggestion.icon, size: 18,
+                                              color: theme.textColor)
+                                }
+                                .frame(width: 32, height: 32)
+                            } else if !suggestion.avatar.isEmpty {
                                 AvatarView(source: suggestion.avatar, theme: theme)
                                     .frame(width: 32, height: 32)
                             }

@@ -779,6 +779,13 @@ class WysiwygSuggestion(
     val label: String,
     val detail: String,
     val avatar: String,
+    /** One of the editor's own glyphs, for a row with no picture. */
+    val icon: String = "",
+    /**
+     * A tool to RUN instead of inserting anything — what makes a row a
+     * command rather than a mention.
+     */
+    val tool: String = "",
 )
 
 internal fun parseSuggestions(any: Any?): List<WysiwygSuggestion> {
@@ -797,7 +804,10 @@ internal fun parseSuggestions(any: Any?): List<WysiwygSuggestion> {
         if (id.isEmpty() || label.isEmpty()) {
             null
         } else {
-            WysiwygSuggestion(id, label, map["detail"].orEmpty(), map["avatar"].orEmpty())
+            WysiwygSuggestion(
+                id, label, map["detail"].orEmpty(), map["avatar"].orEmpty(),
+                map["icon"].orEmpty(), map["tool"].orEmpty(),
+            )
         }
     }
 }
@@ -3509,6 +3519,32 @@ internal class EditorController(
     fun textNow(): CharSequence = editText.text
 
     /**
+     * Remove a range outright.
+     *
+     * What a COMMAND does with the "/h1" you typed: the trigger and the query
+     * are an instruction, not text, so they go before the tool runs.
+     */
+    fun deleteRange(start: Int, end: Int) {
+        val editable = editText.text
+        val from = start.coerceIn(0, editable.length)
+        val to = end.coerceIn(from, editable.length)
+
+        if (to <= from) return
+
+        pushUndoForced()
+        programmatic = true
+        try {
+            editable.delete(from, to)
+            editText.setSelection(from.coerceAtMost(editable.length))
+        } finally {
+            programmatic = false
+        }
+
+        emit()
+        onStateChanged()
+    }
+
+    /**
      * Swap a range for text carrying a link mark — how a mention is stored.
      *
      * The link is the entity reference, so what the host gets back says which
@@ -4031,22 +4067,7 @@ internal fun EditorScreen(
          * A link, not styled text: the mention has to survive the round trip,
          * and the host's renderer needs to know what it points at.
          */
-        fun applySuggestion(suggestion: WysiwygSuggestion) {
-            val query = suggestionQuery.value
-            val controller = focused.value
 
-            if (query != null && controller != null) {
-                controller.replaceWithEntity(
-                    start = query.start,
-                    end = query.start + query.text.length + 1,
-                    text = query.trigger + suggestion.label,
-                    href = query.kind + ":" + suggestion.id,
-                )
-            }
-
-            suggestionQuery.value = null
-            suggestions.clear()
-        }
 
         /**
          * Place a composed block after the focused segment, then give the
@@ -4080,6 +4101,63 @@ internal fun EditorScreen(
                 SegmentEntry(nextId[0]++, Segment.Text(mutableListOf(WysiwygBlock("p")))),
             )
             rebuildDocument()
+        }
+
+        /**
+         * Run what a command row asked for.
+         *
+         * A tool the editor owns is applied to the line the command was typed
+         * on. Anything else is the HOST's own command — `/date`, `/mention-me`
+         * — so it is reported rather than guessed at.
+         */
+        fun runSuggestedTool(tool: String, controller: EditorController) {
+            when (tool) {
+                "bold", "italic", "underline", "strikethrough", "code" ->
+                    controller.toggleInline(tool)
+                "h1", "h2", "h3", "bulletList", "orderedList", "checklist", "blockquote", "p" ->
+                    controller.applyBlock(tool)
+                "poll" -> {
+                    val poll = WysiwygBlock("poll")
+                    poll.attrs["question"] = ""
+                    poll.attrs["durationMinutes"] =
+                        (config.pollDurations.firstOrNull()?.second ?: 1440).toString()
+                    repeat(config.pollMinOptions) { poll.options.add(PollOption("o${it + 1}", "")) }
+                    insertBlock(poll)
+                }
+                "divider" -> insertBlock(WysiwygBlock("divider"))
+                in WysiwygEditorFunctions.INSERT_TOOLS -> onRequestMedia(tool)
+                else -> onCustomTool(tool)
+            }
+        }
+
+        fun applySuggestion(suggestion: WysiwygSuggestion) {
+            val query = suggestionQuery.value
+            val controller = focused.value
+
+            if (query != null && controller != null) {
+                if (suggestion.tool.isNotEmpty()) {
+                    // A COMMAND: the trigger and what was typed after it go,
+                    // and the tool runs on the line they were on. Nothing is
+                    // inserted — "/h1" is an instruction, not text you meant
+                    // to keep.
+                    controller.deleteRange(query.start, query.start + query.text.length + 1)
+                    suggestionQuery.value = null
+                    suggestions.clear()
+                    runSuggestedTool(suggestion.tool, controller)
+
+                    return
+                }
+
+                controller.replaceWithEntity(
+                    start = query.start,
+                    end = query.start + query.text.length + 1,
+                    text = query.trigger + suggestion.label,
+                    href = query.kind + ":" + suggestion.id,
+                )
+            }
+
+            suggestionQuery.value = null
+            suggestions.clear()
         }
 
         /**
@@ -5759,7 +5837,20 @@ private fun SuggestionList(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
             ) {
-                if (suggestion.avatar.isNotEmpty()) {
+                if (suggestion.icon.isNotEmpty()) {
+                    // A command has a glyph where a person has a face. Same
+                    // footprint, so the rows line up whichever kind of lookup
+                    // is open.
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(foreground.copy(alpha = 0.07f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        GlyphIcon(suggestion.icon, 18.dp, foreground)
+                    }
+                } else if (suggestion.avatar.isNotEmpty()) {
                     SuggestionAvatar(suggestion.avatar, foreground)
                 }
 

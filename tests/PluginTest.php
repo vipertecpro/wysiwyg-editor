@@ -1335,3 +1335,44 @@ describe('Nothing declared without somewhere to land', function () {
             ->and($source)->toContain('accessoryTapped');
     })->with(['iOS', 'Android']);
 });
+
+describe('Slash commands', function () {
+    /**
+     * One pipeline spots a trigger, asks the host what matches and shows the
+     * answer. Whether the pick writes a NAME or changes the BLOCK is a
+     * property of the row — which is why `/h1` needs no machinery of its own.
+     */
+    it('carries a tool through, so a row can be a command', function () {
+        $sent = captureCall(fn () => editor()->suggestions('h', [
+            ['id' => 'h1', 'label' => 'Heading 1', 'icon' => 'h1', 'tool' => 'h1'],
+        ]));
+
+        expect($sent['suggestions'][0])
+            ->toBe(['id' => 'h1', 'label' => 'Heading 1', 'icon' => 'h1', 'tool' => 'h1']);
+    });
+
+    it('leaves a mention row exactly as it was', function () {
+        $sent = captureCall(fn () => editor()->suggestions('gr', [
+            ['id' => 'u2', 'label' => 'Grace Hopper', 'detail' => 'Compiler pioneer'],
+        ]));
+
+        expect($sent['suggestions'][0])
+            ->toBe(['id' => 'u2', 'label' => 'Grace Hopper', 'detail' => 'Compiler pioneer']);
+    });
+
+    /** A slash is a trigger like any other; nothing about it is special. */
+    it('takes a slash as a trigger like any other character', function () {
+        $config = editor()->config('', ['triggers' => ['/' => 'command']]);
+
+        expect($config['triggers'])->toBe(['/' => 'command']);
+    });
+
+    it('still drops a row that could not be shown', function (array $row) {
+        $sent = captureCall(fn () => editor()->suggestions('x', [$row]));
+
+        expect($sent['suggestions'])->toBe([]);
+    })->with([
+        'no id' => [['label' => 'Heading 1', 'tool' => 'h1']],
+        'no label' => [['id' => 'h1', 'tool' => 'h1']],
+    ]);
+});

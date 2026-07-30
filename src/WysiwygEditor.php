@@ -236,6 +236,22 @@ class WysiwygEditor
     public const CUSTOM_TOOL_KEYS = ['id', 'icon', 'label', 'sheet'];
 
     /**
+     * What a row offered in answer to a lookup may carry.
+     *
+     * `id` and `label` are what a MENTION needs — the pick becomes a link
+     * carrying the id. `tool` is what a COMMAND needs: `/h1`, `/todo`,
+     * `/divider`. A row naming a tool replaces the trigger and what was typed
+     * after it, then runs the tool instead of inserting anything.
+     *
+     * That is the whole difference between the two. One pipeline spots the
+     * trigger, asks you what matches and shows the answer; whether the pick
+     * writes a name or changes the block is a property of the row.
+     *
+     * @var list<string>
+     */
+    public const SUGGESTION_KEYS = ['id', 'label', 'detail', 'avatar', 'icon', 'tool'];
+
+    /**
      * Rows the HOST puts in the composer, under the media.
      *
      * The editor owns the whole screen, which means an app cannot put its own
@@ -1037,7 +1053,7 @@ class WysiwygEditor
 
             $row = ['id' => $id, 'label' => $label];
 
-            foreach (['detail', 'avatar'] as $key) {
+            foreach (['detail', 'avatar', 'icon', 'tool'] as $key) {
                 $value = trim((string) ($suggestion[$key] ?? ''));
 
                 if ($value !== '') {
