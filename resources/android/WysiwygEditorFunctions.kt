@@ -99,7 +99,7 @@ object WysiwygEditorFunctions {
     val AVAILABLE_TOOLS = listOf(
         "bold", "italic", "underline", "strikethrough",
         "h1", "h2", "h3",
-        "bulletList", "orderedList", "blockquote",
+        "bulletList", "orderedList", "checklist", "blockquote",
         "link", "code", "textColor", "highlight",
         "image", "camera", "video", "file",
         "poll", "divider", "embed",
@@ -1119,11 +1119,17 @@ internal class WysiwygBlock(
     val options: MutableList<PollOption> = mutableListOf(),
 ) {
     val isEmpty: Boolean get() = runs.all { it.text.isEmpty() }
+
+    /** A checklist item that has been ticked. Only `check` blocks carry this. */
+    val isChecked: Boolean get() = attrs["checked"] == "true"
     val plainText: String get() = runs.joinToString("") { it.text }
     val isText: Boolean get() = KNOWN_TYPES.contains(type)
 
     companion object {
-        val KNOWN_TYPES = setOf("p", "h1", "h2", "h3", "ul", "ol", "blockquote")
+        val KNOWN_TYPES = setOf("p", "h1", "h2", "h3", "ul", "ol", "check", "blockquote")
+
+        /** The three that carry a marker and group into one list on the way out. */
+        val LIST_TYPES = setOf("ul", "ol", "check")
         val MEDIA_TYPES = setOf("image", "video", "file", "embed", "poll", "divider")
 
         /** Attribute keys per media type, in SERIALIZATION order (normative). */
@@ -1319,9 +1325,23 @@ internal object HtmlCoder {
                 "h2" -> open("h2")
                 "h3", "h4", "h5", "h6" -> open("h3")
                 "blockquote" -> open("blockquote")
-                "ul" -> { closeBlock(); listStack.add("ul") }
+                "ul" -> {
+                    closeBlock()
+                    // `data-checklist` is how a checklist says it is one; a
+                    // plain <ul> from anywhere else stays a bulleted list.
+                    listStack.add(
+                        if (attributes(attrText).containsKey("data-checklist")) "check" else "ul",
+                    )
+                }
                 "ol" -> { closeBlock(); listStack.add("ol") }
-                "li" -> open(listStack.lastOrNull() ?: "p")
+                "li" -> {
+                    open(listStack.lastOrNull() ?: "p")
+                    // The tick travels on the item, not on the list.
+                    if (listStack.lastOrNull() == "check") {
+                        val state = attributes(attrText)["data-checked"]
+                        current?.attrs?.put("checked", if (state == "true") "true" else "false")
+                    }
+                }
                 "a" -> {
                     val href = allowedHref(attributes(attrText)["href"])
                     markStack.add("a" to { b -> if (href != null) b.link = href })
@@ -1467,17 +1487,27 @@ internal object HtmlCoder {
                 continue
             }
 
-            if (type == "ul" || type == "ol") {
-                html.append('<').append(type).append('>')
+            if (WysiwygBlock.LIST_TYPES.contains(type)) {
+                // A checklist is a <ul> that says what it is, so anything
+                // rendering the markup without knowing about checklists still
+                // gets a list rather than nothing.
+                html.append(if (type == "check") "<ul data-checklist>" else "<$type>")
                 var ordinal = 1
                 while (i < blocks.size && blocks[i].type == type) {
-                    html.append("<li>").append(inlineHtml(blocks[i].runs)).append("</li>")
                     val text = blocks[i].plainText
-                    lines.add(if (type == "ul") "- $text" else "$ordinal. $text")
+                    if (type == "check") {
+                        val state = if (blocks[i].isChecked) "true" else "false"
+                        html.append("<li data-checked=\"").append(state).append("\">")
+                            .append(inlineHtml(blocks[i].runs)).append("</li>")
+                        lines.add(if (blocks[i].isChecked) "[x] $text" else "[ ] $text")
+                    } else {
+                        html.append("<li>").append(inlineHtml(blocks[i].runs)).append("</li>")
+                        lines.add(if (type == "ul") "- $text" else "$ordinal. $text")
+                    }
                     ordinal++
                     i++
                 }
-                html.append("</").append(type).append('>')
+                html.append(if (type == "check") "</ul>" else "</$type>")
                 continue
             }
 
@@ -1828,6 +1858,12 @@ internal object JsonCoder {
         out.append(",\"type\":").append(quote(block.type))
 
         if (block.isText) {
+            // The only attribute a TEXT block carries. Emitted before the runs
+            // so the key order stays fixed and the two platforms stay
+            // byte-identical.
+            if (block.type == "check") {
+                out.append(",\"checked\":").append(if (block.isChecked) "true" else "false")
+            }
             out.append(",\"runs\":[")
             var first = true
             for (run in block.runs) {
@@ -1938,6 +1974,10 @@ internal object JsonCoder {
             val block = WysiwygBlock(type, id = map["id"] as? String ?: "")
 
             if (block.isText) {
+                if (block.type == "check") {
+                    val checked = map["checked"] == true || map["checked"] == "true"
+                    block.attrs["checked"] = if (checked) "true" else "false"
+                }
                 for (rawRun in map["runs"] as? List<*> ?: emptyList<Any>()) {
                     val runMap = rawRun as? Map<*, *> ?: continue
                     val text = runMap["text"] as? String ?: continue
@@ -2401,6 +2441,7 @@ internal val TOOL_ICONS: Map<String, ToolIcon> = mapOf(
             "M15 8L19.5 8L16.8 11.5C18.6 11.5 19.9 12.7 19.9 14.5C19.9 16.5 18.5 18 16.7 18C15.8 18 15.2 17.7 14.8 17.2"
     ),
     "bulletList" to ToolIcon("M4 7L4.01 7M9 7L20 7M4 12L4.01 12M9 12L20 12M4 17L4.01 17M9 17L20 17"),
+    "checklist" to ToolIcon("M3.5 6.5L5.5 8.5L9 5M3.5 13.5L5.5 15.5L9 12M12 7L20 7M12 14L20 14", 1.8f),
     "orderedList" to ToolIcon(
         "M3.6 5.2L4.7 4.6L4.7 8.4" +
             "M3.2 11.1C3.2 10.4 3.8 9.9 4.5 9.9C5.3 9.9 5.8 10.5 5.8 11.2C5.8 12.4 3.2 13.2 3.2 14.5L5.9 14.5" +
@@ -2578,9 +2619,10 @@ internal const val NBSP = '\u00A0'
  */
 internal object Styler {
 
-    fun markerFor(type: String, ordinal: Int): String = when (type) {
+    fun markerFor(type: String, ordinal: Int, checked: Boolean = false): String = when (type) {
         "ul" -> "•$NBSP"
         "ol" -> "$ordinal.$NBSP"
+        "check" -> if (checked) "\u2611$NBSP" else "\u2610$NBSP"
         else -> ""
     }
 
@@ -2610,7 +2652,7 @@ internal object Styler {
                 if (previous?.type != "ol") ordinal = 1
             }
 
-            val marker = markerFor(block.type, ordinal)
+            val marker = markerFor(block.type, ordinal, block.isChecked)
             if (marker.isNotEmpty()) {
                 out.append(marker)
                 out.setSpan(
@@ -3405,6 +3447,57 @@ internal class EditorController(
         onStateChanged()
     }
 
+    /**
+     * Tick or untick the box at a character offset, if there is one there.
+     *
+     * The marker is chrome — it carries a MarkerSpan, never reaches the
+     * document, and is what the user is actually aiming at. Anywhere else in
+     * the line is a caret placement and must stay one.
+     */
+    fun toggleCheckAt(offset: Int): Boolean {
+        val text = editText.text
+
+        if (offset < 0 || offset >= text.length) return false
+
+        val lineStart = text.lastIndexOf('\n', (offset - 1).coerceAtLeast(0))
+            .let { if (it < 0) 0 else it + 1 }
+        val block = text.getSpans(lineStart, lineStart + 1, BlockSpan::class.java)
+            .firstOrNull { text.getSpanStart(it) <= lineStart }?.type
+
+        if (block != "check") return false
+
+        val marker = text.getSpans(lineStart, lineEnd(text, lineStart), MarkerSpan::class.java)
+            .firstOrNull() ?: return false
+
+        val markerStart = text.getSpanStart(marker)
+        val markerEnd = text.getSpanEnd(marker)
+
+        // Only a tap ON the box counts.
+        if (offset < markerStart || offset >= markerEnd) return false
+
+        val checked = text.substring(markerStart, markerEnd).startsWith("\u2611")
+        val caret = editText.selectionStart
+
+        programmatic = true
+        try {
+            text.removeSpan(marker)
+            text.replace(markerStart, markerEnd, Styler.markerFor("check", 1, !checked))
+            text.setSpan(
+                MarkerSpan(), markerStart, markerStart + 2,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            // The marker is the same length either way, so the caret stays put.
+            editText.setSelection(caret.coerceIn(0, text.length))
+        } finally {
+            programmatic = false
+        }
+
+        emit()
+        onStateChanged()
+
+        return true
+    }
+
     /** Where the caret sits, or -1 when there is a selection instead. */
     fun caretOrNull(): Int {
         val start = editText.selectionStart
@@ -3516,6 +3609,7 @@ internal class EditorController(
         val target = when (tool) {
             "h1", "h2", "h3" -> tool
             "bulletList" -> "ul"
+            "checklist" -> "check"
             "orderedList" -> "ol"
             "blockquote" -> "blockquote"
             else -> return
@@ -3618,7 +3712,7 @@ internal class EditorController(
         }
 
         var contentEnd = safeEnd
-        if (type == "ul" || type == "ol") {
+        if (WysiwygBlock.LIST_TYPES.contains(type)) {
             val marker = Styler.markerFor(type, 1)
             text.insert(start, marker)
             text.setSpan(
@@ -3713,6 +3807,30 @@ internal class WysiwygEditText(context: android.content.Context) :
     android.widget.EditText(context) {
 
     var onSelectionMoved: (() -> Unit)? = null
+
+    /**
+     * A tap landed somewhere. Returning true means it was a checkbox and has
+     * been handled — the caret must not move there as well.
+     */
+    var onTapOffset: ((Int) -> Boolean)? = null
+
+    override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (event.action == android.view.MotionEvent.ACTION_UP) {
+            val x = event.x - totalPaddingLeft + scrollX
+            val y = event.y - totalPaddingTop + scrollY
+            val line = layout?.getLineForVertical(y.toInt())
+
+            if (line != null) {
+                val offset = layout.getOffsetForHorizontal(line, x)
+
+                // Ticking a box is a tap ON the box; anywhere else is a caret
+                // placement and must stay one.
+                if (onTapOffset?.invoke(offset) == true) return true
+            }
+        }
+
+        return super.onTouchEvent(event)
+    }
 
     /**
      * Invoked before a backspace is applied. Returning true consumes it —
@@ -4399,6 +4517,9 @@ internal fun EditorScreen(
                                         controllers[entry.id] = controller
                                         if (focused.value == null) focused.value = controller
 
+                                        onTapOffset = { offset ->
+                                            controller.toggleCheckAt(offset)
+                                        }
                                         onSelectionMoved = {
                                             controller.onCaretMoved()
                                             revision.value++
@@ -5024,6 +5145,7 @@ internal val TOOL_LABEL_KEYS = mapOf(
     "h2" to "styleH2",
     "h3" to "styleH3",
     "bulletList" to "toolBulletList",
+    "checklist" to "toolChecklist",
     "orderedList" to "toolOrderedList",
     "blockquote" to "styleQuote",
     "link" to "toolLink",
@@ -5042,7 +5164,7 @@ internal val TOOL_LABEL_KEYS = mapOf(
 
 /** Sheet sections, in display order. Normative — Swift uses the same lists. */
 internal val SHEET_TEXT_STYLE_TOOLS = listOf("h1", "h2", "h3", "blockquote")
-internal val SHEET_LIST_TOOLS = listOf("bulletList", "orderedList")
+internal val SHEET_LIST_TOOLS = listOf("bulletList", "orderedList", "checklist")
 internal val SHEET_FORMAT_TOOLS =
     listOf("bold", "italic", "underline", "strikethrough", "code", "textColor", "highlight", "clearFormat")
 internal val SHEET_INSERT_TOOLS =
@@ -5070,6 +5192,7 @@ internal fun isToolActive(tool: String, marks: MarkSet, block: String, palette: 
         "highlight" -> marks.highlight != null || palette == "highlight"
         "h1", "h2", "h3", "blockquote" -> block == tool
         "bulletList" -> block == "ul"
+        "checklist" -> block == "check"
         "orderedList" -> block == "ol"
         "p" -> block !in listOf("h1", "h2", "h3", "ul", "ol", "blockquote")
         else -> false
@@ -5220,7 +5343,8 @@ private fun runTool(
 ) {
     when (tool) {
         "bold", "italic", "underline", "strikethrough", "code" -> controller?.toggleInline(tool)
-        "p", "h1", "h2", "h3", "bulletList", "orderedList", "blockquote" -> controller?.applyBlock(tool)
+        "p", "h1", "h2", "h3", "bulletList", "orderedList", "checklist", "blockquote" ->
+            controller?.applyBlock(tool)
         "clearFormat" -> controller?.clearFormat()
         in WysiwygEditorFunctions.INSERT_TOOLS -> onRequestMedia(tool)
         "textColor" -> palette.value = if (palette.value == "textColor") null else "textColor"

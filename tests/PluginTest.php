@@ -238,10 +238,30 @@ describe('Native parity', function () {
     it('handles every tool it offers, in a dispatcher that can act on it', function (string $file, array $functions) {
         $source = file_get_contents($this->pluginPath.$file);
 
+        // EVERY dispatcher, not any one of them. iOS has two — the toolbar
+        // calls one and delegates document-wide tools to the other — and a
+        // tool named in only the second is a button that does nothing.
+        // `checklist` was exactly that, and this test passed anyway.
+        foreach ($functions as $pattern) {
+            expect(preg_match($pattern, $source, $m))->toBe(1, "no dispatcher matched {$pattern}");
+
+            preg_match_all('/"([a-zA-Z0-9]+)"/', $m[1], $named);
+
+            $covered = $named[1];
+
+            if (str_contains($m[1], 'INSERT_TOOLS') || str_contains($m[1], 'insertTools')) {
+                $covered = array_merge($covered, WysiwygEditor::INSERT_TOOLS);
+            }
+
+            $absent = array_values(array_diff(WysiwygEditor::AVAILABLE_TOOLS, $covered));
+
+            expect($absent)->toBe([], 'tools missing from a dispatcher: '.implode(', ', $absent));
+        }
+
         $handled = '';
 
         foreach ($functions as $pattern) {
-            expect(preg_match($pattern, $source, $m))->toBe(1, "no dispatcher matched {$pattern}");
+            preg_match($pattern, $source, $m);
             $handled .= $m[1];
         }
 

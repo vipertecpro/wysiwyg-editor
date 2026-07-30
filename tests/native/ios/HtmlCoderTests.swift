@@ -489,6 +489,40 @@ do {
     same("the text is unaffected", HtmlCoder.emit(blocks, background: "sunset").text, "Big news")
 }
 
+// ── Checklists ──────────────────────────────────────────────────────────────
+print("")
+print("Checklists — a list whose items carry a state")
+do {
+    let html = "<ul data-checklist><li data-checked=\"true\">Ship it</li>"
+             + "<li data-checked=\"false\">Write it up</li></ul>"
+
+    check("a checklist round-trips with each item's state", html, html)
+    checkText("the plain rendition shows the boxes", html, "[x] Ship it\n[ ] Write it up")
+
+    // Anything rendering the markup without knowing about checklists still
+    // gets a list rather than nothing.
+    same("it is a <ul>, so an unaware renderer still sees a list",
+         String(HtmlCoder.emit(HtmlCoder.parse(html)).html.prefix(22)), "<ul data-checklist><li")
+
+    // A plain <ul> from anywhere else must stay a bulleted list.
+    check("a <ul> without the marker is still bullets",
+          "<ul><li>one</li></ul>", "<ul><li>one</li></ul>")
+
+    let blocks = HtmlCoder.parse(html)
+    same("the state survives into JSON",
+         JsonCoder.encode(blocks),
+         "{\"version\":2,\"blocks\":[{\"id\":\"\",\"type\":\"check\",\"checked\":true,\"runs\":[{\"text\":\"Ship it\",\"marks\":{}}]},"
+         + "{\"id\":\"\",\"type\":\"check\",\"checked\":false,\"runs\":[{\"text\":\"Write it up\",\"marks\":{}}]}]}")
+    same("and back out of it", HtmlCoder.emit(JsonCoder.decode(JsonCoder.encode(blocks))).html, html)
+
+    // An item with no state at all is not ticked — the absence of a tick is
+    // the safe reading.
+    same("an item with no state reads as unticked",
+         HtmlCoder.emit(HtmlCoder.parse("<ul data-checklist><li>no state</li></ul>")).html,
+         "<ul data-checklist><li data-checked=\"false\">no state</li></ul>")
+}
+
+
 print("")
 if failures == 0 {
     print("All HtmlCoder tests passed.")

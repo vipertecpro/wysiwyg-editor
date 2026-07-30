@@ -262,7 +262,7 @@ struct WysiwygConfig {
     static let insertTools = ["image", "camera", "video", "file"]
     static let allTools = [
         "bold", "italic", "underline", "strikethrough", "h1", "h2", "h3",
-        "bulletList", "orderedList", "blockquote", "link", "code",
+        "bulletList", "orderedList", "checklist", "blockquote", "link", "code",
         "textColor", "highlight", "image", "camera", "video", "file",
         "poll", "divider", "embed", "clearFormat",
     ]
@@ -384,6 +384,9 @@ extension NSAttributedString.Key {
     static let wysiwygBlock = NSAttributedString.Key("wysiwygBlock")
     /// Marks the non-content list-marker prefix ("•\u{00A0}" / "1.\u{00A0}").
     static let wysiwygMarker = NSAttributedString.Key("wysiwygMarker")
+    /// Whether a checklist item is ticked. Rides on the marker, because the
+    /// marker IS the state — a ☐ and a ☑ are different characters.
+    static let wysiwygChecked = NSAttributedString.Key("wysiwygChecked")
     /// Shading on characters past `maxLength` in soft mode. Ours, not the
     /// user's highlight mark — clearing it must not clear theirs.
     static let wysiwygOverflow = NSAttributedString.Key("wysiwygOverflow")
@@ -447,7 +450,13 @@ struct WysiwygBlock {
     var plainText: String { runs.map(\.text).joined() }
     var isText: Bool { Self.knownTypes.contains(type) }
 
-    static let knownTypes: Set<String> = ["p", "h1", "h2", "h3", "ul", "ol", "blockquote"]
+    static let knownTypes: Set<String> = ["p", "h1", "h2", "h3", "ul", "ol", "check", "blockquote"]
+
+    /// The three that carry a marker and group into one list on the way out.
+    static let listTypes: Set<String> = ["ul", "ol", "check"]
+
+    /// A checklist item that has been ticked. Only `check` blocks carry this.
+    var isChecked: Bool { attrs["checked"] == "true" }
     static let mediaTypes: Set<String> = ["image", "video", "file", "embed", "poll", "divider"]
 
     /// Attribute keys per media type, in SERIALIZATION order (normative).
@@ -647,12 +656,19 @@ enum HtmlCoder {
                 open("blockquote")
             case "ul":
                 closeBlock()
-                listStack.append("ul")
+                // `data-checklist` is how a checklist says it is one; a plain
+                // <ul> from anywhere else stays a bulleted list.
+                listStack.append(attributes(from: attrText)["data-checklist"] != nil ? "check" : "ul")
             case "ol":
                 closeBlock()
                 listStack.append("ol")
             case "li":
                 open(listStack.last ?? "p")
+                // The tick travels on the item, not on the list.
+                if listStack.last == "check" {
+                    let state = attributes(from: attrText)["data-checked"]
+                    current?.attrs["checked"] = state == "true" ? "true" : "false"
+                }
             case "a":
                 let href = allowedHref(attributes(from: attrText)["href"])
                 markStack.append((tag: "a", apply: { if let href { $0.link = href } }))
@@ -794,18 +810,28 @@ enum HtmlCoder {
                 continue
             }
             switch block.type {
-            case "ul", "ol":
+            case "ul", "ol", "check":
                 let type = block.type
-                html += "<\(type)>"
+                // A checklist is a <ul> that says what it is, so anything
+                // rendering the markup without knowing about checklists still
+                // gets a list rather than nothing.
+                html += type == "check" ? "<ul data-checklist>" : "<\(type)>"
                 var itemNumber = 0
                 var j = i
                 while j < blocks.count, blocks[j].type == type {
                     itemNumber += 1
-                    html += "<li>" + inlineHtml(blocks[j].runs) + "</li>"
-                    lines.append((type == "ul" ? "- " : "\(itemNumber). ") + blocks[j].plainText)
+                    if type == "check" {
+                        let state = blocks[j].isChecked ? "true" : "false"
+                        html += "<li data-checked=\"" + state + "\">"
+                            + inlineHtml(blocks[j].runs) + "</li>"
+                        lines.append((blocks[j].isChecked ? "[x] " : "[ ] ") + blocks[j].plainText)
+                    } else {
+                        html += "<li>" + inlineHtml(blocks[j].runs) + "</li>"
+                        lines.append((type == "ul" ? "- " : "\(itemNumber). ") + blocks[j].plainText)
+                    }
                     j += 1
                 }
-                html += "</\(type)>"
+                html += type == "check" ? "</ul>" : "</\(type)>"
                 i = j
             default:
                 let tag = WysiwygBlock.knownTypes.contains(block.type) ? block.type : "p"
@@ -1296,6 +1322,12 @@ enum JsonCoder {
         out += ",\"type\":" + quote(block.type)
 
         if block.isText {
+            // The only attribute a TEXT block carries. Emitted before the runs
+            // so the key order stays fixed and the two platforms stay
+            // byte-identical.
+            if block.type == "check" {
+                out += ",\"checked\":" + (block.isChecked ? "true" : "false")
+            }
             out += ",\"runs\":["
             var first = true
             for run in block.runs where !run.text.isEmpty {
@@ -1392,6 +1424,11 @@ enum JsonCoder {
             var block = WysiwygBlock(type: type, runs: [], id: map["id"] as? String ?? "")
 
             if block.isText {
+                if block.type == "check" {
+                    let checked = (map["checked"] as? NSNumber)?.boolValue
+                        ?? (map["checked"] as? String == "true")
+                    block.attrs["checked"] = checked ? "true" : "false"
+                }
                 for rawRun in map["runs"] as? [Any] ?? [] {
                     guard let runMap = rawRun as? [String: Any],
                           let text = runMap["text"] as? String, !text.isEmpty else { continue }
@@ -1781,6 +1818,23 @@ struct WysiwygStyler {
 
     static let ulMarker = "\u{2022}\u{00A0}"                       // "•<nbsp>"
     static func olMarker(_ n: Int) -> String { "\(n).\u{00A0}" }   // "1.<nbsp>"
+    // A box you can see the state of at a glance, and tap to change.
+    static let uncheckedMarker = "\u{2610}\u{00A0}"                // "☐<nbsp>"
+    static let checkedMarker = "\u{2611}\u{00A0}"                  // "☑<nbsp>"
+
+    static func checkMarker(_ checked: Bool) -> String {
+        checked ? checkedMarker : uncheckedMarker
+    }
+
+    /// The marker a freshly created list item of `type` starts with.
+    static func marker(for type: String, ordinal: Int = 1) -> String {
+        switch type {
+        case "ul": return ulMarker
+        case "ol": return olMarker(ordinal)
+        case "check": return checkMarker(false)
+        default: return ""
+        }
+    }
 
     // MARK: fonts & paragraph styles
 
@@ -1822,7 +1876,7 @@ struct WysiwygStyler {
         style.lineHeightMultiple = typography.lineHeight
         if background != nil { style.alignment = .center }
         switch block {
-        case "ul", "ol":
+        case "ul", "ol", "check":
             style.headIndent = 22 // wrapped lines align past the marker
         case "blockquote":
             style.firstLineHeadIndent = 16
@@ -1910,6 +1964,11 @@ struct WysiwygStyler {
                 out.append(NSAttributedString(string: Self.ulMarker, attributes: markerAttributes(block: "ul")))
             } else if block.type == "ol" {
                 out.append(NSAttributedString(string: Self.olMarker(olCount), attributes: markerAttributes(block: "ol")))
+            } else if block.type == "check" {
+                var attributes = markerAttributes(block: "check")
+                attributes[.wysiwygChecked] = block.isChecked
+                out.append(NSAttributedString(string: Self.checkMarker(block.isChecked),
+                                              attributes: attributes))
             }
             for run in block.runs where !run.text.isEmpty {
                 out.append(NSAttributedString(string: run.text,
@@ -1957,7 +2016,15 @@ struct WysiwygStyler {
                     }
                 }
             }
-            result.append(WysiwygBlock(type: type, runs: runs))
+            var block = WysiwygBlock(type: type, runs: runs)
+
+            if type == "check" {
+                let ticked = attributed.attribute(.wysiwygChecked, at: pr.location,
+                                                  effectiveRange: nil) as? Bool ?? false
+                block.attrs["checked"] = ticked ? "true" : "false"
+            }
+
+            result.append(block)
             index = NSMaxRange(pr)
         }
         // A trailing "\n" means the caret sits on one more (empty) paragraph.
@@ -2083,6 +2150,50 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         guard let s = nsText else { return NSRange(location: 0, length: 0) }
         let loc = min(max(0, location), s.length)
         return s.paragraphRange(for: NSRange(location: loc, length: 0))
+    }
+
+    /// Is the checklist item containing `location` ticked?
+    func isChecked(at location: Int) -> Bool {
+        guard let st = storage else { return false }
+
+        let pr = paragraphRange(at: location)
+
+        guard pr.length > 0, pr.location < st.length else { return false }
+
+        return (st.attribute(.wysiwygChecked, at: pr.location, effectiveRange: nil) as? Bool) ?? false
+    }
+
+    /**
+     Tick or untick the item containing `location`.
+
+     The marker is redrawn rather than edited in place: a ☐ and a ☑ are
+     different characters, and swapping one for the other IS the state as far
+     as the document is concerned.
+     */
+    func setChecked(_ checked: Bool, at location: Int) {
+        guard let st = storage else { return }
+
+        let pr = paragraphRange(at: location)
+        let markerLen = markerLength(of: pr)
+
+        guard markerLen > 0 else { return }
+
+        let caret = textView?.selectedRange ?? NSRange(location: 0, length: 0)
+        var attributes = styler.markerAttributes(block: "check")
+        attributes[.wysiwygChecked] = checked
+
+        isMutating = true
+        st.replaceCharacters(
+            in: NSRange(location: pr.location, length: markerLen),
+            with: NSAttributedString(string: WysiwygStyler.checkMarker(checked),
+                                     attributes: attributes),
+        )
+        isMutating = false
+
+        // The marker is the same length either way, so the caret does not move.
+        textView?.selectedRange = caret
+        refreshState()
+        didChange()
     }
 
     private func blockType(of pr: NSRange) -> String {
@@ -2230,6 +2341,42 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
 
     // MARK: delegate entry points
 
+    /**
+     Tick or untick the box at a point, if there is one there.
+
+     The marker is chrome — it carries `.wysiwygMarker`, never reaches the
+     document, and is what the user is actually aiming at. Anywhere else in the
+     line is a caret placement and must stay one.
+     */
+    func toggleCheck(at point: CGPoint, in tv: UITextView) {
+        guard let storage = self.storage, storage.length > 0 else { return }
+
+        // Where in the text did that land? closestPosition gives a caret spot
+        // even for a tap past the end of a line, so the hit is checked against
+        // the marker's own rectangle rather than trusted outright.
+        guard let position = tv.closestPosition(to: point) else { return }
+
+        let index = tv.offset(from: tv.beginningOfDocument, to: position)
+
+        guard index < storage.length else { return }
+
+        // The tap must be on the marker itself, not merely on that line.
+        var markerRange = NSRange(location: 0, length: 0)
+        guard storage.attribute(.wysiwygMarker, at: index, effectiveRange: &markerRange) != nil,
+              blockType(of: paragraphRange(at: index)) == "check" else { return }
+
+        guard let start = tv.position(from: tv.beginningOfDocument, offset: markerRange.location),
+              let end = tv.position(from: tv.beginningOfDocument,
+                                    offset: NSMaxRange(markerRange)),
+              let range = tv.textRange(from: start, to: end) else { return }
+
+        let box = tv.firstRect(for: range)
+
+        guard box.insetBy(dx: -6, dy: -2).contains(point) else { return }
+
+        setChecked(!isChecked(at: index), at: index)
+    }
+
     func selectionChanged() {
         guard !isMutating, let tv = textView else { return }
         var sel = tv.selectedRange
@@ -2297,7 +2444,7 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         let pr = paragraphRange(at: range.location)
         let block = blockType(of: pr)
         switch block {
-        case "ul", "ol":
+        case "ul", "ol", "check":
             if contentRange(of: pr).length == 0 {
                 // Enter on an EMPTY list item leaves the list (standard behavior).
                 convertParagraphs(in: NSRange(location: range.location, length: 0), to: "p")
@@ -2305,7 +2452,7 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
             }
             // Continue the list: newline + fresh marker inserted through the
             // input system (stays undoable); the number is fixed by renumbering.
-            let marker = block == "ul" ? WysiwygStyler.ulMarker : WysiwygStyler.olMarker(1)
+            let marker = WysiwygStyler.marker(for: block)
             isMutating = true
             tv.selectedRange = range
             tv.typingAttributes = styler.attributes(block: block, marks: MarkSet())
@@ -2400,6 +2547,7 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         let target: String
         switch tool {
         case "bulletList": target = "ul"
+        case "checklist": target = "check"
         case "orderedList": target = "ol"
         default: target = tool // h1 / h2 / h3 / blockquote
         }
@@ -2438,8 +2586,8 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
         if st.length == 0 {
             tv.typingAttributes = styler.attributes(block: newBlock, marks: activeMarks)
             activeBlock = newBlock
-            if newBlock == "ul" || newBlock == "ol" {
-                let marker = newBlock == "ul" ? WysiwygStyler.ulMarker : WysiwygStyler.olMarker(1)
+            if WysiwygBlock.listTypes.contains(newBlock) {
+                let marker = WysiwygStyler.marker(for: newBlock)
                 st.append(NSAttributedString(string: marker, attributes: styler.markerAttributes(block: newBlock)))
                 tv.selectedRange = NSRange(location: st.length, length: 0)
                 tv.undoManager?.removeAllActions()
@@ -2456,8 +2604,8 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
             // Caret on the empty trailing paragraph.
             tv.typingAttributes = styler.attributes(block: newBlock, marks: activeMarks)
             activeBlock = newBlock
-            if newBlock == "ul" || newBlock == "ol" {
-                let marker = newBlock == "ul" ? WysiwygStyler.ulMarker : WysiwygStyler.olMarker(1)
+            if WysiwygBlock.listTypes.contains(newBlock) {
+                let marker = WysiwygStyler.marker(for: newBlock)
                 st.insert(NSAttributedString(string: marker, attributes: styler.markerAttributes(block: newBlock)),
                           at: span.location)
                 tv.selectedRange = NSRange(location: span.location + (marker as NSString).length, length: 0)
@@ -2541,13 +2689,23 @@ final class WysiwygEditorModel: NSObject, ObservableObject {
             switch block {
             case "ul": desired = WysiwygStyler.ulMarker
             case "ol": desired = WysiwygStyler.olMarker(olCount)
+            // A checklist's marker IS its state, so the "correct" one is
+            // whatever it is already showing. Deriving it from the block type
+            // alone erased the box the moment it was drawn.
+            case "check": desired = WysiwygStyler.checkMarker(isChecked(at: pr.location))
             default: desired = ""
             }
             let markerRange = NSRange(location: pr.location, length: lead)
             if s.substring(with: markerRange) != desired {
+                var markerAttributes = styler.markerAttributes(block: block)
+
+                if block == "check" {
+                    markerAttributes[.wysiwygChecked] = isChecked(at: pr.location)
+                }
+
                 st.replaceCharacters(in: markerRange,
                                      with: NSAttributedString(string: desired,
-                                                              attributes: styler.markerAttributes(block: block)))
+                                                              attributes: markerAttributes))
                 mutated = true
                 shiftSelection(edited: markerRange, delta: (desired as NSString).length - lead)
             }
@@ -3275,6 +3433,13 @@ private struct RichTextView: UIViewRepresentable {
         ]
         tv.attributedText = model.initialAttributed
         tv.typingAttributes = model.styler.attributes(block: "p", marks: MarkSet())
+        // Ticking a box is a tap ON the box. A gesture is the only way to know
+        // that: the caret arriving there by arrow key or by a programmatic
+        // restyle must not toggle anything.
+        let tick = UITapGestureRecognizer(target: context.coordinator,
+                                          action: #selector(Coordinator.handleTap(_:)))
+        tick.cancelsTouchesInView = false
+        tv.addGestureRecognizer(tick)
         // The outer ScrollView scrolls; each editor sizes to its content.
         tv.isScrollEnabled = false
         // A non-scrolling UITextView reports an intrinsic width as wide as its
@@ -3356,6 +3521,15 @@ private struct RichTextView: UIViewRepresentable {
 
         func textViewDidChangeSelection(_ textView: UITextView) {
             model.selectionChanged()
+        }
+
+        /// Tick the box the user tapped, if they tapped one.
+        @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            guard let tv = gesture.view as? UITextView else { return }
+
+            let point = gesture.location(in: tv)
+
+            model.toggleCheck(at: point, in: tv)
         }
 
         // Links are edited via the toolbar dialog, never opened from the editor.
@@ -3687,7 +3861,7 @@ private struct EditorScreen: View {
         switch tool {
         case "bold", "italic", "underline", "strikethrough", "code":
             model.toggleInline(tool)
-        case "p", "h1", "h2", "h3", "bulletList", "orderedList", "blockquote":
+        case "p", "h1", "h2", "h3", "bulletList", "orderedList", "checklist", "blockquote":
             model.applyBlock(tool)
         case "clearFormat":
             model.clearFormat()
@@ -4836,6 +5010,7 @@ private let toolIcons: [String: ToolIcon] = [
     "h3": ToolIcon(path: "M4 6L4 18M4 12L11 12M11 6L11 18"
         + "M15 8L19.5 8L16.8 11.5C18.6 11.5 19.9 12.7 19.9 14.5C19.9 16.5 18.5 18 16.7 18C15.8 18 15.2 17.7 14.8 17.2"),
     "bulletList": ToolIcon(path: "M4 7L4.01 7M9 7L20 7M4 12L4.01 12M9 12L20 12M4 17L4.01 17M9 17L20 17"),
+    "checklist": ToolIcon(path: "M3.5 6.5L5.5 8.5L9 5M3.5 13.5L5.5 15.5L9 12M12 7L20 7M12 14L20 14", stroke: 1.8),
     "orderedList": ToolIcon(path: "M3.6 5.2L4.7 4.6L4.7 8.4"
         + "M3.2 11.1C3.2 10.4 3.8 9.9 4.5 9.9C5.3 9.9 5.8 10.5 5.8 11.2C5.8 12.4 3.2 13.2 3.2 14.5L5.9 14.5"
         + "M3.3 15.9L5.9 15.9L4.5 17.7C5.3 17.7 6 18.3 6 19.1C6 19.9 5.4 20.5 4.6 20.5C4 20.5 3.6 20.3 3.3 20"
@@ -4979,6 +5154,7 @@ let toolLabelKeys: [String: String] = [
     "h2": "styleH2",
     "h3": "styleH3",
     "bulletList": "toolBulletList",
+    "checklist": "toolChecklist",
     "orderedList": "toolOrderedList",
     "blockquote": "styleQuote",
     "link": "toolLink",
@@ -4997,7 +5173,7 @@ let toolLabelKeys: [String: String] = [
 
 /// Sheet sections, in display order. Normative — Kotlin uses the same lists.
 let sheetTextStyleTools = ["h1", "h2", "h3", "blockquote"]
-let sheetListTools = ["bulletList", "orderedList"]
+let sheetListTools = ["bulletList", "orderedList", "checklist"]
 let sheetFormatTools = ["bold", "italic", "underline", "strikethrough",
                         "code", "textColor", "highlight", "clearFormat"]
 let sheetInsertTools = ["image", "camera", "video", "file", "poll", "embed", "divider", "link"]
@@ -5022,6 +5198,7 @@ private func isActive(_ tool: String, model: WysiwygEditorModel, palette: Palett
     case "highlight": return model.activeMarks.highlight != nil || palette == .highlight
     case "h1", "h2", "h3", "blockquote": return model.activeBlock == tool
     case "bulletList": return model.activeBlock == "ul"
+    case "checklist": return model.activeBlock == "check"
     case "orderedList": return model.activeBlock == "ol"
     case "p": return !["h1", "h2", "h3", "ul", "ol", "blockquote"].contains(model.activeBlock)
     default: return false
@@ -5157,7 +5334,7 @@ private struct ToolbarRow: View {
         switch tool {
         case "bold", "italic", "underline", "strikethrough", "code":
             model.toggleInline(tool)
-        case "h1", "h2", "h3", "bulletList", "orderedList", "blockquote":
+        case "h1", "h2", "h3", "bulletList", "orderedList", "checklist", "blockquote":
             model.applyBlock(tool)
         case "p":
             model.applyBlock("p")

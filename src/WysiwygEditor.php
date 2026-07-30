@@ -47,7 +47,7 @@ class WysiwygEditor
     public const AVAILABLE_TOOLS = [
         'bold', 'italic', 'underline', 'strikethrough',
         'h1', 'h2', 'h3',
-        'bulletList', 'orderedList', 'blockquote',
+        'bulletList', 'orderedList', 'checklist', 'blockquote',
         'link', 'code', 'textColor', 'highlight',
         'image', 'camera', 'video', 'file',
         'poll', 'divider', 'embed',
@@ -67,7 +67,7 @@ class WysiwygEditor
         'full' => self::AVAILABLE_TOOLS,
         'basic' => ['bold', 'italic', 'underline', 'strikethrough', 'bulletList', 'orderedList', 'link'],
         'comment' => ['bold', 'italic', 'link'],
-        'note' => ['bold', 'italic', 'underline', 'h1', 'h2', 'bulletList', 'orderedList'],
+        'note' => ['bold', 'italic', 'underline', 'h1', 'h2', 'bulletList', 'orderedList', 'checklist'],
     ];
 
     /**
@@ -152,6 +152,7 @@ class WysiwygEditor
         'toolHighlight' => 'Highlight',
         'toolClearFormat' => 'Clear formatting',
         'toolBulletList' => 'Bulleted list',
+        'toolChecklist' => 'Checklist',
         'toolOrderedList' => 'Numbered list',
         'toolLink' => 'Link',
         'toolImage' => 'Photo',
@@ -500,6 +501,7 @@ class WysiwygEditor
         'h2' => 'styleH2',
         'h3' => 'styleH3',
         'bulletList' => 'toolBulletList',
+        'checklist' => 'toolChecklist',
         'orderedList' => 'toolOrderedList',
         'blockquote' => 'styleQuote',
         'link' => 'toolLink',

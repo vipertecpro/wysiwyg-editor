@@ -19,7 +19,7 @@ a JavaScript editor in a browser.
 
 - ✍️ **True native editing** — the platform text engine, keyboard, autocorrect and selection, not a webview
 - 🅱️ **Inline marks** — bold, italic, underline, strikethrough, inline code, links, text color, highlight
-- 📑 **Blocks** — H1–H3, bullet / ordered lists, blockquote, dividers
+- 📑 **Blocks** — H1–H3, bullet / ordered lists, **checklists**, blockquote, dividers
 - 🖼️ **Media** — images, video and attachments, with a pending state while your app uploads
 - 📊 **Polls** — written inline, with per-answer pictures, an option cap and a length
 - 🙋 **Mentions and hashtags** — the editor spots the trigger, YOUR app answers with who matches, and the pick is saved as a link carrying the entity id
@@ -166,7 +166,7 @@ All options are optional:
 
 Available tools for `toolbar` (this order is the `full` preset):
 `bold`, `italic`, `underline`, `strikethrough`, `h1`, `h2`, `h3`,
-`bulletList`, `orderedList`, `blockquote`, `link`, `code`, `textColor`,
+`bulletList`, `orderedList`, `checklist`, `blockquote`, `link`, `code`, `textColor`,
 `highlight`, `image`, `camera`, `video`, `file`, `poll`, `divider`, `embed`,
 `clearFormat`.
 Undo/redo are always present and are not toolbar keys.
@@ -184,7 +184,7 @@ Toolbar presets:
 WysiwygEditor::open($html);                                     // full — everything
 WysiwygEditor::open($html, ['preset' => 'basic']);              // bold italic underline strike lists link
 WysiwygEditor::open($html, ['preset' => 'comment', 'maxLength' => 500]); // bold italic link
-WysiwygEditor::open($html, ['preset' => 'note']);               // bold italic underline h1 h2 lists
+WysiwygEditor::open($html, ['preset' => 'note']);               // bold italic underline h1 h2 lists checklist
 WysiwygEditor::open($html, ['toolbar' => ['bold', 'link']]);    // exactly these, in this order
 ```
 
