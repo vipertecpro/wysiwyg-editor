@@ -5,6 +5,49 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-30
+
+### Added
+
+- **Checklists.** A third list type whose items carry a state: tap the box to
+  tick it, and the tick survives the save. The markup is a `<ul data-checklist>`
+  with `data-checked` on each item, so anything rendering it without knowing
+  about checklists still gets a list rather than nothing — and a plain `<ul>`
+  from elsewhere stays bullets. Added to `AVAILABLE_TOOLS` and the `note`
+  preset as `checklist`.
+- **Slash commands.** A suggestion row may now name a `tool`. Picking it
+  deletes the trigger and everything typed after it — `/h1` is an instruction,
+  not text you meant to keep — and runs the tool on that line. Mentions are
+  unchanged: one pipeline, and whether a pick writes a name or changes the
+  block is a property of the row. A tool the editor does not own arrives as
+  {@see Events\ToolTapped} rather than being guessed at.
+- **`WysiwygEditor::insertText()`** — write at the caret, as if the user had
+  typed it. What a host command needs to finish the job: `/date` comes back as
+  `ToolTapped` with the trigger already removed, and the app puts something
+  there. Inherits the formatting at the caret and lands in the undo stack.
+- A suggestion row also takes an `icon`, so a command has a glyph where a
+  person has a face.
+
+### Fixed
+
+- A tool named in only ONE of the two iOS dispatchers did nothing when tapped
+  while passing every parity check — the toolbar calls one and delegates
+  document-wide tools to the other. The guard now demands every tool in every
+  dispatcher.
+- The iOS list normaliser derived a paragraph's "correct" marker from its block
+  type and rewrote anything else, which erased a checklist's box the instant it
+  was drawn. A checklist's marker IS its state and cannot be derived from the
+  type.
+
+### Internal
+
+- Two tests read both native sources and fail if either never reads a config
+  option, top-level or nested — the drift that made `avatarPlacement` draw an
+  avatar twice on Android. The nested one demands a bracket READ, because
+  several key names double as tool names and mere presence proved nothing.
+- The suite now stubs the native bridge and records what the editor SENDS.
+  `suggestions()` had no coverage at all before: off-device it returned early.
+
 ## [0.5.0] - 2026-07-30
 
 ### Added
