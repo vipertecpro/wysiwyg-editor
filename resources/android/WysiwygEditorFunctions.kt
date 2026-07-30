@@ -4332,7 +4332,22 @@ internal fun EditorScreen(
                                 )
                             }
                             is Segment.Text -> AndroidView(
-                                modifier = Modifier.fillMaxWidth(),
+                                // A card holds its words in the middle; a
+                                // document starts them at the top. iOS does the
+                                // same, and a post that sat differently on the
+                                // two would not be the same post.
+                                modifier = if (activeBackground == null) {
+                                    Modifier.fillMaxWidth()
+                                } else {
+                                    Modifier.fillMaxWidth().heightIn(min = 260.dp)
+                                },
+                                update = { view ->
+                                    view.gravity = if (activeBackground == null) {
+                                        Gravity.TOP or Gravity.START
+                                    } else {
+                                        Gravity.CENTER
+                                    }
+                                },
                                 factory = { context ->
                                     WysiwygEditText(context).apply {
                                         setBackgroundColor(android.graphics.Color.TRANSPARENT)

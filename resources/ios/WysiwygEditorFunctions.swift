@@ -3436,9 +3436,12 @@ private struct EditorScreen: View {
                                minHeight: document.activeBackground == nil ? 0 : 260,
                                alignment: document.activeBackground == nil ? .topLeading : .center)
                     }
+                    // The colour goes behind the WRITING, not behind the
+                    // avatar beside it — a card with a face on it reads as a
+                    // backdrop behind a person rather than as the post.
+                    .background(backgroundCard)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(backgroundCard)
 
                 if document.canUseBackground {
                     BackgroundPicker(document: document, theme: theme)
