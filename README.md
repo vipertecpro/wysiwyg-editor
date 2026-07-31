@@ -15,6 +15,24 @@ PHP API and **zero third-party native libraries**. No webview.
 Think Quill / TipTap / CKEditor — but as a real native mobile screen instead of
 a JavaScript editor in a browser.
 
+## What it looks like
+
+Every screenshot below is the **same** editor, opened with a different options
+array. Nothing here is drawn by the host app.
+
+| Plain text, no toolbar | Mentions the host answers | A few words on a colour |
+| --- | --- | --- |
+| ![Plain composer](docs/screenshots/01-x-composer.png) | ![Mentions](docs/screenshots/03-linkedin-mentions.png) | ![Background](docs/screenshots/05-facebook-background.png) |
+
+| A `/` palette | Tables | Checklists |
+| --- | --- | --- |
+| ![Slash commands](docs/screenshots/07-notion-slash.png) | ![Table](docs/screenshots/08-notion-table.png) | ![Checklist](docs/screenshots/09-notion-checklist.png) |
+
+The accessory rows, the suggestion lists and the command names all come from
+the host application — the editor draws them and reports what was tapped. See
+the [demo app](https://github.com/vipertecpro/supernativephp-wysiwyg-editor)
+for the code behind each one.
+
 ## Features
 
 - ✍️ **True native editing** — the platform text engine, keyboard, autocorrect and selection, not a webview

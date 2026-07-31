@@ -5,6 +5,42 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-31
+
+### Added
+
+- **Tables.** A grid of plain-text cells with an optional header row, inserted
+  with the `table` tool and edited where it sits — a row of small fields with
+  controls to grow or shrink it. It saves as a real `<table>`, so anything
+  rendering your stored markup gets a table rather than an opaque blob, and in
+  JSON the cells are a plain 2-D array. Cells hold text and not marks: a cell
+  on a phone is a word or two, and carrying bold and links into every one of
+  them would multiply the coders for something the layout has no room to show.
+  Sized by `tableDefaultRows` / `tableDefaultColumns` and bounded by
+  `tableMinRows` / `tableMaxRows` / `tableMinColumns` / `tableMaxColumns`.
+
+### Fixed
+
+- **A document could not be written past its last card.** A table, a picture or
+  a divider as the final block left nowhere to put the caret, so anything typed
+  after inserting one went nowhere at all. The editor now keeps a paragraph
+  below the last card, and drops it again on the way out — along with the blank
+  line a card inserted from an empty line leaves above itself. Both are editing
+  affordances rather than content, and neither reaches your payload; a blank
+  line BETWEEN two paragraphs is content and survives.
+- **The editor drew its own colours over an application that had a palette.**
+  NativeUI renamed its namespace for NativePHP 4.0, and every lookup of it here
+  is guarded by `class_exists` — so the rename read as "no theme installed"
+  rather than raising anything, and a blue application opened an orange editor.
+  Both names are recognised now.
+- **Checklist ticks were lost on save on Android.** The coder was never at
+  fault; the reader that turns the live editor buffer back into blocks read the
+  block type and never asked about the tick, so every box saved unticked
+  however the page looked when you left it.
+- **`/table` did nothing.** Slash commands run through a dispatcher of their
+  own, and it did not name the tool — so the typed text was consumed and no
+  table appeared.
+
 ## [0.7.0] - 2026-07-30
 
 ### Added
