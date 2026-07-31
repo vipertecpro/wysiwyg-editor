@@ -9,8 +9,36 @@ use Nativephp\NativeUi\Theme;
 */
 
 // nativephp/native-ui is an optional peer — see tests/Stubs/NativeUiTheme.php.
+// BOTH namespaces it has published under are stubbed, because the plugin has
+// to find either and covering only one is what let a rename go unnoticed.
 if (! class_exists(Theme::class)) {
     require __DIR__.'/Stubs/NativeUiTheme.php';
+}
+
+if (! class_exists(\Native\Mobile\UI\Theme::class)) {
+    require __DIR__.'/Stubs/NativeMobileUiTheme.php';
+}
+
+/**
+ * Put a palette in front of the editor, whichever namespace it looks under.
+ *
+ * A real application has exactly one of these installed; the suite stubs both,
+ * so a test that loaded only one would be asserting against a class the plugin
+ * might not pick. Load both and the test says what it means: "the host has a
+ * theme".
+ *
+ * @param  array<string, mixed>  $tokens
+ */
+function loadHostTheme(array $tokens): void
+{
+    Theme::load($tokens);
+    \Native\Mobile\UI\Theme::load($tokens);
+}
+
+function resetHostTheme(): void
+{
+    Theme::reset();
+    \Native\Mobile\UI\Theme::reset();
 }
 
 /**

@@ -871,20 +871,20 @@ describe('Typography', function () {
     });
 
     it('adopts the host application font when the caller names none', function () {
-        Theme::load(['fonts' => ['default' => 'Sora']]);
+        loadHostTheme(['fonts' => ['default' => 'Sora']]);
 
         expect(editor()->config('')['typography']['fontFamily'])->toBe('Sora');
 
-        Theme::reset();
+        resetHostTheme();
     });
 
     it('lets an explicit family win over the host font', function () {
-        Theme::load(['fonts' => ['default' => 'Sora']]);
+        loadHostTheme(['fonts' => ['default' => 'Sora']]);
 
         expect(editor()->config('', ['typography' => ['fontFamily' => 'Inter']])['typography']['fontFamily'])
             ->toBe('Inter');
 
-        Theme::reset();
+        resetHostTheme();
     });
 });
 
@@ -951,7 +951,7 @@ describe('Host theme adoption', function () {
     });
 
     it('derives the editor palette from the host tokens', function () {
-        Theme::load([
+        loadHostTheme([
             'light' => [
                 'background' => '#FFFFFF',
                 'on-background' => '#111111',
@@ -982,11 +982,11 @@ describe('Host theme adoption', function () {
             'highlight' => '#00FFFF',
         ]);
 
-        Theme::reset();
+        resetHostTheme();
     });
 
     it('stays empty when the host has no tokens, so native defaults apply', function () {
-        Theme::reset();
+        resetHostTheme();
 
         $config = editor()->config('');
 
@@ -995,11 +995,11 @@ describe('Host theme adoption', function () {
     });
 
     it('ignores malformed host colours rather than passing them through', function () {
-        Theme::load(['light' => ['background' => 'rebeccapurple']]);
+        loadHostTheme(['light' => ['background' => 'rebeccapurple']]);
 
         expect(editor()->config('')['themeLight'])->toBe([]);
 
-        Theme::reset();
+        resetHostTheme();
     });
 });
 
@@ -1544,4 +1544,55 @@ describe('Reachable from outside the toolbar', function () {
             '/fun runSuggestedTool\(tool: String, controller: EditorController\) \{(.*?)\n        \}/s',
         ],
     ]);
+});
+
+describe('Adopting the host application palette', function () {
+    /**
+     * NativeUI renamed its namespace when it caught up with NativePHP 4.0 —
+     * `Nativephp\NativeUi` became `Native\Mobile\UI` — and both are in the
+     * wild. Every lookup of it here is guarded by `class_exists`, so knowing
+     * only one name does not crash: a host on the other version simply reads
+     * as "no theme installed" and the editor falls back to its own colours.
+     *
+     * This suite exists because that happened. The stub carried the OLD name,
+     * these tests passed against it, and the editor was meanwhile drawing its
+     * fallback orange over a blue application on a real device.
+     */
+    it('knows both names NativeUI has published its Theme under', function () {
+        $names = (new ReflectionClass(WysiwygEditor::class))->getConstant('NATIVE_UI_THEMES');
+
+        $missing = array_values(array_diff(
+            ['Native\Mobile\UI\Theme', 'Nativephp\NativeUi\Theme'],
+            $names,
+        ));
+
+        expect($missing)->toBe([], 'namespaces NativeUI has used that we would miss: '.implode(', ', $missing));
+    });
+
+    /**
+     * Which one wins cannot be observed by installing them one at a time —
+     * the suite stubs both, and a real app has exactly one. So this pins the
+     * preference order instead, and the test below proves the palette is
+     * actually read through whichever the resolver returned.
+     */
+    it('prefers the name NativeUI uses now', function () {
+        $editor = new WysiwygEditor;
+
+        $resolve = (new ReflectionClass($editor))->getMethod('hostThemeClass');
+        $resolve->setAccessible(true);
+
+        expect($resolve->invoke($editor))->toBe('Native\Mobile\UI\Theme');
+    });
+
+    it('reads the palette out of it', function () {
+        loadHostTheme(['light' => ['primary' => '#2563EB', 'on-surface' => '#27272A']]);
+
+        $editor = new WysiwygEditor;
+        $host = (new ReflectionClass($editor))->getMethod('hostTheme');
+        $host->setAccessible(true);
+
+        expect($host->invoke($editor, 'light'))->toMatchArray(['accent' => '#2563EB']);
+
+        resetHostTheme();
+    });
 });

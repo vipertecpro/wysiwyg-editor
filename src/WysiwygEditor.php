@@ -980,16 +980,52 @@ class WysiwygEditor
     }
 
     /**
+     * Every namespace NativeUI's Theme has lived under.
+     *
+     * The package renamed `Nativephp\NativeUi` to `Native\Mobile\UI` when it
+     * caught up with NativePHP 4.0, and both are in the wild. This matters
+     * more than a rename usually would because every use of it is guarded by
+     * `class_exists` — so looking for one name only means a host on the other
+     * version reads as "no theme installed", and the editor quietly falls back
+     * to its own colours instead of adopting the app's. Nothing breaks; it
+     * just stops looking like the app it is embedded in.
+     *
+     * @var list<class-string>
+     */
+    protected const NATIVE_UI_THEMES = [
+        \Native\Mobile\UI\Theme::class,
+        Theme::class,
+    ];
+
+    /**
+     * NativeUI's Theme, under whichever name this application has it.
+     *
+     * @return class-string|null
+     */
+    protected function hostThemeClass(): ?string
+    {
+        foreach (self::NATIVE_UI_THEMES as $theme) {
+            if (class_exists($theme)) {
+                return $theme;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * The host application's font, if its theme names one. NativeUI carries
      * `fonts.default` (preferred) and a literal `font-family` token.
      */
     protected function hostFontFamily(): string
     {
-        if (! class_exists(Theme::class)) {
+        $theme = $this->hostThemeClass();
+
+        if ($theme === null) {
             return '';
         }
 
-        $tokens = Theme::all();
+        $tokens = $theme::all();
 
         foreach ([$tokens['fonts']['default'] ?? null, $tokens['font-family'] ?? null] as $candidate) {
             if (is_string($candidate) && trim($candidate) !== '') {
@@ -1496,11 +1532,13 @@ class WysiwygEditor
      */
     protected function hostTheme(string $scheme): array
     {
-        if (! class_exists(Theme::class)) {
+        $theme = $this->hostThemeClass();
+
+        if ($theme === null) {
             return [];
         }
 
-        $tokens = Theme::all()[$scheme] ?? [];
+        $tokens = $theme::all()[$scheme] ?? [];
 
         if (! is_array($tokens) || $tokens === []) {
             return [];
