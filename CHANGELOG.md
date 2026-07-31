@@ -5,6 +5,31 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-30
+
+### Added
+
+- **`saveStyle => 'none'`** — no Save button at all, for an editor that saves
+  as you type. Pair it with `changeDebounce`: with the app already persisting,
+  a second button that also saves is a lie about what the first one did. The
+  close control commits on the way out so the last keystrokes inside the
+  debounce window are not lost, and takes its label from `strings.save`,
+  because a button that saves must not say "Cancel".
+- **Test assertions for apps using the editor.** NativePHP 4.0 lets a plugin
+  teach its own vocabulary to the FakeBridge, so a test of YOUR screen can say
+  `assertEditorOpened()` instead of knowing that opening an editor means a
+  `WysiwygEditor.Open` call carrying JSON. Eight assertions, registered only
+  while an app runs its tests, absent below 4.0.0 at no cost. See
+  [Testing your integration](README.md#testing-your-integration).
+
+### Changed
+
+- Verified against **NativePHP 4.0.0** on both platforms, and passes
+  `php artisan native:plugin:validate`. Apps on 4.x need one line in
+  `config/view.php` before the build will boot — see the note under
+  Requirements. It is not this plugin's doing, but it is the first thing you
+  will hit.
+
 ## [0.6.0] - 2026-07-30
 
 ### Added
