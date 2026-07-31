@@ -1596,3 +1596,34 @@ describe('Adopting the host application palette', function () {
         resetHostTheme();
     });
 });
+
+describe('Reading the live editor back', function () {
+    /**
+     * A checklist item's state lives in the editor's own buffer — an attribute
+     * on iOS, the marker glyph on Android — and nowhere else. The function that
+     * turns that buffer back into blocks is the only place it can be recovered,
+     * so if it does not look, every box saves unticked no matter how the page
+     * looked when you left it.
+     *
+     * That is exactly what Android did. The coder round-trips checklist state
+     * perfectly in both parity harnesses; this reader sits on the other side of
+     * it, in platform code the harness cannot reach, and simply never asked.
+     */
+    it('recovers checklist state from the buffer', function (string $file, string $pattern) {
+        $source = file_get_contents($this->pluginPath.$file);
+
+        expect(preg_match($pattern, $source, $m))->toBe(1, "no buffer reader matched {$pattern}");
+
+        expect($m[1])->toContain('check');
+        expect($m[1])->toContain('checked');
+    })->with([
+        [
+            '/resources/ios/WysiwygEditorFunctions.swift',
+            '/func blocks\(from attributed: NSAttributedString\) -> \[WysiwygBlock\] \{(.*?)\n    \}/s',
+        ],
+        [
+            '/resources/android/WysiwygEditorFunctions.kt',
+            '/fun toBlocks\(text: android\.text\.Spanned\): MutableList<WysiwygBlock> \{(.*?)\n    \}/s',
+        ],
+    ]);
+});

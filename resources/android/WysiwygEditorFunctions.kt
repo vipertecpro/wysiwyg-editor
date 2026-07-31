@@ -2986,6 +2986,25 @@ internal object Styler {
                 .maxByOrNull { text.getSpanStart(it) }?.type ?: "p"
             val block = WysiwygBlock(if (WysiwygBlock.KNOWN_TYPES.contains(type)) type else "p")
 
+            // A checklist item's MARKER is its state — there is nowhere else
+            // the tick lives. Reading the type back without reading this saved
+            // every box unticked however the page looked, which is the one
+            // thing a to-do list has to get right. Mirrors iOS, which carries
+            // the same flag on an attribute rather than in the glyph.
+            if (block.type == "check") {
+                val ticked = text.getSpans(lineStart, maxOf(lineStart, lineEnd), MarkerSpan::class.java)
+                    .filter { text.getSpanStart(it) <= lineStart }
+                    .maxByOrNull { text.getSpanStart(it) }
+                    ?.let { marker ->
+                        val from = text.getSpanStart(marker)
+                        val to = minOf(text.getSpanEnd(marker), text.length)
+
+                        from in 0..to && text.substring(from, to).startsWith('\u2611')
+                    } ?: false
+
+                block.attrs["checked"] = if (ticked) "true" else "false"
+            }
+
             // Skip the marker prefix — it is chrome, never content.
             var contentStart = lineStart
             if (lineEnd > lineStart) {
