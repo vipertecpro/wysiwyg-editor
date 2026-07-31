@@ -45,23 +45,26 @@ a JavaScript editor in a browser.
   in CI, so treat it as best-effort
 - iOS 15+ / Android API 26+
 
-### A note on NativePHP 4.0.0
+### On NativePHP 4.0.0
 
-This plugin works on `nativephp/mobile` 3.x and 4.x. As of 4.0.0 there is one
-thing to know that is **not** this plugin's doing:
+Works on `nativephp/mobile` 3.x and 4.x. On 4.x there is one thing to set up
+in YOUR app, once:
 
-`native:run` fails on both platforms with *"Composer install failed"*. The
-build stages a copy of your app and runs `composer install` in it;
-`BundleExclusions::PROJECT` excludes `storage/framework` from that copy, and
-4.0.0's service provider now needs `storage/framework/views` when
-`package:discover` boots. The bundle-zip path re-creates those directories —
-the staged copy does not.
+```php
+// config/view.php  — publish it if you have not already
+'compiled' => env('VIEW_COMPILED_PATH', storage_path('framework/views')),
+```
 
-`4.0.0-rc.1` builds fine. Reported upstream.
+The framework default wraps that path in `realpath()`. NativePHP stages a copy
+of your app to run `composer install` in, and that copy excludes
+`storage/framework` — so the directory does not exist yet when
+`package:discover` boots. `realpath()` answers `false`, the view compiler
+rejects an empty cache path, and the build stops with *"Please provide a valid
+cache path"*. Handing the path over as a plain string lets the compiler create
+the directory itself.
 
-The one thing you lose by staying on the RC is `FakeBridge` macros, so the
-assertions in [Testing your integration](#testing-your-integration) are
-inert there — they cost nothing and start working the moment you move up.
+Nothing to do with this plugin — it bites any app on 4.x — but it is the first
+thing you will hit, so it is written down here.
 
 ## Platform support
 
@@ -1008,7 +1011,8 @@ Registered for you when the app is running its tests. Available:
 | `assertTextInserted(?string $text)` | A host command wrote at the caret |
 | `assertAccessorySet($id, ?$value)` | A host control was updated to show a choice |
 
-Needs `nativephp/mobile` 4.0.0 or newer — see the note under Requirements.
+Needs `nativephp/mobile` 4.0.0 or newer. Below that they are simply absent,
+which costs nothing.
 
 ## License
 
