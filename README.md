@@ -15,23 +15,17 @@ PHP API and **zero third-party native libraries**. No webview.
 Think Quill / TipTap / CKEditor — but as a real native mobile screen instead of
 a JavaScript editor in a browser.
 
-## What it looks like
+## See it running
 
-Every screenshot below is the **same** editor, opened with a different options
-array. Nothing here is drawn by the host app.
+Every configuration below is the same editor with a different options array.
+The [**demo application**](https://github.com/vipertecpro/supernativephp-wysiwyg-editor)
+shows each one as a working screen with screenshots and the code behind it —
+a plain-text composer with no toolbar, mentions the host answers, a few words
+held on a colour, a `/` palette, tables, checklists, and an editor with no Save
+button at all.
 
-| Plain text, no toolbar | Mentions the host answers | A few words on a colour |
-| --- | --- | --- |
-| ![Plain composer](docs/screenshots/01-x-composer.png) | ![Mentions](docs/screenshots/03-linkedin-mentions.png) | ![Background](docs/screenshots/05-facebook-background.png) |
-
-| A `/` palette | Tables | Checklists |
-| --- | --- | --- |
-| ![Slash commands](docs/screenshots/07-notion-slash.png) | ![Table](docs/screenshots/08-notion-table.png) | ![Checklist](docs/screenshots/09-notion-checklist.png) |
-
-The accessory rows, the suggestion lists and the command names all come from
-the host application — the editor draws them and reports what was tapped. See
-the [demo app](https://github.com/vipertecpro/supernativephp-wysiwyg-editor)
-for the code behind each one.
+Start there if you are deciding whether this fits; the options each screen
+passes are the whole of what makes them different.
 
 ## Features
 
