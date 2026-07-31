@@ -1427,3 +1427,82 @@ describe('An editor that saves as you type', function () {
         expect(editor()->config('', ['changeDebounce' => 800])['changeDebounce'])->toBe(800);
     });
 });
+
+describe('Packaging', function () {
+    /**
+     * What `php artisan native:plugin:validate` checks, run here so a broken
+     * package fails in THIS suite rather than in somebody's build. The
+     * official command needs a host app; these do not.
+     */
+    it('declares itself as a NativePHP plugin', function () {
+        $composer = json_decode(file_get_contents(__DIR__.'/../composer.json'), true);
+
+        expect($composer['type'])->toBe('nativephp-plugin')
+            ->and($composer['extra']['nativephp']['manifest'])->toBe('nativephp.json');
+    });
+
+    it('points at a service provider that exists', function () {
+        $composer = json_decode(file_get_contents(__DIR__.'/../composer.json'), true);
+
+        foreach ($composer['extra']['laravel']['providers'] as $provider) {
+            expect(class_exists($provider))->toBeTrue();
+        }
+    });
+
+    /**
+     * A hook naming a command nobody registered fails at build time, in
+     * somebody else's project, with no clue where it came from.
+     */
+    it('registers every hook command it declares', function () {
+        $manifest = json_decode(file_get_contents(__DIR__.'/../nativephp.json'), true);
+        $provider = file_get_contents(__DIR__.'/../src/WysiwygEditorServiceProvider.php');
+
+        foreach ($manifest['hooks'] ?? [] as $signature) {
+            $classes = glob(__DIR__.'/../src/Commands/*.php');
+            $found = false;
+
+            foreach ($classes as $file) {
+                if (str_contains(file_get_contents($file), $signature)) {
+                    $found = true;
+                    expect($provider)->toContain(basename($file, '.php'));
+                }
+            }
+
+            expect($found)->toBeTrue("no command declares the signature {$signature}");
+        }
+    });
+
+    /** Every asset the manifest promises has to be in the package. */
+    it('ships every asset it declares', function () {
+        $manifest = json_decode(file_get_contents(__DIR__.'/../nativephp.json'), true);
+
+        // Declared per platform: {"android": [...], "ios": [...]}.
+        $declared = array_merge(...array_values($manifest['assets'] ?? ['none' => []]));
+
+        foreach ($declared as $asset) {
+            $path = is_array($asset) ? ($asset['source'] ?? $asset['path'] ?? '') : $asset;
+
+            expect($path)->not->toBe('')
+                ->and(file_exists(__DIR__.'/../'.ltrim($path, '/')))->toBeTrue();
+        }
+
+        // An empty list is legitimate — this plugin ships no bundled files —
+        // so the assertion that matters is that the KEYS are there to read.
+        expect($manifest['assets'])->toHaveKeys(['android', 'ios']);
+    });
+
+    /**
+     * The native sources are found by convention rather than listed, so the
+     * manifest cannot catch them going missing. Nothing else would either:
+     * the build would simply compile a plugin with no implementation.
+     */
+    it('ships the native sources both platforms compile', function (string $path) {
+        $file = __DIR__.'/../'.$path;
+
+        expect(file_exists($file))->toBeTrue()
+            ->and(filesize($file))->toBeGreaterThan(1000);
+    })->with([
+        'resources/ios/WysiwygEditorFunctions.swift',
+        'resources/android/WysiwygEditorFunctions.kt',
+    ]);
+});
