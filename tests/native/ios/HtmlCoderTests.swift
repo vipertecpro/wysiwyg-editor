@@ -277,7 +277,8 @@ do {
         case .media(let b): return "media(\(b.type))"
         }
     }
-    if shape == ["text(2)", "media(divider)", "text(1)", "media(image)"] {
+    // The trailing `text(0)` is the caret below the last card.
+    if shape == ["text(2)", "media(divider)", "text(1)", "media(image)", "text(1)"] {
         print("  ✓ consecutive text blocks collapse into one editor")
     } else {
         failures += 1
@@ -327,6 +328,62 @@ do {
     } else {
         failures += 1
         print("  ✗ an empty document still offers somewhere to type")
+    }
+}
+
+do {
+    // A card as the last block used to be a dead end: insert a table and
+    // everything typed afterwards went nowhere, because there was no caret
+    // below it.
+    let ending = HtmlCoder.parse("<p>Stock</p><table><tr><td>a</td></tr></table>")
+
+    if segmentsOf(ending).last?.isText == true, segmentsOf(ending).count == 3 {
+        print("  ✓ a document ending in a card can still be written past")
+    } else {
+        failures += 1
+        print("  ✗ a document ending in a card can still be written past")
+    }
+}
+
+do {
+    // A card inserted from a blank line leaves that line above it. Saving it
+    // would put a gap before the card that nobody typed.
+    let leading = HtmlCoder.parse("<p><br></p><table><tr><td>a</td></tr></table>")
+    let html = HtmlCoder.emit(blocksOf(segmentsOf(leading))).html
+
+    if html == "<table><tr><td>a</td></tr></table>" {
+        print("  ✓ a blank line above a card is not emitted either")
+    } else {
+        failures += 1
+        print("  ✗ a blank line above a card is not emitted either -> \(html)")
+    }
+}
+
+do {
+    // But a blank line the user typed BETWEEN two paragraphs is content, and
+    // the rule above must not reach it.
+    let kept = HtmlCoder.parse("<p>a</p><p><br></p><p>b</p>")
+    let html = HtmlCoder.emit(blocksOf(segmentsOf(kept))).html
+
+    if html == "<p>a</p><p><br></p><p>b</p>" {
+        print("  ✓ a blank line between paragraphs survives")
+    } else {
+        failures += 1
+        print("  ✗ a blank line between paragraphs survives -> \(html)")
+    }
+}
+
+do {
+    // …and that affordance must not become content: the trailing paragraph is
+    // empty, so nothing extra reaches the payload.
+    let ending = HtmlCoder.parse("<p>Stock</p><table><tr><td>a</td></tr></table>")
+    let html = HtmlCoder.emit(blocksOf(segmentsOf(ending))).html
+
+    if !html.contains("<p></p>"), html.hasSuffix("</table>") {
+        print("  ✓ the trailing paragraph is not emitted")
+    } else {
+        failures += 1
+        print("  ✗ the trailing paragraph is not emitted -> \(html)")
     }
 }
 
@@ -521,6 +578,41 @@ do {
          HtmlCoder.emit(HtmlCoder.parse("<ul data-checklist><li>no state</li></ul>")).html,
          "<ul data-checklist><li data-checked=\"false\">no state</li></ul>")
 }
+
+// ── Tables ──────────────────────────────────────────────────────────────────
+print("")
+print("Tables — a grid HTML already has an element for")
+do {
+    let plain = "<table><tr><td>Item</td><td>Qty</td></tr><tr><td>Tape</td><td>2</td></tr></table>"
+    check("a table round-trips cell for cell", plain, plain)
+    checkText("the plain rendition is tab separated", plain, "Item\tQty\nTape\t2")
+
+    // A header is the FIRST row using <th>.
+    let headed = "<table><tr><th>Item</th><th>Qty</th></tr><tr><td>Tape</td><td>2</td></tr></table>"
+    check("a header row survives as one", headed, headed)
+
+    // Ragged input cannot be laid out as a grid, and dropping the short row
+    // would lose what it holds.
+    same("a short row is padded rather than dropped",
+         HtmlCoder.emit(HtmlCoder.parse("<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>")).html,
+         "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td></td></tr></table>")
+
+    same("an empty table is not emitted at all",
+         HtmlCoder.emit(HtmlCoder.parse("<table></table>")).html, "")
+
+    let blocks = HtmlCoder.parse(plain)
+    same("cells survive into JSON",
+         JsonCoder.encode(blocks),
+         "{\"version\":2,\"blocks\":[{\"id\":\"\",\"type\":\"table\",\"header\":\"false\",\"rows\":[[\"Item\",\"Qty\"],[\"Tape\",\"2\"]]}]}")
+    same("and back out of it",
+         HtmlCoder.emit(JsonCoder.decode(JsonCoder.encode(blocks))).html, plain)
+
+    // A cell is plain text, so anything that looks like markup is escaped.
+    same("a cell cannot smuggle markup",
+         HtmlCoder.emit(HtmlCoder.parse("<table><tr><td>a &lt; b</td></tr></table>")).html,
+         "<table><tr><td>a &lt; b</td></tr></table>")
+}
+
 
 
 print("")

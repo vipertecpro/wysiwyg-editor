@@ -50,12 +50,23 @@ class WysiwygEditor
         'bulletList', 'orderedList', 'checklist', 'blockquote',
         'link', 'code', 'textColor', 'highlight',
         'image', 'camera', 'video', 'file',
-        'poll', 'divider', 'embed',
+        'poll', 'table', 'divider', 'embed',
         'clearFormat',
     ];
 
     /** Toolbar tools that ask the HOST for media rather than formatting text. */
     public const INSERT_TOOLS = ['image', 'camera', 'video', 'file'];
+
+    /**
+     * Tools that put a BLOCK in the document, composed by the editor itself.
+     *
+     * These are the ones reachable from outside the toolbar — a host sheet, a
+     * slash command — because inserting something needs no selection to act
+     * on. A mark does; that is why `bold` is not here.
+     *
+     * @var list<string>
+     */
+    public const BLOCK_TOOLS = ['poll', 'table', 'divider'];
 
     /**
      * Built-in toolbar presets → ordered tool lists, so common editors are a
@@ -153,6 +164,12 @@ class WysiwygEditor
         'toolClearFormat' => 'Clear formatting',
         'toolBulletList' => 'Bulleted list',
         'toolChecklist' => 'Checklist',
+        'toolTable' => 'Table',
+        'tableRowAdd' => '+ Row',
+        'tableRowRemove' => '− Row',
+        'tableColumnAdd' => '+ Col',
+        'tableColumnRemove' => '− Col',
+        'tableHeader' => 'Header',
         'toolOrderedList' => 'Numbered list',
         'toolLink' => 'Link',
         'toolImage' => 'Photo',
@@ -359,6 +376,26 @@ class WysiwygEditor
     public const AVATAR_PLACEMENTS = ['text', 'header', 'none'];
 
     /**
+     * How big a table may get.
+     *
+     * A table on a phone is a small thing — past a handful of columns the
+     * cells are too narrow to read, let alone type into, and the answer is a
+     * different layout rather than a wider table. The cap is what a phone can
+     * actually show, not an arbitrary limit.
+     *
+     * @var array{minRows: int, maxRows: int, minColumns: int, maxColumns: int}
+     */
+    public const TABLE_RANGE = [
+        'minRows' => 1,
+        'maxRows' => 20,
+        'minColumns' => 1,
+        'maxColumns' => 5,
+    ];
+
+    /** What a table starts as when inserted. */
+    public const TABLE_DEFAULT = ['rows' => 2, 'columns' => 2];
+
+    /**
      * How long a poll runs, offered in the composer.
      *
      * Labels are localizable like everything else; the VALUE is minutes,
@@ -529,6 +566,7 @@ class WysiwygEditor
         'h3' => 'styleH3',
         'bulletList' => 'toolBulletList',
         'checklist' => 'toolChecklist',
+        'table' => 'toolTable',
         'orderedList' => 'toolOrderedList',
         'blockquote' => 'styleQuote',
         'link' => 'toolLink',
@@ -873,6 +911,12 @@ class WysiwygEditor
             'pollMinOptions' => self::POLL_OPTION_RANGE['min'],
             'pollMaxOptions' => self::POLL_OPTION_RANGE['max'],
             'pollDurations' => self::POLL_DURATIONS,
+            'tableDefaultRows' => self::TABLE_DEFAULT['rows'],
+            'tableDefaultColumns' => self::TABLE_DEFAULT['columns'],
+            'tableMinRows' => self::TABLE_RANGE['minRows'],
+            'tableMaxRows' => self::TABLE_RANGE['maxRows'],
+            'tableMinColumns' => self::TABLE_RANGE['minColumns'],
+            'tableMaxColumns' => self::TABLE_RANGE['maxColumns'],
             'accessories' => $this->resolveAccessories($options['accessories'] ?? []),
             'customTools' => $this->resolveCustomTools($options['customTools'] ?? []),
             'sheets' => $this->resolveSheets($options['sheets'] ?? []),

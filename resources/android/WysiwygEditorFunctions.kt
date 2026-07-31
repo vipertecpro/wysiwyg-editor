@@ -102,7 +102,7 @@ object WysiwygEditorFunctions {
         "bulletList", "orderedList", "checklist", "blockquote",
         "link", "code", "textColor", "highlight",
         "image", "camera", "video", "file",
-        "poll", "divider", "embed",
+        "poll", "table", "divider", "embed",
         "clearFormat",
     )
 
@@ -184,6 +184,13 @@ object WysiwygEditorFunctions {
         /** Sheets the host declared, presented over the editor's own chrome. */
         val sheets: List<WysiwygHostSheet>,
         /** Colours a short post can be written on. */
+        /** How big a table may get, and what it starts as. */
+        val tableDefaultRows: Int,
+        val tableDefaultColumns: Int,
+        val tableMinRows: Int,
+        val tableMaxRows: Int,
+        val tableMinColumns: Int,
+        val tableMaxColumns: Int,
         val backgrounds: List<WysiwygBackground>,
         /** Past this many characters a background is dropped. */
         val backgroundMaxLength: Int,
@@ -382,6 +389,12 @@ object WysiwygEditorFunctions {
                     .filterKeys { it.length == 1 }
                     .filterValues { it.isNotEmpty() },
                 sheets = parseSheets(parameters["sheets"]),
+                tableDefaultRows = (parameters["tableDefaultRows"] as? Number)?.toInt() ?: 2,
+                tableDefaultColumns = (parameters["tableDefaultColumns"] as? Number)?.toInt() ?: 2,
+                tableMinRows = (parameters["tableMinRows"] as? Number)?.toInt() ?: 1,
+                tableMaxRows = (parameters["tableMaxRows"] as? Number)?.toInt() ?: 20,
+                tableMinColumns = (parameters["tableMinColumns"] as? Number)?.toInt() ?: 1,
+                tableMaxColumns = (parameters["tableMaxColumns"] as? Number)?.toInt() ?: 5,
                 backgrounds = parseBackgrounds(parameters["backgrounds"]),
                 backgroundMaxLength = (parameters["backgroundMaxLength"] as? Number)?.toInt() ?: 130,
                 toolbarAlign = parameters["toolbarAlign"] as? String ?: "leading",
@@ -871,6 +884,23 @@ class WysiwygBackground(
     val textArgb: Int get() = android.graphics.Color.parseColor(textColor)
 }
 
+/**
+ * An empty table.
+ *
+ * Two by two: the smallest thing that is recognisably a table, and small
+ * enough to fit a phone before anybody starts widening it.
+ */
+internal fun newTable(config: WysiwygEditorFunctions.EditorConfig): WysiwygBlock {
+    val block = WysiwygBlock("table")
+    block.attrs["header"] = "true"
+
+    repeat(config.tableDefaultRows) {
+        block.rows.add(MutableList(config.tableDefaultColumns) { "" })
+    }
+
+    return block
+}
+
 private fun parseBackgrounds(any: Any?): List<WysiwygBackground> {
     val rows = when (any) {
         is List<*> -> any
@@ -1147,6 +1177,14 @@ internal class WysiwygBlock(
     var id: String = "",
     val attrs: MutableMap<String, String> = mutableMapOf(),
     val options: MutableList<PollOption> = mutableListOf(),
+    /**
+     * Table cells, row by row.
+     *
+     * Plain strings rather than runs: a cell on a phone is a word or two, and
+     * carrying marks into every cell would multiply the coders and the editing
+     * surface for something the layout has no room to show anyway.
+     */
+    val rows: MutableList<MutableList<String>> = mutableListOf(),
 ) {
     val isEmpty: Boolean get() = runs.all { it.text.isEmpty() }
 
@@ -1160,7 +1198,7 @@ internal class WysiwygBlock(
 
         /** The three that carry a marker and group into one list on the way out. */
         val LIST_TYPES = setOf("ul", "ol", "check")
-        val MEDIA_TYPES = setOf("image", "video", "file", "embed", "poll", "divider")
+        val MEDIA_TYPES = setOf("image", "video", "file", "embed", "poll", "table", "divider")
 
         /** Attribute keys per media type, in SERIALIZATION order (normative). */
         val MEDIA_ATTRS = mapOf(
@@ -1172,6 +1210,7 @@ internal class WysiwygBlock(
             // host computes from it. Both travel, because the editor owns no
             // clock and cannot turn one into the other.
             "poll" to listOf("question", "multiple", "durationMinutes", "closesAt"),
+        "table" to listOf("header"),
             "divider" to listOf(),
         )
     }
@@ -1218,6 +1257,11 @@ internal object HtmlCoder {
         val markStack = mutableListOf<Pair<String, (MarkBuilder) -> Unit>>()
         // The media block currently being assembled from a <figure>, if any.
         var mediaBlock: WysiwygBlock? = null
+        // The table currently being assembled, its row in progress, and the
+        // cell text collecting between <td> and </td>.
+        var tableBlock: WysiwygBlock? = null
+        var tableRow = mutableListOf<String>()
+        var tableCell: StringBuilder? = null
         // How many document wrappers are open. A bare <div> is treated as a
         // paragraph, for tolerance when parsing markup from elsewhere — but
         // OUR background wrapper is not one, and opening a paragraph for it
@@ -1260,6 +1304,11 @@ internal object HtmlCoder {
 
         fun appendText(decoded: String) {
             val text = collapseWhitespace(decoded)
+            if (tableCell != null) {
+                tableCell!!.append(text)
+
+                return
+            }
             val media = mediaBlock
             if (media != null) {
                 // Inside a <figure>: only the caption is content; anything else
@@ -1355,6 +1404,21 @@ internal object HtmlCoder {
                 "h2" -> open("h2")
                 "h3", "h4", "h5", "h6" -> open("h3")
                 "blockquote" -> open("blockquote")
+                "table" -> {
+                    closeBlock()
+                    tableBlock = WysiwygBlock("table").also { it.attrs["header"] = "false" }
+                    tableRow = mutableListOf()
+                    tableCell = null
+                }
+                "tr" -> tableRow = mutableListOf()
+                "td", "th" -> {
+                    tableCell = StringBuilder()
+                    // A header is the FIRST row using <th>; a stray <th> later
+                    // is just a cell.
+                    if (name == "th" && tableBlock?.rows?.isEmpty() == true) {
+                        tableBlock?.attrs?.put("header", "true")
+                    }
+                }
                 "ul" -> {
                     closeBlock()
                     // `data-checklist` is how a checklist says it is one; a
@@ -1407,6 +1471,33 @@ internal object HtmlCoder {
                     } else {
                         closeBlock()
                     }
+                }
+                "td", "th" -> {
+                    tableCell?.let { tableRow.add(collapseWhitespace(it.toString()).trim()) }
+                    tableCell = null
+                }
+                "tr" -> {
+                    if (tableBlock != null && tableRow.isNotEmpty()) {
+                        tableBlock!!.rows.add(tableRow)
+                    }
+                    tableRow = mutableListOf()
+                }
+                "table" -> {
+                    tableBlock?.let { table ->
+                        if (table.rows.isNotEmpty()) {
+                            // Ragged rows are padded, because a grid with a
+                            // short row cannot be laid out and dropping the
+                            // row loses content.
+                            val width = table.rows.maxOf { it.size }
+                            table.rows.forEach { row ->
+                                while (row.size < width) row.add("")
+                            }
+                            blocks.add(table)
+                        }
+                    }
+                    tableBlock = null
+                    tableRow = mutableListOf()
+                    tableCell = null
                 }
                 "ul", "ol" -> {
                     closeBlock()
@@ -1603,6 +1694,22 @@ internal object HtmlCoder {
             }
             // The whole block round-trips as escaped JSON — HTML has nowhere
             // else to keep option ids.
+            "table" -> {
+                // A REAL <table>, unlike a poll: HTML has the element, so a
+                // host rendering saved markup gets a table rather than an
+                // opaque blob.
+                val header = block.attrs["header"] == "true"
+                val html = StringBuilder("<table>")
+
+                block.rows.forEachIndexed { index, row ->
+                    val tag = if (header && index == 0) "th" else "td"
+                    html.append("<tr>")
+                    row.forEach { html.append("<$tag>").append(escapeText(it)).append("</$tag>") }
+                    html.append("</tr>")
+                }
+
+                html.append("</table>").toString()
+            }
             "poll" -> "<figure data-poll=\"" + escapeAttribute(JsonCoder.encode(listOf(block))) +
                 "\"></figure>"
             else -> ""
@@ -1617,6 +1724,8 @@ internal object HtmlCoder {
         "file" -> block.attrs["name"].orEmpty()
         "embed" -> block.attrs["url"].orEmpty()
         "poll" -> block.attrs["question"].orEmpty()
+        // Tab separated, the way a table pastes into anything else.
+        "table" -> block.rows.joinToString("\n") { it.joinToString("\t") }
         else -> ""
     }
 
@@ -1912,6 +2021,16 @@ internal object JsonCoder {
                 val value = block.attrs[key] ?: continue
                 out.append(',').append(quote(key)).append(':').append(quote(value))
             }
+            if (block.type == "table") {
+                out.append(",\"rows\":[")
+                block.rows.forEachIndexed { index, row ->
+                    if (index > 0) out.append(',')
+                    out.append('[')
+                    out.append(row.joinToString(",") { quote(it) })
+                    out.append(']')
+                }
+                out.append(']')
+            }
             if (block.type == "poll") {
                 out.append(",\"options\":[")
                 // A blank answer is not an answer. The composer keeps empty
@@ -2015,6 +2134,12 @@ internal object JsonCoder {
                     block.runs.add(WysiwygRun(text, decodeMarks(runMap["marks"] as? Map<*, *>)))
                 }
             } else {
+                if (type == "table") {
+                    for (rawRow in map["rows"] as? List<*> ?: emptyList<Any>()) {
+                        val row = rawRow as? List<*> ?: continue
+                        block.rows.add(row.map { stringify(it ?: "") }.toMutableList())
+                    }
+                }
                 for (key in WysiwygBlock.MEDIA_ATTRS[type].orEmpty()) {
                     val value2 = map[key]
                     if (value2 != null) block.attrs[key] = stringify(value2)
@@ -2319,20 +2444,59 @@ internal fun segmentsOf(blocks: List<WysiwygBlock>): List<Segment> {
         }
     }
 
-    // An empty document still needs somewhere to type.
-    if (segments.isEmpty()) segments.add(Segment.Text(mutableListOf(WysiwygBlock("p"))))
+    // An empty document needs somewhere to type — and so does one that ENDS in
+    // a card. A table, a picture or a divider as the last block is otherwise a
+    // dead end: there is no caret below it, so nothing typed after inserting
+    // one lands anywhere. The paragraph is an editing affordance only; empty
+    // ones are dropped on the way out, so it never reaches the payload.
+    if (segments.lastOrNull() !is Segment.Text) {
+        segments.add(Segment.Text(mutableListOf(WysiwygBlock("p"))))
+    }
 
     return segments
 }
 
+/**
+ * Drop the blank paragraphs that are editing affordances rather than content.
+ *
+ * A card cannot hold a caret, so the editor keeps a paragraph after the last
+ * one to write past it, and inserting a card from a blank line leaves that
+ * line above it. Neither was typed, and both would save as a `<p><br></p>`
+ * that reads back as a gap nobody put there.
+ *
+ * A blank line BETWEEN two paragraphs is content and is left alone — this only
+ * ever touches the two ends.
+ */
+internal fun trimAffordances(blocks: List<WysiwygBlock>): List<WysiwygBlock> {
+    val last = blocks.lastOrNull()
+
+    val trimmed = if (blocks.size > 1 && last != null && last.type == "p" && last.isEmpty) {
+        blocks.dropLast(1)
+    } else {
+        blocks
+    }
+
+    val first = trimmed.firstOrNull()
+
+    return if (trimmed.size > 1 && first != null && first.type == "p" && first.isEmpty &&
+        !trimmed[1].isText
+    ) {
+        trimmed.drop(1)
+    } else {
+        trimmed
+    }
+}
+
 /** Flatten segments back into a block list for serialization. */
 internal fun blocksOf(segments: List<Segment>): List<WysiwygBlock> =
-    segments.flatMap { segment ->
-        when (segment) {
-            is Segment.Text -> segment.blocks
-            is Segment.Media -> listOf(segment.block)
-        }
-    }
+    trimAffordances(
+        segments.flatMap { segment ->
+            when (segment) {
+                is Segment.Text -> segment.blocks
+                is Segment.Media -> listOf(segment.block)
+            }
+        },
+    )
 
 // ── Toolbar icons ───────────────────────────────────────────────────────────
 
@@ -2471,6 +2635,7 @@ internal val TOOL_ICONS: Map<String, ToolIcon> = mapOf(
             "M15 8L19.5 8L16.8 11.5C18.6 11.5 19.9 12.7 19.9 14.5C19.9 16.5 18.5 18 16.7 18C15.8 18 15.2 17.7 14.8 17.2"
     ),
     "bulletList" to ToolIcon("M4 7L4.01 7M9 7L20 7M4 12L4.01 12M9 12L20 12M4 17L4.01 17M9 17L20 17"),
+    "table" to ToolIcon("M4 6L20 6L20 18L4 18ZM4 10L20 10M4 14L20 14M10 6L10 18M15 6L15 18", 1.8f),
     "checklist" to ToolIcon("M3.5 6.5L5.5 8.5L9 5M3.5 13.5L5.5 15.5L9 12M12 7L20 7M12 14L20 14", 1.8f),
     "orderedList" to ToolIcon(
         "M3.6 5.2L4.7 4.6L4.7 8.4" +
@@ -4028,9 +4193,11 @@ internal fun EditorScreen(
                     is Segment.Media -> out.add(segment.block)
                 }
             }
-            onDocumentChanged(out)
-            length.value = out.sumOf { it.plainText.length }
-            words.value = countWords(out)
+            val document = trimAffordances(out)
+
+            onDocumentChanged(document)
+            length.value = document.sumOf { it.plainText.length }
+            words.value = countWords(document)
         }
 
         /** Present the sheet the control names, or just report the tap. */
@@ -4160,6 +4327,7 @@ internal fun EditorScreen(
                     repeat(config.pollMinOptions) { poll.options.add(PollOption("o${it + 1}", "")) }
                     insertBlock(poll)
                 }
+                "table" -> insertBlock(newTable(config))
                 "divider" -> insertBlock(WysiwygBlock("divider"))
                 in WysiwygEditorFunctions.INSERT_TOOLS -> onRequestMedia(tool)
                 else -> onCustomTool(tool)
@@ -4409,7 +4577,8 @@ internal fun EditorScreen(
                                 }
                                 insertBlock(poll)
                             }
-                            "divider" -> insertBlock(WysiwygBlock("divider"))
+                            "table" -> insertBlock(newTable(config))
+                "divider" -> insertBlock(WysiwygBlock("divider"))
                             in WysiwygEditorFunctions.INSERT_TOOLS -> onRequestMedia(tool)
                             else -> Unit
                         }
@@ -4500,7 +4669,19 @@ internal fun EditorScreen(
 
                     flowEntries.forEachIndexed { index, entry ->
                         when (val segment = entry.segment) {
-                            is Segment.Media -> if (segment.block.type == "poll") {
+                            is Segment.Media -> if (segment.block.type == "table") {
+                                // Edited where it sits, not behind a sheet.
+                                TableCard(
+                                    block = segment.block,
+                                    config = config,
+                                    foreground = foreground,
+                                    accent = accent,
+                                ) {
+                                    entries[entries.indexOfFirst { it.id == entry.id }] =
+                                        SegmentEntry(entry.id, Segment.Media(segment.block))
+                                    rebuildDocument()
+                                }
+                            } else if (segment.block.type == "poll") {
                                 // Edited where it sits, not behind a sheet.
                                 PollCard(
                                     block = segment.block,
@@ -4838,7 +5019,8 @@ internal fun EditorScreen(
                             repeat(config.pollMinOptions) { poll.options.add(PollOption("o${it + 1}", "")) }
                             insertBlock(poll)
                         }
-                        "divider" -> insertBlock(WysiwygBlock("divider"))
+                        "table" -> insertBlock(newTable(config))
+                "divider" -> insertBlock(WysiwygBlock("divider"))
                         "embed" -> showEmbedDialog(activity, config.strings) { url ->
                             val block = WysiwygBlock("embed")
                             block.attrs["url"] = url
@@ -5273,6 +5455,7 @@ internal val TOOL_LABEL_KEYS = mapOf(
     "h3" to "styleH3",
     "bulletList" to "toolBulletList",
     "checklist" to "toolChecklist",
+    "table" to "toolTable",
     "orderedList" to "toolOrderedList",
     "blockquote" to "styleQuote",
     "link" to "toolLink",
@@ -5295,7 +5478,7 @@ internal val SHEET_LIST_TOOLS = listOf("bulletList", "orderedList", "checklist")
 internal val SHEET_FORMAT_TOOLS =
     listOf("bold", "italic", "underline", "strikethrough", "code", "textColor", "highlight", "clearFormat")
 internal val SHEET_INSERT_TOOLS =
-    listOf("image", "camera", "video", "file", "poll", "embed", "divider", "link")
+    listOf("image", "camera", "video", "file", "poll", "table", "embed", "divider", "link")
 
 /**
  * The tick drawn beside an active row. Same 24x24 grid as the tool glyphs,
@@ -5484,7 +5667,7 @@ private fun runTool(
         // These change the DOCUMENT, not this segment's text, so the screen
         // handles them — a dispatcher holding one controller cannot. Without
         // this they fell through the `when` and did nothing, silently.
-        "poll", "divider", "embed" -> onDocumentTool(tool)
+        "poll", "table", "divider", "embed" -> onDocumentTool(tool)
         // Nothing for the editor to do — say who was tapped and stop.
         else -> if (tool.startsWith("custom:")) onDocumentTool(tool) else Unit
     }
@@ -5659,6 +5842,166 @@ private fun ToolButton(
  * the iOS PollCard, including showing the option overrun rather than refusing
  * the keystroke — the same reasoning as the character ring, and the same red.
  */
+/**
+ * A table, as a grid of small text fields.
+ *
+ * Rendered as its own card rather than inside the text engine, for the same
+ * reason a poll is: an EditText lays out a line at a time and a grid is not
+ * lines. The rest of the document is unaffected — a table is one block between
+ * two runs of prose. Mirrors the iOS TableCard.
+ *
+ * Cells hold plain text. A cell on a phone is a word or two, and carrying
+ * marks into every one of them would multiply the coders and the editing
+ * surface for something this layout has no room to show.
+ */
+@Composable
+private fun TableCard(
+    block: WysiwygBlock,
+    config: WysiwygEditorFunctions.EditorConfig,
+    foreground: Color,
+    accent: Color,
+    onChanged: () -> Unit,
+) {
+    val revision = remember { mutableStateOf(0) }
+    val header = block.attrs["header"] == "true"
+    val columns = block.rows.firstOrNull()?.size ?: 0
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp),
+        ) {
+            Column(
+                modifier = Modifier.border(
+                    1.dp, foreground.copy(alpha = 0.15f), RoundedCornerShape(8.dp),
+                ),
+            ) {
+                // The grid lines. Drawn as slivers between the cells rather
+                // than as a border on each, so a shared edge is one line and
+                // not two sitting on top of each other. Same weight and
+                // opacity as the iOS overlays.
+                val rule = foreground.copy(alpha = 0.12f)
+                val gridWidth = (108 * columns).dp + (0.5 * (columns - 1).coerceAtLeast(0)).dp
+
+                block.rows.forEachIndexed { rowIndex, row ->
+                    Row {
+                        row.forEachIndexed { columnIndex, cell ->
+                            val isHeader = header && rowIndex == 0
+
+                            androidx.compose.foundation.text.BasicTextField(
+                                value = cell,
+                                onValueChange = {
+                                    block.rows[rowIndex][columnIndex] = it
+                                    revision.value++
+                                    onChanged()
+                                },
+                                textStyle = TextStyle(
+                                    color = foreground,
+                                    fontSize = 15.sp,
+                                    fontWeight = if (isHeader) FontWeight.SemiBold else FontWeight.Normal,
+                                ),
+                                cursorBrush = androidx.compose.ui.graphics.SolidColor(accent),
+                                modifier = Modifier
+                                    .width(108.dp)
+                                    .height(40.dp)
+                                    .background(
+                                        if (isHeader) foreground.copy(alpha = 0.05f) else Color.Transparent,
+                                    )
+                                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                            )
+
+                            if (columnIndex < row.size - 1) {
+                                Box(Modifier.width(0.5.dp).height(40.dp).background(rule))
+                            }
+                        }
+                    }
+
+                    if (rowIndex < block.rows.size - 1) {
+                        Box(Modifier.width(gridWidth).height(0.5.dp).background(rule))
+                    }
+                }
+            }
+        }
+
+        // Growing and shrinking a table is the whole of editing one, so the
+        // controls sit with it rather than on a bar somewhere else.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+        ) {
+            TableStep(
+                localized(config.strings, "tableRowAdd", "+ Row"),
+                block.rows.size < config.tableMaxRows, accent, foreground,
+            ) {
+                block.rows.add(MutableList(columns) { "" })
+                revision.value++
+                onChanged()
+            }
+            TableStep(
+                localized(config.strings, "tableRowRemove", "\u2212 Row"),
+                block.rows.size > config.tableMinRows, accent, foreground,
+            ) {
+                block.rows.removeAt(block.rows.size - 1)
+                revision.value++
+                onChanged()
+            }
+            TableStep(
+                localized(config.strings, "tableColumnAdd", "+ Col"),
+                columns < config.tableMaxColumns, accent, foreground,
+            ) {
+                block.rows.forEach { it.add("") }
+                revision.value++
+                onChanged()
+            }
+            TableStep(
+                localized(config.strings, "tableColumnRemove", "\u2212 Col"),
+                columns > config.tableMinColumns, accent, foreground,
+            ) {
+                block.rows.forEach { it.removeAt(it.size - 1) }
+                revision.value++
+                onChanged()
+            }
+
+            Box(modifier = Modifier.weight(1f))
+
+            BasicText(
+                text = localized(config.strings, "tableHeader", "Header"),
+                modifier = Modifier.clickable {
+                    block.attrs["header"] = if (header) "false" else "true"
+                    revision.value++
+                    onChanged()
+                },
+                style = TextStyle(
+                    color = if (header) accent else foreground.copy(alpha = 0.55f),
+                    fontSize = 13.sp,
+                    fontWeight = if (header) FontWeight.SemiBold else FontWeight.Normal,
+                ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TableStep(
+    label: String,
+    enabled: Boolean,
+    accent: Color,
+    foreground: Color,
+    onTap: () -> Unit,
+) {
+    BasicText(
+        text = label,
+        modifier = if (enabled) Modifier.clickable(onClick = onTap) else Modifier,
+        style = TextStyle(
+            color = if (enabled) accent else foreground.copy(alpha = 0.3f),
+            fontSize = 13.sp,
+        ),
+    )
+}
+
 @Composable
 private fun PollCard(
     block: WysiwygBlock,

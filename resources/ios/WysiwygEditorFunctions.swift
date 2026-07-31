@@ -283,7 +283,7 @@ struct WysiwygConfig {
         "bold", "italic", "underline", "strikethrough", "h1", "h2", "h3",
         "bulletList", "orderedList", "checklist", "blockquote", "link", "code",
         "textColor", "highlight", "image", "camera", "video", "file",
-        "poll", "divider", "embed", "clearFormat",
+        "poll", "table", "divider", "embed", "clearFormat",
     ]
 
     let content: String
@@ -317,6 +317,13 @@ struct WysiwygConfig {
     let triggers: [String: String]
     /// Sheets the host declared, presented over the editor's own window.
     let sheets: [WysiwygHostSheet]
+    /// How big a table may get, and what it starts as.
+    let tableDefaultRows: Int
+    let tableDefaultColumns: Int
+    let tableMinRows: Int
+    let tableMaxRows: Int
+    let tableMinColumns: Int
+    let tableMaxColumns: Int
     /// Colours a short post can be written on.
     let backgrounds: [WysiwygBackground]
     /// Past this many characters a background is dropped — a paragraph set in
@@ -375,6 +382,12 @@ struct WysiwygConfig {
         avatar = p["avatar"] as? String ?? ""
         triggers = p["triggers"] as? [String: String] ?? [:]
         sheets = ((p["sheets"] as? [[String: Any]]) ?? []).map(WysiwygHostSheet.init)
+        tableDefaultRows = max(1, (p["tableDefaultRows"] as? NSNumber)?.intValue ?? 2)
+        tableDefaultColumns = max(1, (p["tableDefaultColumns"] as? NSNumber)?.intValue ?? 2)
+        tableMinRows = max(1, (p["tableMinRows"] as? NSNumber)?.intValue ?? 1)
+        tableMaxRows = max(1, (p["tableMaxRows"] as? NSNumber)?.intValue ?? 20)
+        tableMinColumns = max(1, (p["tableMinColumns"] as? NSNumber)?.intValue ?? 1)
+        tableMaxColumns = max(1, (p["tableMaxColumns"] as? NSNumber)?.intValue ?? 5)
         backgrounds = ((p["backgrounds"] as? [[String: Any]]) ?? []).map(WysiwygBackground.init)
         backgroundMaxLength = max(0, (p["backgroundMaxLength"] as? NSNumber)?.intValue ?? 130)
         toolbarAlign = p["toolbarAlign"] as? String ?? "leading"
@@ -464,6 +477,14 @@ struct WysiwygBlock {
     var id: String = ""
     var attrs: [String: String] = [:]
     var options: [PollOption] = []
+    /**
+     Table cells, row by row.
+
+     Plain strings rather than runs: a cell on a phone is a word or two, and
+     carrying marks into every cell would multiply the coders and the editing
+     surface for something the layout has no room to show anyway.
+     */
+    var rows: [[String]] = []
 
     var isEmpty: Bool { runs.allSatisfy { $0.text.isEmpty } }
     var plainText: String { runs.map(\.text).joined() }
@@ -476,7 +497,7 @@ struct WysiwygBlock {
 
     /// A checklist item that has been ticked. Only `check` blocks carry this.
     var isChecked: Bool { attrs["checked"] == "true" }
-    static let mediaTypes: Set<String> = ["image", "video", "file", "embed", "poll", "divider"]
+    static let mediaTypes: Set<String> = ["image", "video", "file", "embed", "poll", "table", "divider"]
 
     /// Attribute keys per media type, in SERIALIZATION order (normative).
     static let mediaAttrs: [String: [String]] = [
@@ -488,6 +509,7 @@ struct WysiwygBlock {
         // host computes from it. Both travel, because the editor owns no
         // clock and cannot turn one into the other.
         "poll": ["question", "multiple", "durationMinutes", "closesAt"],
+        "table": ["header"],
         "divider": [],
     ]
 }
@@ -524,6 +546,11 @@ enum HtmlCoder {
         var listStack: [String] = []
         // The media block currently being assembled from a <figure>, if any.
         var mediaBlock: WysiwygBlock?
+        // The table currently being assembled, its row in progress, and the
+        // cell text collecting between <td> and </td>.
+        var tableBlock: WysiwygBlock?
+        var tableRow: [String] = []
+        var tableCell: String?
         // How many document wrappers are open. A bare <div> is treated as a
         // paragraph, for tolerance when parsing markup from elsewhere — but
         // OUR background wrapper is not one, and opening a paragraph for it
@@ -560,6 +587,11 @@ enum HtmlCoder {
         }
         func appendText(_ decoded: String) {
             let text = collapseWhitespace(decoded)
+            if tableCell != nil {
+                tableCell! += text
+
+                return
+            }
             if mediaBlock != nil {
                 // Inside a <figure>: only the caption is content; anything else
                 // (whitespace between the img and figcaption) is layout noise.
@@ -673,6 +705,22 @@ enum HtmlCoder {
                 open("h3")
             case "blockquote":
                 open("blockquote")
+            case "table":
+                closeBlock()
+                var table = WysiwygBlock(type: "table", runs: [])
+                table.attrs["header"] = "false"
+                tableBlock = table
+                tableRow = []
+                tableCell = nil
+            case "tr":
+                tableRow = []
+            case "td", "th":
+                tableCell = ""
+                if name == "th", tableBlock != nil, tableBlock!.rows.isEmpty {
+                    // A header is the FIRST row using <th>; a stray <th> later
+                    // is just a cell.
+                    tableBlock!.attrs["header"] = "true"
+                }
             case "ul":
                 closeBlock()
                 // `data-checklist` is how a checklist says it is one; a plain
@@ -726,6 +774,27 @@ enum HtmlCoder {
                     break
                 }
                 closeBlock()
+            case "td", "th":
+                if let cell = tableCell {
+                    tableRow.append(collapseWhitespace(cell).trimmingCharacters(in: .whitespaces))
+                }
+                tableCell = nil
+            case "tr":
+                if tableBlock != nil, !tableRow.isEmpty {
+                    tableBlock!.rows.append(tableRow)
+                }
+                tableRow = []
+            case "table":
+                if var table = tableBlock, !table.rows.isEmpty {
+                    // Ragged rows are padded, because a grid with a short row
+                    // cannot be laid out and dropping the row loses content.
+                    let width = table.rows.map(\.count).max() ?? 0
+                    table.rows = table.rows.map { $0 + Array(repeating: "", count: width - $0.count) }
+                    blocks.append(table)
+                }
+                tableBlock = nil
+                tableRow = []
+                tableCell = nil
             case "ul", "ol":
                 closeBlock()
                 if !listStack.isEmpty { listStack.removeLast() }
@@ -906,6 +975,22 @@ enum HtmlCoder {
             // The whole block round-trips as escaped JSON — HTML has nowhere
             // else to keep option ids.
             return "<figure data-poll=\"" + escapeAttr(JsonCoder.encode([block])) + "\"></figure>"
+        case "table":
+            // A REAL <table>, unlike a poll: HTML has the element, so a host
+            // rendering saved markup gets a table rather than an opaque blob.
+            let header = block.attrs["header"] == "true"
+            var html = "<table>"
+
+            for (index, row) in block.rows.enumerated() {
+                let tag = header && index == 0 ? "th" : "td"
+                html += "<tr>"
+                for cell in row {
+                    html += "<\(tag)>" + escapeText(cell) + "</\(tag)>"
+                }
+                html += "</tr>"
+            }
+
+            return html + "</table>"
         default:
             return ""
         }
@@ -926,6 +1011,9 @@ enum HtmlCoder {
             if let title = block.attrs["title"], !title.isEmpty { return title }
             return block.attrs["url"] ?? ""
         case "poll": return block.attrs["question"] ?? ""
+        case "table":
+            // Tab-separated, the way a table pastes into anything else.
+            return block.rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
         default: return ""
         }
     }
@@ -1271,6 +1359,11 @@ enum Segment {
     case text([WysiwygBlock])
     /// A single media block rendered as its own card.
     case media(WysiwygBlock)
+
+    var isText: Bool {
+        if case .text = self { return true }
+        return false
+    }
 }
 
 /// Group a block list into segments, preserving document order.
@@ -1290,20 +1383,51 @@ func segmentsOf(_ blocks: [WysiwygBlock]) -> [Segment] {
         }
     }
 
-    // An empty document still needs somewhere to type.
-    if segments.isEmpty { segments.append(.text([WysiwygBlock(type: "p", runs: [])])) }
+    // An empty document needs somewhere to type — and so does one that ENDS in
+    // a card. A table, a picture or a divider as the last block is otherwise a
+    // dead end: there is no caret below it, so nothing typed after inserting
+    // one lands anywhere. The paragraph is an editing affordance only; empty
+    // ones are dropped on the way out, so it never reaches the payload.
+    if segments.last?.isText != true {
+        segments.append(.text([WysiwygBlock(type: "p", runs: [])]))
+    }
 
     return segments
 }
 
+/**
+ Drop the blank paragraphs that are editing affordances rather than content.
+
+ A card cannot hold a caret, so the editor keeps a paragraph after the last
+ one to write past it, and inserting a card from a blank line leaves that line
+ above it. Neither was typed, and both would save as a `<p><br></p>` that reads
+ back as a gap nobody put there.
+
+ A blank line BETWEEN two paragraphs is content and is left alone — this only
+ ever touches the two ends.
+ */
+func trimAffordances(_ blocks: [WysiwygBlock]) -> [WysiwygBlock] {
+    var out = blocks
+
+    if out.count > 1, let last = out.last, last.type == "p", last.isEmpty {
+        out.removeLast()
+    }
+
+    if out.count > 1, out[0].type == "p", out[0].isEmpty, !out[1].isText {
+        out.removeFirst()
+    }
+
+    return out
+}
+
 /// Flatten segments back into a block list for serialization.
 func blocksOf(_ segments: [Segment]) -> [WysiwygBlock] {
-    segments.flatMap { segment -> [WysiwygBlock] in
+    trimAffordances(segments.flatMap { segment -> [WysiwygBlock] in
         switch segment {
         case .text(let blocks): return blocks
         case .media(let block): return [block]
         }
-    }
+    })
 }
 
 // MARK: - JSON coder
@@ -1361,6 +1485,14 @@ enum JsonCoder {
             for key in WysiwygBlock.mediaAttrs[block.type] ?? [] {
                 guard let value = block.attrs[key] else { continue }
                 out += "," + quote(key) + ":" + quote(value)
+            }
+            if block.type == "table" {
+                out += ",\"rows\":["
+                for (index, row) in block.rows.enumerated() {
+                    if index > 0 { out += "," }
+                    out += "[" + row.map { quote($0) }.joined(separator: ",") + "]"
+                }
+                out += "]"
             }
             if block.type == "poll" {
                 out += ",\"options\":["
@@ -1455,6 +1587,12 @@ enum JsonCoder {
                                                  marks: decodeMarks(runMap["marks"] as? [String: Any])))
                 }
             } else {
+                if type == "table" {
+                    for rawRow in map["rows"] as? [Any] ?? [] {
+                        guard let row = rawRow as? [Any] else { continue }
+                        block.rows.append(row.map { stringify($0) })
+                    }
+                }
                 for key in WysiwygBlock.mediaAttrs[type] ?? [] {
                     if let value = map[key] { block.attrs[key] = stringify(value) }
                 }
@@ -3011,12 +3149,12 @@ final class WysiwygDocumentModel: ObservableObject {
 
     /// Reassemble the document from every segment in order.
     func blocks() -> [WysiwygBlock] {
-        entries.flatMap { entry -> [WysiwygBlock] in
+        trimAffordances(entries.flatMap { entry -> [WysiwygBlock] in
             switch entry.segment {
             case .text(let seeded): return models[entry.id]?.blocks() ?? seeded
             case .media(let block): return [block]
             }
-        }
+        })
     }
 
     // MARK: media
@@ -3071,6 +3209,8 @@ final class WysiwygDocumentModel: ObservableObject {
         switch tool {
         case "poll":
             insertPoll()
+        case "table":
+            insertTable()
         case "divider":
             insertBlock(WysiwygBlock(type: "divider", runs: []))
         case "image", "camera", "video", "file":
@@ -3082,6 +3222,22 @@ final class WysiwygDocumentModel: ObservableObject {
         }
     }
 
+    /**
+     Insert an empty table.
+
+     Two by two: the smallest thing that is recognisably a table, and small
+     enough to fit a phone before anybody starts widening it.
+     */
+    func insertTable() {
+        var block = WysiwygBlock(type: "table", runs: [])
+        block.attrs["header"] = "true"
+        block.rows = Array(
+            repeating: Array(repeating: "", count: config.tableDefaultColumns),
+            count: config.tableDefaultRows
+        )
+        insertBlock(block)
+    }
+
     /// Insert an empty poll with the fewest answers that make one.
     func insertPoll() {
         var block = WysiwygBlock(type: "poll", runs: [])
@@ -3089,6 +3245,67 @@ final class WysiwygDocumentModel: ObservableObject {
         block.attrs["durationMinutes"] = String(config.pollDurations.first?.minutes ?? 1440)
         block.options = (1...config.pollMinOptions).map { PollOption(id: "o\($0)", label: "") }
         insertBlock(block)
+    }
+
+    // MARK: table editing
+
+    /// Type into a cell.
+    func setTableCell(id: Int, row: Int, column: Int, text: String) {
+        guard let position = entries.firstIndex(where: { $0.id == id }),
+              case .media(var block) = entries[position].segment,
+              block.rows.indices.contains(row),
+              block.rows[row].indices.contains(column) else { return }
+
+        block.rows[row][column] = text
+        entries[position].segment = .media(block)
+        segmentChanged()
+    }
+
+    /// Add a row at the bottom, or a column at the right.
+    func growTable(id: Int, rows addRow: Bool) {
+        guard let position = entries.firstIndex(where: { $0.id == id }),
+              case .media(var block) = entries[position].segment,
+              let width = block.rows.first?.count else { return }
+
+        if addRow {
+            guard block.rows.count < config.tableMaxRows else { return }
+            block.rows.append(Array(repeating: "", count: width))
+        } else {
+            guard width < config.tableMaxColumns else { return }
+            block.rows = block.rows.map { $0 + [""] }
+        }
+
+        entries[position].segment = .media(block)
+        segmentChanged()
+    }
+
+    /// Drop the last row or column. Never below the minimum — a table with no
+    /// cells is not a table, it is a gap where one used to be.
+    func shrinkTable(id: Int, rows dropRow: Bool) {
+        guard let position = entries.firstIndex(where: { $0.id == id }),
+              case .media(var block) = entries[position].segment,
+              let width = block.rows.first?.count else { return }
+
+        if dropRow {
+            guard block.rows.count > config.tableMinRows else { return }
+            block.rows.removeLast()
+        } else {
+            guard width > config.tableMinColumns else { return }
+            block.rows = block.rows.map { Array($0.dropLast()) }
+        }
+
+        entries[position].segment = .media(block)
+        segmentChanged()
+    }
+
+    /// Turn the first row into a header, or back into an ordinary row.
+    func toggleTableHeader(id: Int) {
+        guard let position = entries.firstIndex(where: { $0.id == id }),
+              case .media(var block) = entries[position].segment else { return }
+
+        block.attrs["header"] = block.attrs["header"] == "true" ? "false" : "true"
+        entries[position].segment = .media(block)
+        segmentChanged()
     }
 
     // MARK: poll editing
@@ -3431,7 +3648,7 @@ final class WysiwygDocumentModel: ObservableObject {
             model.toggleInline(tool)
         case "h1", "h2", "h3", "bulletList", "orderedList", "checklist", "blockquote", "p":
             model.applyBlock(tool)
-        case "poll", "divider":
+        case "poll", "table", "divider":
             runTool(tool)
         case "image", "camera", "video", "file":
             var payload: [String: Any] = ["kind": tool]
@@ -3993,6 +4210,9 @@ private struct EditorScreen: View {
             var payload: [String: Any] = ["kind": tool]
             if let id = document.config.id { payload["id"] = id }
             LaravelBridge.shared.send?(WysiwygEvents.mediaRequested, payload)
+        case "table":
+            sheet = nil
+            document.insertTable()
         case "poll":
             // Composed HERE, not by the host: there is nothing to pick and
             // nothing to upload, so a round-trip would buy nothing. Inserted
@@ -4050,7 +4270,11 @@ private struct EditorScreen: View {
     private func segmentView(entry: SegmentEntry) -> some View {
         switch entry.segment {
         case .media(let block):
-            if block.type == "poll" {
+            if block.type == "table" {
+                TableCard(document: document, entry: entry, block: block, theme: theme) {
+                    document.removeEntry(id: entry.id)
+                }
+            } else if block.type == "poll" {
                 PollCard(document: document, entry: entry, block: block, theme: theme) {
                     // Only warn when there is something to lose.
                     if document.pollHasContent(id: entry.id) {
@@ -4515,6 +4739,123 @@ private struct PollCard: View {
                     .stroke(over ? Color.red : theme.textColor.opacity(0.2), lineWidth: 1)
             )
         }
+    }
+}
+
+// MARK: - Table card
+
+/**
+ A table, as a grid of small text fields.
+
+ Rendered as its own card rather than inside the text engine, for the same
+ reason a poll is: a UITextView lays out a line at a time and a grid is not
+ lines. The rest of the document is unaffected — a table is one block between
+ two runs of prose.
+
+ Cells hold plain text. A cell on a phone is a word or two, and carrying marks
+ into every one of them would multiply the coders and the editing surface for
+ something this layout has no room to show.
+ */
+private struct TableCard: View {
+    @ObservedObject var document: WysiwygDocumentModel
+    let entry: SegmentEntry
+    let block: WysiwygBlock
+    let theme: WysiwygTheme
+    let onRemove: () -> Void
+
+    private var header: Bool { block.attrs["header"] == "true" }
+    private var columns: Int { block.rows.first?.count ?? 0 }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    ForEach(Array(block.rows.enumerated()), id: \.offset) { rowIndex, row in
+                        HStack(spacing: 0) {
+                            ForEach(Array(row.enumerated()), id: \.offset) { columnIndex, cell in
+                                cellField(row: rowIndex, column: columnIndex, text: cell)
+                            }
+                        }
+                    }
+                }
+                .overlay(
+                    RoundedCornerRect(radius: 8)
+                        .stroke(theme.textColor.opacity(0.15), lineWidth: 1)
+                )
+                .padding(.horizontal, 16)
+            }
+            .padding(.top, 8)
+
+            controls
+        }
+        .padding(.bottom, 8)
+    }
+
+    private func cellField(row: Int, column: Int, text: String) -> some View {
+        let isHeader = header && row == 0
+
+        return TextField("", text: Binding(
+            get: { text },
+            set: { document.setTableCell(id: entry.id, row: row, column: column, text: $0) }
+        ))
+        .font(.system(size: 15, weight: isHeader ? .semibold : .regular))
+        .foregroundColor(theme.textColor)
+        .padding(.horizontal, 10)
+        .frame(width: 108, height: 40)
+        .background(isHeader ? theme.textColor.opacity(0.05) : Color.clear)
+        .overlay(
+            Rectangle().fill(theme.textColor.opacity(0.12)).frame(width: 0.5),
+            alignment: .trailing
+        )
+        .overlay(
+            Rectangle().fill(theme.textColor.opacity(0.12)).frame(height: 0.5),
+            alignment: .bottom
+        )
+    }
+
+    /// Growing and shrinking a table is the whole of editing one, so the
+    /// controls sit with it rather than on a bar somewhere else.
+    private var controls: some View {
+        HStack(spacing: 6) {
+            step("tableRowAdd", "+ Row", enabled: block.rows.count < document.config.tableMaxRows) {
+                document.growTable(id: entry.id, rows: true)
+            }
+            step("tableRowRemove", "− Row", enabled: block.rows.count > document.config.tableMinRows) {
+                document.shrinkTable(id: entry.id, rows: true)
+            }
+            step("tableColumnAdd", "+ Col", enabled: columns < document.config.tableMaxColumns) {
+                document.growTable(id: entry.id, rows: false)
+            }
+            step("tableColumnRemove", "− Col", enabled: columns > document.config.tableMinColumns) {
+                document.shrinkTable(id: entry.id, rows: false)
+            }
+
+            Spacer()
+
+            Button {
+                document.toggleTableHeader(id: entry.id)
+            } label: {
+                Text(localized(document.config.strings, "tableHeader", "Header"))
+                    .font(.system(size: 13, weight: header ? .semibold : .regular))
+                    .foregroundColor(header ? theme.accentColor : Color(theme.secondaryTextUIColor))
+            }
+
+            Button(action: onRemove) {
+                ToolGlyph(name: "trash", size: 16, color: Color(theme.secondaryTextUIColor))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+    }
+
+    private func step(_ key: String, _ fallback: String, enabled: Bool,
+                      _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(localized(document.config.strings, key, fallback))
+                .font(.system(size: 13))
+                .foregroundColor(enabled ? theme.accentColor : theme.textColor.opacity(0.3))
+        }
+        .disabled(!enabled)
     }
 }
 
@@ -5143,6 +5484,7 @@ private let toolIcons: [String: ToolIcon] = [
     "h3": ToolIcon(path: "M4 6L4 18M4 12L11 12M11 6L11 18"
         + "M15 8L19.5 8L16.8 11.5C18.6 11.5 19.9 12.7 19.9 14.5C19.9 16.5 18.5 18 16.7 18C15.8 18 15.2 17.7 14.8 17.2"),
     "bulletList": ToolIcon(path: "M4 7L4.01 7M9 7L20 7M4 12L4.01 12M9 12L20 12M4 17L4.01 17M9 17L20 17"),
+    "table": ToolIcon(path: "M4 6L20 6L20 18L4 18ZM4 10L20 10M4 14L20 14M10 6L10 18M15 6L15 18", stroke: 1.8),
     "checklist": ToolIcon(path: "M3.5 6.5L5.5 8.5L9 5M3.5 13.5L5.5 15.5L9 12M12 7L20 7M12 14L20 14", stroke: 1.8),
     "orderedList": ToolIcon(path: "M3.6 5.2L4.7 4.6L4.7 8.4"
         + "M3.2 11.1C3.2 10.4 3.8 9.9 4.5 9.9C5.3 9.9 5.8 10.5 5.8 11.2C5.8 12.4 3.2 13.2 3.2 14.5L5.9 14.5"
@@ -5288,6 +5630,7 @@ let toolLabelKeys: [String: String] = [
     "h3": "styleH3",
     "bulletList": "toolBulletList",
     "checklist": "toolChecklist",
+    "table": "toolTable",
     "orderedList": "toolOrderedList",
     "blockquote": "styleQuote",
     "link": "toolLink",
@@ -5309,7 +5652,7 @@ let sheetTextStyleTools = ["h1", "h2", "h3", "blockquote"]
 let sheetListTools = ["bulletList", "orderedList", "checklist"]
 let sheetFormatTools = ["bold", "italic", "underline", "strikethrough",
                         "code", "textColor", "highlight", "clearFormat"]
-let sheetInsertTools = ["image", "camera", "video", "file", "poll", "embed", "divider", "link"]
+let sheetInsertTools = ["image", "camera", "video", "file", "poll", "table", "embed", "divider", "link"]
 
 /// Which sheet, if any, is open.
 enum SheetKind: Identifiable {
@@ -5484,7 +5827,7 @@ private struct ToolbarRow: View {
         case let tool where tool.hasPrefix("custom:"):
             // Nothing for the editor to do — say who was tapped and stop.
             onDocumentTool(tool)
-        case "poll", "divider", "embed":
+        case "poll", "table", "divider", "embed":
             // These change the DOCUMENT, not this segment's text, so the
             // screen handles them — the toolbar only knows about one editor.
             onDocumentTool(tool)

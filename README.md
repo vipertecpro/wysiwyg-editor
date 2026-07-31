@@ -22,6 +22,7 @@ a JavaScript editor in a browser.
 - 📑 **Blocks** — H1–H3, bullet / ordered lists, **checklists**, blockquote, dividers
 - 🖼️ **Media** — images, video and attachments, with a pending state while your app uploads
 - 📊 **Polls** — written inline, with per-answer pictures, an option cap and a length
+- 🧮 **Tables** — a grid of plain-text cells with an optional header row, saved as a real `<table>` rather than an opaque blob
 - 🙋 **Mentions and hashtags** — the editor spots the trigger, YOUR app answers with who matches, and the pick is saved as a link carrying the entity id
 - 🎨 **Post backgrounds** — a few words held large on a colour, the way a social composer does it; round-trips in the HTML and the JSON both
 - 🗂️ **Your own sheets** — declare a list or a grid of options and the editor presents them over its own window, then tells you what was picked
@@ -188,7 +189,7 @@ All options are optional:
 Available tools for `toolbar` (this order is the `full` preset):
 `bold`, `italic`, `underline`, `strikethrough`, `h1`, `h2`, `h3`,
 `bulletList`, `orderedList`, `checklist`, `blockquote`, `link`, `code`, `textColor`,
-`highlight`, `image`, `camera`, `video`, `file`, `poll`, `divider`, `embed`,
+`highlight`, `image`, `camera`, `video`, `file`, `poll`, `table`, `divider`, `embed`,
 `clearFormat`.
 Undo/redo are always present and are not toolbar keys.
 
@@ -860,6 +861,53 @@ The editor **authors** polls; it does not run them. Voting belongs to whatever
 renders your saved content, which is also where the votes have to be stored.
 The block round-trips through HTML as `<figure data-poll="…">` and through
 JSON with its option ids intact, so your renderer has everything it needs.
+
+## Tables
+
+A grid of plain-text cells, inserted with the `table` tool and edited where it
+sits — a row of small fields with controls to grow or shrink it.
+
+```php
+WysiwygEditor::open($html, ['toolbar' => ['bold', 'table', 'image']]);
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `tableDefaultRows` | int | `2` | Rows a fresh table starts with |
+| `tableDefaultColumns` | int | `2` | Columns a fresh table starts with |
+| `tableMinRows` | int | `1` | Never shrinks below this |
+| `tableMaxRows` | int | `20` | Never grows past this |
+| `tableMinColumns` | int | `1` | |
+| `tableMaxColumns` | int | `5` | What a phone can actually show |
+
+It saves as a **real `<table>`**, not an opaque blob — so anything rendering
+your saved markup gets a table:
+
+```html
+<table><tr><th>Item</th><th>Qty</th></tr><tr><td>Tape</td><td>2</td></tr></table>
+```
+
+The first row uses `<th>` when the header is on. In JSON the cells are a plain
+2-D array:
+
+```json
+{"id":"","type":"table","header":"true","rows":[["Item","Qty"],["Tape","2"]]}
+```
+
+**Cells hold plain text, not marks.** A cell on a phone is a word or two, and
+carrying bold and links into every one of them would multiply the coders and
+the editing surface for something the layout has no room to show. Text pasted
+into a cell arrives as text.
+
+Reading a table back in is tolerant: a ragged row is padded rather than
+dropped, because a grid with a short row cannot be laid out and throwing the
+row away loses what it held.
+
+**A document never ends in a card.** Whatever the last block is — a table, a
+picture, a divider — the editor keeps an empty paragraph below it so there is
+somewhere to carry on writing. It is an editing affordance only: an empty
+trailing paragraph is dropped on the way out, so it never appears in the HTML
+or the JSON you save.
 
 ## Exporting
 

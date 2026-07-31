@@ -334,7 +334,8 @@ fun main() {
                 is Segment.Media -> "media(${seg.block.type})"
             }
         }
-        if (shape == listOf("text(2)", "media(divider)", "text(1)", "media(image)")) {
+        // The trailing `text(1)` is the caret below the last card.
+        if (shape == listOf("text(2)", "media(divider)", "text(1)", "media(image)", "text(1)")) {
             println("  ✓ consecutive text blocks collapse into one editor")
         } else {
             failures++
@@ -376,6 +377,47 @@ fun main() {
         val ok = first is Segment.Text && first.blocks.size == 1 && first.blocks[0].type == "p"
         if (ok) println("  ✓ an empty document still offers somewhere to type")
         else { failures++; println("  ✗ an empty document still offers somewhere to type") }
+    }
+
+    run {
+        // A card as the last block used to be a dead end: insert a table and
+        // everything typed afterwards went nowhere, because there was no caret
+        // below it.
+        val ending = HtmlCoder.parse("<p>Stock</p><table><tr><td>a</td></tr></table>")
+        val segments = segmentsOf(ending)
+        val ok = segments.size == 3 && segments.last() is Segment.Text
+        if (ok) println("  ✓ a document ending in a card can still be written past")
+        else { failures++; println("  ✗ a document ending in a card can still be written past") }
+    }
+
+    run {
+        // A card inserted from a blank line leaves that line above it. Saving
+        // it would put a gap before the card that nobody typed.
+        val leading = HtmlCoder.parse("<p><br></p><table><tr><td>a</td></tr></table>")
+        val html = HtmlCoder.serialize(blocksOf(segmentsOf(leading))).first
+        if (html == "<table><tr><td>a</td></tr></table>") {
+            println("  ✓ a blank line above a card is not emitted either")
+        } else { failures++; println("  ✗ a blank line above a card is not emitted either -> $html") }
+    }
+
+    run {
+        // But a blank line the user typed BETWEEN two paragraphs is content,
+        // and the rule above must not reach it.
+        val kept = HtmlCoder.parse("<p>a</p><p><br></p><p>b</p>")
+        val html = HtmlCoder.serialize(blocksOf(segmentsOf(kept))).first
+        if (html == "<p>a</p><p><br></p><p>b</p>") {
+            println("  ✓ a blank line between paragraphs survives")
+        } else { failures++; println("  ✗ a blank line between paragraphs survives -> $html") }
+    }
+
+    run {
+        // …and that affordance must not become content: the trailing paragraph
+        // is empty, so nothing extra reaches the payload.
+        val ending = HtmlCoder.parse("<p>Stock</p><table><tr><td>a</td></tr></table>")
+        val html = HtmlCoder.serialize(blocksOf(segmentsOf(ending))).first
+        if (!html.contains("<p></p>") && html.endsWith("</table>")) {
+            println("  ✓ the trailing paragraph is not emitted")
+        } else { failures++; println("  ✗ the trailing paragraph is not emitted -> $html") }
     }
 
     println("Embeds — provider recognised from the URL alone, with no network")
@@ -576,6 +618,41 @@ run {
          HtmlCoder.serialize(HtmlCoder.parse("<ul data-checklist><li>no state</li></ul>")).first,
          "<ul data-checklist><li data-checked=\"false\">no state</li></ul>")
 }
+
+// ── Tables ──────────────────────────────────────────────────────────────────
+println("")
+println("Tables — a grid HTML already has an element for")
+run {
+    val plain = "<table><tr><td>Item</td><td>Qty</td></tr><tr><td>Tape</td><td>2</td></tr></table>"
+    check("a table round-trips cell for cell", plain, plain)
+    checkText("the plain rendition is tab separated", plain, "Item\tQty\nTape\t2")
+
+    // A header is the FIRST row using <th>.
+    val headed = "<table><tr><th>Item</th><th>Qty</th></tr><tr><td>Tape</td><td>2</td></tr></table>"
+    check("a header row survives as one", headed, headed)
+
+    // Ragged input cannot be laid out as a grid, and dropping the short row
+    // would lose what it holds.
+    same("a short row is padded rather than dropped",
+         HtmlCoder.serialize(HtmlCoder.parse("<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>")).first,
+         "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td></td></tr></table>")
+
+    same("an empty table is not emitted at all",
+         HtmlCoder.serialize(HtmlCoder.parse("<table></table>")).first, "")
+
+    val blocks = HtmlCoder.parse(plain)
+    same("cells survive into JSON",
+         JsonCoder.encode(blocks),
+         "{\"version\":2,\"blocks\":[{\"id\":\"\",\"type\":\"table\",\"header\":\"false\",\"rows\":[[\"Item\",\"Qty\"],[\"Tape\",\"2\"]]}]}")
+    same("and back out of it",
+         HtmlCoder.serialize(JsonCoder.decode(JsonCoder.encode(blocks))).first, plain)
+
+    // A cell is plain text, so anything that looks like markup is escaped.
+    same("a cell cannot smuggle markup",
+         HtmlCoder.serialize(HtmlCoder.parse("<table><tr><td>a &lt; b</td></tr></table>")).first,
+         "<table><tr><td>a &lt; b</td></tr></table>")
+}
+
 
 
 

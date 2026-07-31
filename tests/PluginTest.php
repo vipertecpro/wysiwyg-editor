@@ -284,6 +284,7 @@ describe('Native parity', function () {
             [
                 '/private func perform\(_ tool: String\) \{(.*?)\n    \}/s',
                 '/private func apply\(_ tool: String, _ model: WysiwygEditorModel\) \{(.*?)\n    \}/s',
+
             ],
         ],
         [
@@ -1504,5 +1505,43 @@ describe('Packaging', function () {
     })->with([
         'resources/ios/WysiwygEditorFunctions.swift',
         'resources/android/WysiwygEditorFunctions.kt',
+    ]);
+});
+
+describe('Reachable from outside the toolbar', function () {
+    /**
+     * A slash command has no selection to act on, so it can only INSERT. The
+     * runner must therefore reach every block tool — `table` reached both
+     * toolbar dispatchers and still did nothing when typed as `/table`,
+     * because this third way in did not name it.
+     *
+     * Marks are deliberately absent: `/bold` would have nothing to embolden.
+     */
+    it('runs every block tool from a slash command', function (string $file, string $pattern) {
+        $source = file_get_contents($this->pluginPath.$file);
+
+        expect(preg_match($pattern, $source, $m))->toBe(1, "no slash runner matched {$pattern}");
+
+        preg_match_all('/"([a-zA-Z0-9]+)"/', $m[1], $found);
+
+        $covered = $found[1];
+
+        if (str_contains($m[1], 'INSERT_TOOLS') || str_contains($m[1], 'insertTools')) {
+            $covered = array_merge($covered, WysiwygEditor::INSERT_TOOLS);
+        }
+
+        $reachable = array_merge(WysiwygEditor::BLOCK_TOOLS, WysiwygEditor::INSERT_TOOLS);
+        $missing = array_values(array_diff($reachable, $covered));
+
+        expect($missing)->toBe([], 'not reachable from a slash command: '.implode(', ', $missing));
+    })->with([
+        [
+            '/resources/ios/WysiwygEditorFunctions.swift',
+            '/private func runSuggestedTool\(_ tool: String, on model: WysiwygEditorModel\) \{(.*?)\n    \}/s',
+        ],
+        [
+            '/resources/android/WysiwygEditorFunctions.kt',
+            '/fun runSuggestedTool\(tool: String, controller: EditorController\) \{(.*?)\n        \}/s',
+        ],
     ]);
 });
