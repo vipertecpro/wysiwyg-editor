@@ -58,26 +58,26 @@ passes are the whole of what makes them different.
   in CI, so treat it as best-effort
 - iOS 15+ / Android API 26+
 
-### On NativePHP 4.0.0
+### If you are on NativePHP 4.0.0 exactly
 
-Works on `nativephp/mobile` 3.x and 4.x. On 4.x there is one thing to set up
-in YOUR app, once:
+Nothing to do on **4.0.1 or newer** — skip this.
+
+On 4.0.0 only, a build stops with *"Please provide a valid cache path"*. That
+release staged a copy of your app to run `composer install` in, excluded
+`storage/framework` from the copy, and then booted Laravel inside it; the
+framework's default `compiled` path wraps `realpath()`, which answers `false`
+for a directory that is not there. Publishing `config/view.php` and handing the
+path over as a plain string works around it:
 
 ```php
-// config/view.php  — publish it if you have not already
+// config/view.php
 'compiled' => env('VIEW_COMPILED_PATH', storage_path('framework/views')),
 ```
 
-The framework default wraps that path in `realpath()`. NativePHP stages a copy
-of your app to run `composer install` in, and that copy excludes
-`storage/framework` — so the directory does not exist yet when
-`package:discover` boots. `realpath()` answers `false`, the view compiler
-rejects an empty cache path, and the build stops with *"Please provide a valid
-cache path"*. Handing the path over as a plain string lets the compiler create
-the directory itself.
-
-Nothing to do with this plugin — it bites any app on 4.x — but it is the first
-thing you will hit, so it is written down here.
+4.0.1 recreates those directories after the exclusions run, so the workaround
+is no longer needed and the published config can go. Nothing to do with this
+plugin either way — it bit any app on 4.0.0 — but it is written down because
+it is the first thing you would have hit.
 
 ## Platform support
 
