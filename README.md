@@ -32,7 +32,7 @@ passes are the whole of what makes them different.
 - ✍️ **True native editing** — the platform text engine, keyboard, autocorrect and selection, not a webview
 - 🅱️ **Inline marks** — bold, italic, underline, strikethrough, inline code, links, text color, highlight
 - 📑 **Blocks** — H1–H3, bullet / ordered lists, **checklists**, blockquote, dividers
-- 🖼️ **Media** — images, video and attachments, with a pending state while your app uploads
+- 🖼️ **Media** — images, video and attachments. A video card shows its own first frame; an upload in flight says so, and one that failed says why, in red, so nothing spins forever
 - 📊 **Polls** — written inline, with per-answer pictures, an option cap and a length
 - 🧮 **Tables** — a grid of plain-text cells with an optional header row, saved as a real `<table>` rather than an opaque blob
 - 🙋 **Mentions and hashtags** — the editor spots the trigger, YOUR app answers with who matches, and the pick is saved as a link carrying the entity id
@@ -49,6 +49,25 @@ passes are the whole of what makes them different.
 - 💾 **Auto-save seam** — a debounced `ContentChanged` event; the editor stays out of your database
 - 📦 **Zero dependencies** — no third-party native libraries, no permissions, no network
 - 🍏 🤖 **iOS + Android** behind one PHP API
+
+## What it does not do
+
+Worth knowing before you adopt it rather than after:
+
+- **Blocks cannot be reordered.** There is no move up/down and no drag and
+  drop, for text or for media. Moving a picture means removing it and inserting
+  it again where you want it.
+- **It ships no picker and no uploader.** That is deliberate — see
+  [Inserting media](#inserting-media) — but it does mean media is work you
+  wire up, with your own plugins and your own upload stack.
+- **It does not resize or compress anything.** The file you hand it is the file
+  it shows and the file you send. Optimising it is yours to do, in the moment
+  between picking and inserting. Be aware that the PHP inside a NativePHP app
+  has no usable GD, so that work belongs in a native plugin or on your server.
+- **No tables inside lists, and no nested lists.** The document model is flat
+  by design; a phone has no room for the alternative.
+- **Handwriting and drawing are out of scope.** They need PencilKit and an
+  Android equivalent, and this is a text editor.
 
 ## Requirements
 

@@ -5,6 +5,17 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.6] - 2026-08-01
+
+### Changed
+
+- **The README says what the plugin does not do.** Blocks cannot be reordered,
+  nothing is resized or compressed for you, there is no picker or uploader, and
+  lists do not nest — all true before, none of it written down. Better found in
+  a list than after adopting it.
+- The media bullet now describes the states that exist: a video card shows its
+  own first frame, an upload in flight says so, and a failed one says why.
+
 ## [0.8.5] - 2026-08-01
 
 ### Fixed
