@@ -5374,8 +5374,17 @@ private struct MediaCardView: View {
         return block.attrs["localPath"] ?? ""
     }
 
+    /// What went wrong, when the host reported a failure.
+    private var uploadError: String {
+        block.attrs["uploadError"] ?? ""
+    }
+
     private var pending: Bool {
-        (block.attrs["src"] ?? "").isEmpty && !(block.attrs["uploadId"] ?? "").isEmpty
+        // A block that FAILED is not pending. It was, and saying so forever is
+        // the exact spinner-that-never-ends this state exists to prevent.
+        uploadError.isEmpty
+            && (block.attrs["src"] ?? "").isEmpty
+            && !(block.attrs["uploadId"] ?? "").isEmpty
     }
 
     private var label: String {
@@ -5443,6 +5452,15 @@ private struct MediaCardView: View {
                     Text(localized(strings, "uploading", "Uploading…"))
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(theme.accentColor)
+                }
+
+                // The host said the upload failed. Saying so is the whole
+                // point of having been told: the picture is still here on the
+                // device, and the person can remove it and try again.
+                if !uploadError.isEmpty {
+                    Text(uploadError)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(red: 0.94, green: 0.27, blue: 0.27))
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

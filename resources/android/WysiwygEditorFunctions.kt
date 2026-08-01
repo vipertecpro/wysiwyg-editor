@@ -5372,8 +5372,14 @@ private fun MediaCard(
         return
     }
 
-    val pending = (block.attrs["src"].orEmpty().isEmpty() &&
-        block.attrs["uploadId"].orEmpty().isNotEmpty())
+    /** What went wrong, when the host reported a failure. */
+    val uploadError = block.attrs["uploadError"].orEmpty()
+
+    // A block that FAILED is not pending. It was, and saying so forever is the
+    // exact spinner-that-never-ends this state exists to prevent.
+    val pending = uploadError.isEmpty() &&
+        block.attrs["src"].orEmpty().isEmpty() &&
+        block.attrs["uploadId"].orEmpty().isNotEmpty()
 
     val label = when (block.type) {
         "image" -> block.attrs["alt"]?.takeIf { it.isNotEmpty() } ?: "Image"
@@ -5467,6 +5473,21 @@ private fun MediaCard(
             BasicText(
                 text = localized(strings, "uploading", "Uploading…"),
                 style = TextStyle(color = accent, fontSize = 12.sp, fontWeight = FontWeight.Medium),
+            )
+        }
+
+        // The host said the upload failed. Saying so is the whole point of
+        // having been told: the file is still here on the device, and the
+        // person can remove it and try again.
+        if (uploadError.isNotEmpty()) {
+            Box(modifier = Modifier.height(6.dp))
+            BasicText(
+                text = uploadError,
+                style = TextStyle(
+                    color = Color(0xFFEF4444),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                ),
             )
         }
     }

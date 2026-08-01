@@ -1657,3 +1657,30 @@ describe('A video card shows what the video contains', function () {
         ],
     ]);
 });
+
+describe('A failed upload says so', function () {
+    /**
+     * `uploadFailed()` sets `uploadError` on the block — and for a long time
+     * nothing read it. The card went on saying "Uploading…" in the accent
+     * colour forever, which is precisely the spinner-that-never-ends the state
+     * was added to prevent. The file was still on the device the whole time;
+     * nobody was told they could remove it and try again.
+     */
+    it('reads back the error it was given', function (string $file) {
+        $source = file_get_contents($this->pluginPath.$file);
+
+        // Written when the host reports a failure…
+        expect(substr_count($source, 'uploadError'))->toBeGreaterThan(1,
+            'uploadError is set but never read in '.$file);
+    })->with([
+        '/resources/ios/WysiwygEditorFunctions.swift',
+        '/resources/android/WysiwygEditorFunctions.kt',
+    ]);
+
+    it('stops calling a failed upload pending', function (string $file, string $signature) {
+        expect(file_get_contents($this->pluginPath.$file))->toContain($signature);
+    })->with([
+        ['/resources/ios/WysiwygEditorFunctions.swift', 'uploadError.isEmpty'],
+        ['/resources/android/WysiwygEditorFunctions.kt', 'uploadError.isEmpty()'],
+    ]);
+});

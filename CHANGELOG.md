@@ -5,6 +5,17 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-08-01
+
+### Fixed
+
+- **A failed upload said "Uploading…" forever.** `uploadFailed()` set
+  `uploadError` on the block and nothing ever read it, so a block whose upload
+  had failed went on showing the pending label in the accent colour with no way
+  to tell it apart from one still in flight — the exact spinner-that-never-ends
+  the state was added to prevent. The message the host sent is now shown, in
+  red, and a failed block is no longer counted as pending. Both platforms.
+
 ## [0.8.4] - 2026-08-01
 
 ### Fixed
