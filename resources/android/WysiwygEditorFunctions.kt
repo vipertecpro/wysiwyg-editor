@@ -2837,6 +2837,15 @@ internal object Styler {
         val source = if (blocks.isEmpty()) listOf(WysiwygBlock("p")) else blocks
         var ordinal = 1
 
+        // Block styling waits until the whole string exists. Applied inside
+        // the loop, every block was momentarily the LAST one — so every block
+        // took the "typing at the end must extend this" branch, and its spans
+        // then swallowed everything appended after it. Android SUMS
+        // overlapping leading margins, so a document containing N quotes
+        // marched N indents to the right. Invisible in a paragraph or two and
+        // unmistakable at six hundred.
+        val pending = mutableListOf<Triple<Int, Int, String>>()
+
         source.forEachIndexed { index, block ->
             if (index > 0) out.append('\n')
             val start = out.length
@@ -2864,7 +2873,7 @@ internal object Styler {
                 applyMarks(out, runStart, out.length, run.marks, theme, night)
             }
 
-            applyBlockStyle(out, start, out.length, block.type, theme, night, typography)
+            pending.add(Triple(start, out.length, block.type))
 
             if (background != null) {
                 // A few words held large is the whole point; the ramp between
@@ -2882,6 +2891,10 @@ internal object Styler {
                     start, out.length, android.text.Spanned.SPAN_PARAGRAPH,
                 )
             }
+        }
+
+        for ((start, end, type) in pending) {
+            applyBlockStyle(out, start, end, type, theme, night, typography)
         }
 
         return out

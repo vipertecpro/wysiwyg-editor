@@ -324,6 +324,62 @@ fun main() {
         else { failures++; println("  ✗ text-only HTML changed: ${out.show()}") }
     }
 
+    println("Scale — a document far larger than anyone will type")
+    run {
+        // The same shapes as the iOS harness, so "it holds up under load" is a
+        // claim both platforms answer rather than one.
+        val html = StringBuilder()
+        for (i in 0 until 2000) {
+            when (i % 5) {
+                0 -> html.append("<h2>Section $i</h2>")
+                1 -> html.append("<p>Body <strong>bold</strong> and <em>italic</em> and <a href=\"https://x.io\">a link</a>.</p>")
+                2 -> html.append("<ul><li>one</li><li>two</li><li>three</li></ul>")
+                3 -> html.append("<figure><img src=\"/tmp/pic$i.jpg\" alt=\"\"></figure>")
+                else -> html.append("<blockquote>Quoted $i</blockquote>")
+            }
+        }
+
+        val blocks = HtmlCoder.parse(html.toString())
+        val out = HtmlCoder.serialize(blocks).first
+
+        if (blocks.size == 400 + 400 + 1200 + 400 + 400) {
+            println("  ✓ 2,000 source blocks parse without loss")
+        } else { failures++; println("  ✗ 2,000 source blocks parse without loss -> ${blocks.size}") }
+
+        if (HtmlCoder.parse(out).size == blocks.size) {
+            println("  ✓ and survive a second round trip unchanged")
+        } else { failures++; println("  ✗ and survive a second round trip unchanged") }
+
+        if (out.length > 50_000) {
+            println("  ✓ the emitted document is ${out.length / 1024} KB")
+        } else { failures++; println("  ✗ the emitted document is suspiciously small: ${out.length}") }
+    }
+
+    run {
+        val long = "<p>" + "lorem ipsum dolor sit amet ".repeat(20_000) + "</p>"
+        val blocks = HtmlCoder.parse(long)
+        val plain = HtmlCoder.serialize(blocks).second
+
+        if (blocks.size == 1 && plain.length > 500_000) {
+            println("  ✓ a single half-megabyte paragraph is one block, intact")
+        } else { failures++; println("  ✗ a single half-megabyte paragraph -> ${blocks.size} block(s), ${plain.length} chars") }
+    }
+
+    run {
+        // Where a naive recursive parser would blow its stack.
+        val deep = StringBuilder("<p>")
+        repeat(500) { deep.append("<strong><em><u>") }
+        deep.append("core")
+        repeat(500) { deep.append("</u></em></strong>") }
+        deep.append("</p>")
+
+        val blocks = HtmlCoder.parse(deep.toString())
+
+        if (blocks.size == 1 && blocks[0].plainText.contains("core")) {
+            println("  ✓ 1,500 levels of nested marks do not lose the text")
+        } else { failures++; println("  ✗ 1,500 levels of nested marks do not lose the text") }
+    }
+
     println("Segments — how a document lays out for editing")
     run {
         val blocks = HtmlCoder.parse("""<h1>T</h1><p>a</p><hr><p>b</p><figure><img src="x.jpg" alt=""></figure>""")

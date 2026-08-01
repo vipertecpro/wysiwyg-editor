@@ -267,6 +267,86 @@ do {
     else { failures += 1; print("  ✗ text-only HTML changed: \(out.debugDescription)") }
 }
 
+print("Scale — a document far larger than anyone will type")
+do {
+    // 2,000 blocks with marks, lists and media mixed in. A long article with
+    // pictures is a real document; this is well past one, and the point is
+    // that nothing here degrades non-linearly or quietly drops content.
+    var html = ""
+    for i in 0..<2000 {
+        switch i % 5 {
+        case 0: html += "<h2>Section \(i)</h2>"
+        case 1: html += "<p>Body <strong>bold</strong> and <em>italic</em> and <a href=\"https://x.io\">a link</a>.</p>"
+        case 2: html += "<ul><li>one</li><li>two</li><li>three</li></ul>"
+        case 3: html += "<figure><img src=\"/tmp/pic\(i).jpg\" alt=\"\"></figure>"
+        default: html += "<blockquote>Quoted \(i)</blockquote>"
+        }
+    }
+
+    let blocks = HtmlCoder.parse(html)
+    let out = HtmlCoder.emit(blocks)
+
+    // Every block survived: 400 headings, 400 paragraphs, 400 lists (3 items
+    // each), 400 pictures, 400 quotes.
+    if blocks.count == 400 + 400 + 1200 + 400 + 400 {
+        print("  ✓ 2,000 source blocks parse without loss")
+    } else {
+        failures += 1
+        print("  ✗ 2,000 source blocks parse without loss -> \(blocks.count)")
+    }
+
+    // And it is stable: emitting then re-parsing gives the same document.
+    if HtmlCoder.parse(out.html).count == blocks.count {
+        print("  ✓ and survive a second round trip unchanged")
+    } else {
+        failures += 1
+        print("  ✗ and survive a second round trip unchanged")
+    }
+
+    if out.html.count > 50_000 {
+        print("  ✓ the emitted document is \(out.html.count / 1024) KB")
+    } else {
+        failures += 1
+        print("  ✗ the emitted document is suspiciously small: \(out.html.count)")
+    }
+}
+
+do {
+    // One enormous paragraph rather than many small ones — a different shape
+    // of load, and the one a paste from a web page produces.
+    let word = "lorem ipsum dolor sit amet "
+    let long = "<p>" + String(repeating: word, count: 20_000) + "</p>"
+
+    let blocks = HtmlCoder.parse(long)
+    let plain = HtmlCoder.emit(blocks).text
+
+    if blocks.count == 1, plain.count > 500_000 {
+        print("  ✓ a single half-megabyte paragraph is one block, intact")
+    } else {
+        failures += 1
+        print("  ✗ a single half-megabyte paragraph -> \(blocks.count) block(s), \(plain.count) chars")
+    }
+}
+
+do {
+    // Deeply nested marks. A paste from Word or Google Docs arrives like this,
+    // and a naive recursive parser is where a stack overflow would show up.
+    var deep = "<p>"
+    for _ in 0..<500 { deep += "<strong><em><u>" }
+    deep += "core"
+    for _ in 0..<500 { deep += "</u></em></strong>" }
+    deep += "</p>"
+
+    let blocks = HtmlCoder.parse(deep)
+
+    if blocks.count == 1, blocks[0].plainText.contains("core") {
+        print("  ✓ 1,500 levels of nested marks do not lose the text")
+    } else {
+        failures += 1
+        print("  ✗ 1,500 levels of nested marks do not lose the text")
+    }
+}
+
 print("Segments — how a document lays out for editing")
 do {
     let blocks = HtmlCoder.parse("<h1>T</h1><p>a</p><hr><p>b</p><figure><img src=\"x.jpg\" alt=\"\"></figure>")

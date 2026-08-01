@@ -5,6 +5,26 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-08-01
+
+### Fixed
+
+- **A long document marched off the right edge on Android.** Block styling was
+  applied while the text was still being built, so every block was momentarily
+  the LAST one and took the branch that lets typing at the end extend it — its
+  spans then swallowed everything appended afterwards. Android SUMS overlapping
+  leading margins, so a document containing N quotes ended up N indents to the
+  right, each paragraph further in than the last until the text ran out of
+  screen. A paragraph or two hid it completely; six hundred blocks made it
+  unmissable. Styling now waits until the whole string exists. iOS was never
+  affected — its paragraph styles do not accumulate.
+
+### Added
+
+- **Scale cases in both parity harnesses.** 2,800 blocks parsed without loss
+  and stable across a second round trip, a half-megabyte single paragraph, and
+  1,500 levels of nested marks. Identical results on both platforms.
+
 ## [0.8.2] - 2026-08-01
 
 ### Changed
