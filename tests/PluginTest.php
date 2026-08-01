@@ -1627,3 +1627,33 @@ describe('Reading the live editor back', function () {
         ],
     ]);
 });
+
+describe('A video card shows what the video contains', function () {
+    /**
+     * The picture on a video card is its first frame, decoded through the
+     * platform's AV stack rather than its image decoder. Which stack to use
+     * was chosen by sniffing the file EXTENSION — and a file picked from the
+     * gallery arrives at a cache path with no extension at all, so a real
+     * video was told it was not one and the card fell back to a grey glyph.
+     *
+     * The block already knows what it is. It has to be asked.
+     */
+    it('decides by block type, not by filename', function (string $file, string $signature) {
+        $source = file_get_contents($this->pluginPath.$file);
+
+        expect($source)->toContain($signature);
+
+        // And the sniff survives as a fallback for a source that arrives with
+        // no block behind it at all — a poster URL, say.
+        expect($source)->toContain('isVideoSource');
+    })->with([
+        [
+            '/resources/ios/WysiwygEditorFunctions.swift',
+            'if isVideo || isVideoSource(source)',
+        ],
+        [
+            '/resources/android/WysiwygEditorFunctions.kt',
+            'if (isVideo || isVideoSource(source))',
+        ],
+    ]);
+});

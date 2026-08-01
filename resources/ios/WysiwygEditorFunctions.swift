@@ -5190,8 +5190,9 @@ private struct MediaThumbnail: View {
         .task(id: source) {
             guard !source.isEmpty, ["image", "video"].contains(block.type) else { return }
             let path = source
+            let blockType = block.type
             image = await Task.detached(priority: .userInitiated) {
-                decodeMediaImage(path, maxPixels: 600)
+                decodeMediaImage(path, maxPixels: 600, isVideo: blockType == "video")
             }.value
         }
     }
@@ -5310,11 +5311,17 @@ func videoPoster(_ source: String, maxPixels: Int) -> UIImage? {
 /// full-resolution camera photo cannot blow up memory in a scrolling document.
 /// Hand-rolled rather than pulling in an image library — the plugin stays
 /// dependency-free, like the rest of it.
-func decodeMediaImage(_ source: String, maxPixels: Int = 1200) -> UIImage? {
+func decodeMediaImage(_ source: String, maxPixels: Int = 1200, isVideo: Bool = false) -> UIImage? {
     // A video is not an image file — CGImageSource cannot read one, so without
     // this a video card shows a grey placeholder instead of what it contains.
     // AVFoundation is already linked for playback, so the frame is free.
-    if isVideoSource(source) { return videoPoster(source, maxPixels: maxPixels) }
+    //
+    // `isVideo` comes from the BLOCK, and the block is the only reliable
+    // witness: a file picked from the gallery arrives at a cache path with no
+    // extension at all, so sniffing the name says "not a video" about a video
+    // and the card falls back to its glyph. The name is a hint; the type is a
+    // fact.
+    if isVideo || isVideoSource(source) { return videoPoster(source, maxPixels: maxPixels) }
 
     let url: URL?
     if source.lowercased().hasPrefix("http://") || source.lowercased().hasPrefix("https://") {
@@ -5446,8 +5453,9 @@ private struct MediaCardView: View {
             .task(id: source) {
                 guard !source.isEmpty,
                       ["image", "video", "embed"].contains(block.type) else { return }
+                let blockType = block.type
                 let decoded = await Task.detached(priority: .userInitiated) {
-                    decodeMediaImage(source)
+                    decodeMediaImage(source, isVideo: blockType == "video")
                 }.value
                 image = decoded
             }

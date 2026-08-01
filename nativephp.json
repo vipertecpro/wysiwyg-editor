@@ -1,6 +1,6 @@
 {
     "name": "vipertecpro/wysiwyg-editor",
-    "version": "0.8.3",
+    "version": "0.8.4",
     "description": "A fully native, hand-written WYSIWYG rich text editor for NativePHP Mobile — a full-screen editor with a formatting toolbar above the keyboard (bold, italic, headings, lists, links, colors…), returning clean HTML via an event. No webview, no third-party libraries.",
     "namespace": "WysiwygEditor",
     "keywords": [

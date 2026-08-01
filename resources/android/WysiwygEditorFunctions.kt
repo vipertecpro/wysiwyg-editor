@@ -552,7 +552,7 @@ object WysiwygEditorFunctions {
                             finishCancelled()
                         }
                         .setCancelable(true)
-                        .show()
+                        .showThemed(accentOf(activity, config.theme))
 
                     return
                 }
@@ -565,7 +565,7 @@ object WysiwygEditorFunctions {
                     }
                     .setNegativeButton(localized(config.strings, "keepEditing", "Keep Editing"), null)
                     .setCancelable(true)
-                    .show()
+                    .showThemed(accentOf(activity, config.theme))
             }
 
             // System BACK → same as Cancel, so it can never orphan the overlay.
@@ -594,7 +594,7 @@ object WysiwygEditorFunctions {
                                 .setTitle(localized(config.strings, "cannotSaveTitle", "Cannot save yet"))
                                 .setMessage(problem)
                                 .setPositiveButton(localized(config.strings, "ok", "OK"), null)
-                                .show()
+                                .showThemed(accentOf(activity, config.theme))
                         } else {
                             val (html, text) = HtmlCoder.serialize(document, backgroundRef.value)
                             finishSaved(html, text, JsonCoder.encode(document, backgroundRef.value))
@@ -4774,7 +4774,7 @@ internal fun EditorScreen(
                                                     entries.removeAll { it.id == entry.id }
                                                     rebuildDocument()
                                                 }
-                                                .show()
+                                                .showThemed(accentOf(activity, config.theme))
                                         } else {
                                             entries.removeAll { it.id == entry.id }
                                             rebuildDocument()
@@ -4924,7 +4924,11 @@ internal fun EditorScreen(
                             controllers.remove(id)
                             rebuildDocument()
                         },
-                        onDescribe = { id -> showAltDialog(activity, entries, id, config.strings) { rebuildDocument() } },
+                        onDescribe = { id ->
+                            showAltDialog(activity, entries, id, config.strings, accentOf(activity, config.theme)) {
+                                rebuildDocument()
+                            }
+                        },
                         onEdit = onMediaEdit,
                     )
                 }
@@ -5053,7 +5057,7 @@ internal fun EditorScreen(
                         }
                         "table" -> insertBlock(newTable(config))
                 "divider" -> insertBlock(WysiwygBlock("divider"))
-                        "embed" -> showEmbedDialog(activity, config.strings) { url ->
+                        "embed" -> showEmbedDialog(activity, config.strings, accentOf(activity, config.theme)) { url ->
                             val block = WysiwygBlock("embed")
                             block.attrs["url"] = url
                             val provider = embedProvider(url)
@@ -5083,7 +5087,7 @@ internal fun EditorScreen(
                     }
                     "link" -> {
                         sheet.value = null
-                        runTool(tool, controller, palette, activity, config.strings, onRequestMedia)
+                        runTool(tool, controller, palette, activity, config.strings, accentOf(activity, config.theme), onRequestMedia)
                     }
                     "poll" -> {
                         // Composed HERE, not by the host: there is nothing to
@@ -5100,7 +5104,7 @@ internal fun EditorScreen(
                         sheet.value = null
                         onRequestMedia(tool)
                     }
-                    else -> runTool(tool, controller, palette, activity, config.strings, onRequestMedia)
+                    else -> runTool(tool, controller, palette, activity, config.strings, accentOf(activity, config.theme), onRequestMedia)
                 }
             }
 
@@ -5279,11 +5283,20 @@ internal fun videoPoster(source: String): android.graphics.Bitmap? {
     }
 }
 
-internal fun decodeMediaImage(source: String, maxPixels: Int = 1200): android.graphics.Bitmap? {
+internal fun decodeMediaImage(
+    source: String,
+    maxPixels: Int = 1200,
+    isVideo: Boolean = false,
+): android.graphics.Bitmap? {
     // A video is not an image file — the bitmap decoder cannot read one, so
     // without this a video card shows a grey placeholder instead of what it
     // contains.
-    if (isVideoSource(source)) return videoPoster(source)
+    //
+    // `isVideo` comes from the BLOCK, and the block is the only reliable
+    // witness: a file picked from the gallery arrives at a cache path with no
+    // extension at all, so sniffing the name says "not a video" about a video.
+    // The name is a hint; the type is a fact.
+    if (isVideo || isVideoSource(source)) return videoPoster(source)
 
     return try {
         val bytes: ByteArray = if (source.startsWith("http://", true) || source.startsWith("https://", true)) {
@@ -5383,7 +5396,10 @@ private fun MediaCard(
     if (source.isNotEmpty() && (block.type == "image" || block.type == "video")) {
         LaunchedEffect(source) {
             val decoded = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                decodeMediaImage(if (block.type == "video") block.attrs["poster"].orEmpty().ifEmpty { source } else source)
+                decodeMediaImage(
+                    if (block.type == "video") block.attrs["poster"].orEmpty().ifEmpty { source } else source,
+                    isVideo = block.type == "video",
+                )
             }
             bitmap.value = decoded
         }
@@ -5622,7 +5638,7 @@ private fun ToolbarRow(
                     highlightColor,
                     haptics,
                 ) {
-                    runTool(tool, controller, palette, activity, strings, onRequestMedia, onDocumentTool)
+                    runTool(tool, controller, palette, activity, strings, accentOf(activity, config.theme), onRequestMedia, onDocumentTool)
                 }
             }
 
@@ -5680,6 +5696,7 @@ private fun runTool(
     palette: androidx.compose.runtime.MutableState<String?>,
     activity: FragmentActivity,
     strings: Map<String, String>,
+    accent: Int,
     onRequestMedia: (String) -> Unit,
     onDocumentTool: (String) -> Unit = {},
 ) {
@@ -5692,7 +5709,7 @@ private fun runTool(
         "textColor" -> palette.value = if (palette.value == "textColor") null else "textColor"
         "highlight" -> palette.value = if (palette.value == "highlight") null else "highlight"
         "link" -> controller?.let { c ->
-            showLinkDialog(activity, c.currentLink(), strings, onDismiss = { c.refocus() }) { url ->
+            showLinkDialog(activity, c.currentLink(), strings, accent, onDismiss = { c.refocus() }) { url ->
                 c.setLink(url)
             }
         }
@@ -6740,7 +6757,7 @@ private fun MediaThumbnail(block: WysiwygBlock, foreground: Color) {
     if (source.isNotEmpty() && (block.type == "image" || block.type == "video")) {
         LaunchedEffect(source) {
             bitmap.value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                decodeMediaImage(source, 600)
+                decodeMediaImage(source, 600, isVideo = block.type == "video")
             }
         }
     }
@@ -7123,11 +7140,47 @@ private fun PaletteRow(colors: List<String>, foreground: Color, onPick: (String?
 /**
  * Ask for the description a screen reader will read out.
  */
+/**
+ * Show a dialog with its buttons in the editor's accent.
+ *
+ * An AlertDialog takes its button colour from the PLATFORM theme and knows
+ * nothing about the palette the app set — so a blue application put teal
+ * buttons in front of the user, on the one screen where the editor is asking
+ * whether to throw their work away. The buttons do not exist until show() has
+ * run, which is why this tints afterwards rather than in the builder.
+ */
+private fun android.app.AlertDialog.Builder.showThemed(accent: Int): android.app.AlertDialog {
+    val dialog = show()
+
+    for (which in intArrayOf(
+        android.content.DialogInterface.BUTTON_POSITIVE,
+        android.content.DialogInterface.BUTTON_NEGATIVE,
+        android.content.DialogInterface.BUTTON_NEUTRAL,
+    )) {
+        dialog.getButton(which)?.setTextColor(accent)
+    }
+
+    return dialog
+}
+
+/** The accent, resolved for whichever colour scheme is showing. */
+private fun accentOf(
+    activity: FragmentActivity,
+    theme: WysiwygEditorFunctions.EditorTheme,
+): Int {
+    val night = (activity.resources.configuration.uiMode and
+        android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+        android.content.res.Configuration.UI_MODE_NIGHT_YES
+
+    return theme.accentColor(night).toArgb()
+}
+
 private fun showAltDialog(
     activity: FragmentActivity,
     entries: MutableList<SegmentEntry>,
     entryId: Int,
     strings: Map<String, String>,
+    accent: Int,
     onDone: () -> Unit,
 ) {
     val index = entries.indexOfFirst { it.id == entryId }
@@ -7151,12 +7204,13 @@ private fun showAltDialog(
             entries[index] = SegmentEntry(entries[index].id, Segment.Media(block))
             onDone()
         }
-        .show()
+        .showThemed(accent)
 }
 
 private fun showEmbedDialog(
     activity: FragmentActivity,
     strings: Map<String, String>,
+    accent: Int,
     onApply: (String) -> Unit,
 ) {
     val input = android.widget.EditText(activity).apply {
@@ -7174,13 +7228,14 @@ private fun showEmbedDialog(
             val url = input.text.toString().trim()
             if (url.isNotEmpty()) onApply(url)
         }
-        .show()
+        .showThemed(accent)
 }
 
 private fun showLinkDialog(
     activity: FragmentActivity,
     current: String?,
     strings: Map<String, String>,
+    accent: Int,
     onDismiss: () -> Unit,
     onApply: (String?) -> Unit,
 ) {
@@ -7210,7 +7265,7 @@ private fun showLinkDialog(
     }
 
     builder.setOnDismissListener { onDismiss() }
-    builder.show()
+    builder.showThemed(accent)
 }
 
 private fun normalizeUrl(raw: String): String? {

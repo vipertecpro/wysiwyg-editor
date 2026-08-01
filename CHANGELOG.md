@@ -5,6 +5,22 @@ All notable changes to `vipertecpro/wysiwyg-editor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-08-01
+
+### Fixed
+
+- **A video card showed a grey glyph instead of its first frame.** Which
+  decoder to use — the image one or the AV one — was chosen by sniffing the
+  file EXTENSION, and a file picked from the gallery arrives at a cache path
+  with no extension at all, so a real video was told it was not one. The block
+  already knows what it is, and is now asked; the filename sniff stays as a
+  fallback for a bare source with no block behind it.
+- **Android dialogs used the platform accent rather than the app's.** An
+  AlertDialog takes its button colour from the system theme and knows nothing
+  about the palette the app set, so a blue application asked whether to discard
+  someone's work with teal buttons. Every dialog the editor raises is tinted
+  with the accent now.
+
 ## [0.8.3] - 2026-08-01
 
 ### Fixed
